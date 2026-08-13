@@ -498,52 +498,52 @@ pending = false
 pending = false
 
 [tests.T_CLI_LS_NO_VALUE]
-pending = true
+pending = false
 
 [tests.T_CLI_INFO_NO_VALUE]
-pending = true
+pending = false
 
 [tests.T_CLI_PROVIDERS_ENV]
-pending = true
+pending = false
 
 [tests.T_CLI_GEN_LEN]
-pending = true
+pending = false
 
 [tests.T_CLI_GITEA_ZERO]
-pending = true
+pending = false
 
 [tests.T_CLI_GITEA_TWO]
-pending = true
+pending = false
 
 [tests.T_CLI_GITEA_ONE]
-pending = true
+pending = false
 
 [tests.T_CLI_GITEA_REDACT]
-pending = true
+pending = false
 
 [tests.T_CLI_WITH_COLLISION]
-pending = true
+pending = false
 
 [tests.T_CLI_LOCKED]
-pending = true
+pending = false
 
 [tests.T_GIT_PARENT_NOT_GIT]
-pending = true
+pending = false
 
 [tests.T_GIT_WRONG_HOST]
-pending = true
+pending = false
 
 [tests.T_GIT_OK]
-pending = true
+pending = false
 
 [tests.T_KEYRING_ROUNDTRIP]
-pending = true
+pending = false
 
 [tests.T_SESSION_MODE]
-pending = true
+pending = false
 
 [tests.T_RUN_FILE_LEASE]
-pending = true
+pending = false
 
 [tests.T_UPD_BAD_HASH]
 pending = true
