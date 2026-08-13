@@ -1,4 +1,5 @@
-//! DEK in the kernel keyring (Linux) or macOS keychain. Not a file.
+//! DEK in the kernel keyring (Linux) or macOS keychain.
+//! If every keyctl path fails, last resort is `$XDG_RUNTIME_DIR/secd/` (tmpfs).
 
 use secd_core::Secret;
 
@@ -10,12 +11,15 @@ pub fn store(dek: &[u8]) -> anyhow::Result<()> {
         anyhow::bail!("dek must be 32 bytes");
     }
     let _ = delete();
-    backend::store(dek)
+    if backend::store(dek).is_ok() {
+        return Ok(());
+    }
+    runtime::store(dek)
 }
 
 /// Load the DEK for this `SECD_HOME`. Missing key is `None`.
 pub fn load() -> Option<Secret> {
-    let bytes = backend::load()?;
+    let bytes = backend::load().or_else(runtime::load)?;
     if bytes.len() != DEK_LEN {
         return None;
     }
@@ -24,7 +28,12 @@ pub fn load() -> Option<Secret> {
 
 /// Remove the DEK. Missing key is success.
 pub fn delete() -> anyhow::Result<()> {
-    backend::delete()
+    let _ = backend::delete();
+    let _ = runtime::delete();
+    if load().is_some() {
+        anyhow::bail!("keyring delete failed");
+    }
+    Ok(())
 }
 
 fn description() -> String {
@@ -36,6 +45,69 @@ fn description() -> String {
         h = h.wrapping_mul(0x100_0000_01b3);
     }
     format!("secd-dek-{h:016x}")
+}
+
+/// Tmpfs last resort. Not `SECD_HOME`. 0700 dir, 0600 file named as the key description.
+mod runtime {
+    use super::description;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::path::PathBuf;
+
+    fn dir() -> PathBuf {
+        if let Ok(p) = std::env::var("XDG_RUNTIME_DIR") {
+            if !p.is_empty() {
+                return PathBuf::from(p).join("secd");
+            }
+        }
+        PathBuf::from(format!("/run/user/{}/secd", uid()))
+    }
+
+    fn path() -> PathBuf {
+        dir().join(description())
+    }
+
+    fn uid() -> u32 {
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        // SAFETY: POSIX getuid has no preconditions.
+        unsafe { getuid() }
+    }
+
+    pub(super) fn store(dek: &[u8]) -> anyhow::Result<()> {
+        let dir = dir();
+        fs::create_dir_all(&dir)?;
+        let mut perms = fs::metadata(&dir)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(&dir, perms)?;
+        let path = dir.join(description());
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(dek)?;
+        f.flush()?;
+        let mut perms = f.metadata()?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+        Ok(())
+    }
+
+    pub(super) fn load() -> Option<Vec<u8>> {
+        fs::read(path()).ok()
+    }
+
+    pub(super) fn delete() -> anyhow::Result<()> {
+        match fs::remove_file(path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
