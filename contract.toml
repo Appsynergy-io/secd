@@ -108,82 +108,82 @@ pending = false
 pending = false
 
 [tests.T_AEAD_ROUNDTRIP]
-pending = true
+pending = false
 
 [tests.T_AEAD_WRONG_NAME]
-pending = true
+pending = false
 
 [tests.T_AEAD_TRUNCATED]
-pending = true
+pending = false
 
 [tests.T_AEAD_FLIP_BYTE]
-pending = true
+pending = false
 
 [tests.T_AEAD_EMPTY]
-pending = true
+pending = false
 
 [tests.T_WRAP_PASSWORD]
-pending = true
+pending = false
 
 [tests.T_WRAP_PASSWORD_WRONG]
-pending = true
+pending = false
 
 [tests.T_WRAP_PASSKEY]
-pending = true
+pending = false
 
 [tests.T_WRAP_PASSKEY_WRONG]
-pending = true
+pending = false
 
 [tests.T_WRAP_LAST_FACTOR]
-pending = true
+pending = false
 
 [tests.T_WRAP_TWO_FACTORS]
-pending = true
+pending = false
 
 [tests.T_NAME_OK]
-pending = true
+pending = false
 
 [tests.T_NAME_DOTDOT]
-pending = true
+pending = false
 
 [tests.T_NAME_SLASH]
-pending = true
+pending = false
 
 [tests.T_NAME_LONG]
-pending = true
+pending = false
 
 [tests.T_NAME_BAD_CHAR]
-pending = true
+pending = false
 
 [tests.T_GROUP_PREFIX]
-pending = true
+pending = false
 
 [tests.T_GROUP_DIR]
-pending = true
+pending = false
 
 [tests.T_GROUP_STRAY]
-pending = true
+pending = false
 
 [tests.T_REDACT_VALUE]
-pending = true
+pending = false
 
 [tests.T_REDACT_PARTIAL]
-pending = true
+pending = false
 
 [tests.T_PROVIDER_GITEA_ENV]
-pending = true
+pending = false
 
 [tests.T_PROVIDER_VAULT_SHARES]
-pending = true
+pending = false
 
 [tests.T_PROVIDER_COUNT]
-pending = true
+pending = false
 
 [tests.T_INFER_VAULT]
-pending = true
+pending = false
 
 [tests.T_INFER_AMBIGUOUS]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_EMPTY]
 pending = true
