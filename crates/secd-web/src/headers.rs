@@ -15,7 +15,7 @@ pub const RATE_SENTENCE: &str = "Too many attempts. Wait a minute.";
 
 const HSTS: &str = "max-age=63072000";
 const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
-const PERMISSIONS: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=(), interest-cohort=()";
+const PERMISSIONS: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=(), interest-cohort=()";
 
 const AUTH_BODY: usize = 64 * 1024;
 const VAULT_BODY: usize = 1024 * 1024;
@@ -96,15 +96,16 @@ fn apply_security_headers(path: &str, res: &mut Response) {
     insert(headers, header::PRAGMA, "no-cache");
     insert(headers, header::EXPIRES, "0");
     insert_name(headers, "x-robots-tag", "noindex, nofollow");
-    if path.starts_with("/api/") {
-        insert(
-            headers,
-            header::CONTENT_TYPE,
-            "application/json; charset=UTF-8",
-        );
+    let content_type = if path.starts_with("/api/") {
+        "application/json; charset=UTF-8"
+    } else if path == "/app.js" {
+        "text/javascript; charset=UTF-8"
+    } else if path == "/app.css" {
+        "text/css; charset=UTF-8"
     } else {
-        insert(headers, header::CONTENT_TYPE, "text/html; charset=UTF-8");
-    }
+        "text/html; charset=UTF-8"
+    };
+    insert(headers, header::CONTENT_TYPE, content_type);
     headers.remove(header::SERVER);
     headers.remove("x-powered-by");
     headers.remove("x-aspnet-version");
