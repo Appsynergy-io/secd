@@ -58,6 +58,9 @@ tag="${RELEASE_TAG:-${GITHUB_REF_NAME:-}}"
 if [[ -z "$tag" && "${GITHUB_REF:-}" == refs/tags/* ]]; then
   tag="${GITHUB_REF#refs/tags/}"
 fi
+if [[ -z "$tag" || "$tag" == "main" || "$tag" == "refs/heads/main" ]]; then
+  tag="v${ver}"
+fi
 if [[ "$tag" != "v${ver}" ]]; then
   echo "release: tag ${tag:-<empty>} must equal v${ver}" >&2
   exit 1

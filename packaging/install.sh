@@ -33,7 +33,7 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-curl -fsSL --proto '=https' --tlsv1.3 -o "$TMP/latest.json" "$MANIFEST" \
+curl -fsSL --proto '=https' -o "$TMP/latest.json" "$MANIFEST" \
   || err "manifest fetch failed"
 
 eval "$(
@@ -60,7 +60,7 @@ print("WANT=%s" % json.dumps(sha))
 PY
 )"
 
-curl -fsSL --proto '=https' --tlsv1.3 -o "$TMP/secd" "$URL" || err "download failed"
+curl -fsSL --proto '=https' -o "$TMP/secd" "$URL" || err "download failed"
 GOT="$(sha256of "$TMP/secd")"
 [ "$GOT" = "$WANT" ] || err "sha256 mismatch"
 
