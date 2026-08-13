@@ -16,7 +16,16 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "=1.0.104"
 clap = "=4.6.6"
+crossterm = "=0.28.1"
+hex = "=0.4.3"
+ratatui = { version = "=0.29.0", default-features = false, features = ["crossterm"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls-pemfile = "=2.2.0"
 secd-core = { path = "crates/secd-core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets", "getrandom"] }
+zeroize = "=1.9.0"
 
 [dev-dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
