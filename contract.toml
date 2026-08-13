@@ -659,6 +659,12 @@ pending = false
 [tests.T_HDR_HTML_CT]
 pending = false
 
+[tests.T_HDR_JS_CT]
+pending = false
+
+[tests.T_HDR_CSS_CT]
+pending = false
+
 [tests.T_HDR_NO_SERVER]
 pending = false
 

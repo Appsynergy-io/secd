@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 const HSTS: &str = "max-age=63072000";
 const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
-const PERM: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), execution-while-not-rendered=(), execution-while-out-of-viewport=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=(), interest-cohort=()";
+const PERM: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=(), interest-cohort=()";
 
 const SEC: &[&str] = &[
     "strict-transport-security",
@@ -246,6 +246,26 @@ fn T_HDR_HTML_CT() {
         let h = fresh();
         let (_, hdrs, _) = exchange(&h.app, Method::GET, "/", None, None).await;
         assert_eq!(hv(&hdrs, "content-type"), "text/html; charset=UTF-8");
+    });
+}
+
+#[test]
+fn T_HDR_JS_CT() {
+    block_on(async {
+        let h = fresh();
+        let (s, hdrs, _) = exchange(&h.app, Method::GET, "/app.js", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(hv(&hdrs, "content-type"), "text/javascript; charset=UTF-8");
+    });
+}
+
+#[test]
+fn T_HDR_CSS_CT() {
+    block_on(async {
+        let h = fresh();
+        let (s, hdrs, _) = exchange(&h.app, Method::GET, "/app.css", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(hv(&hdrs, "content-type"), "text/css; charset=UTF-8");
     });
 }
 
