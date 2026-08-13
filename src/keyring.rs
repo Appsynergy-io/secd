@@ -41,35 +41,127 @@ fn description() -> String {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod backend {
     use super::description;
-    use anyhow::Context;
     use std::ffi::CString;
 
     const SYS_ADD_KEY: i64 = 248;
     const SYS_REQUEST_KEY: i64 = 249;
     const SYS_KEYCTL: i64 = 250;
+    const KEY_SPEC_SESSION_KEYRING: i64 = -3;
     const KEY_SPEC_USER_KEYRING: i64 = -4;
+    const KEYCTL_JOIN_SESSION_KEYRING: i64 = 1;
+    const KEYCTL_SEARCH: i64 = 10;
     const KEYCTL_READ: i64 = 11;
     const KEYCTL_INVALIDATE: i64 = 21;
+    const EPERM: i64 = 1;
+    const EACCES: i64 = 13;
 
     pub(super) fn store(dek: &[u8]) -> anyhow::Result<()> {
+        if add(dek, KEY_SPEC_USER_KEYRING).is_ok() {
+            return Ok(());
+        }
+        if add(dek, KEY_SPEC_SESSION_KEYRING).is_ok() {
+            return Ok(());
+        }
+        let sid = new_session()?;
+        add(dek, KEY_SPEC_SESSION_KEYRING)
+            .or_else(|_| add(dek, sid))
+            .map_err(|e| anyhow::anyhow!("keyring add failed ({e})"))?;
+        Ok(())
+    }
+
+    pub(super) fn load() -> Option<Vec<u8>> {
+        let id = find()?;
+        read_key(id)
+    }
+
+    pub(super) fn delete() -> anyhow::Result<()> {
+        let Some(id) = find() else {
+            return Ok(());
+        };
+        let rc = sys5(SYS_KEYCTL, KEYCTL_INVALIDATE, id, 0, 0, 0);
+        if rc < 0 {
+            anyhow::bail!("keyring delete failed ({})", -rc);
+        }
+        Ok(())
+    }
+
+    fn add(dek: &[u8], ring: i64) -> Result<i64, i64> {
         let typ = CString::new("user").expect("invariant: type has no nul");
-        let desc = CString::new(description()).context("key description")?;
+        let desc = CString::new(description()).expect("invariant: key description has no nul");
         let id = sys5(
             SYS_ADD_KEY,
             typ.as_ptr() as i64,
             desc.as_ptr() as i64,
             dek.as_ptr() as i64,
             dek.len() as i64,
-            KEY_SPEC_USER_KEYRING,
+            ring,
         );
         if id < 0 {
-            anyhow::bail!("keyring add failed ({})", -id);
+            Err(-id)
+        } else {
+            Ok(id)
         }
-        Ok(())
     }
 
-    pub(super) fn load() -> Option<Vec<u8>> {
-        let id = find()?;
+    /// `keyctl new_session`: anonymous session keyring for this process.
+    fn new_session() -> anyhow::Result<i64> {
+        let id = sys5(SYS_KEYCTL, KEYCTL_JOIN_SESSION_KEYRING, 0, 0, 0, 0);
+        if id < 0 {
+            anyhow::bail!("keyring session failed ({})", -id);
+        }
+        Ok(id)
+    }
+
+    fn search(ring: i64) -> Result<i64, i64> {
+        let typ = CString::new("user").expect("invariant: type has no nul");
+        let desc = CString::new(description()).expect("invariant: key description has no nul");
+        let id = sys5(
+            SYS_KEYCTL,
+            KEYCTL_SEARCH,
+            ring,
+            typ.as_ptr() as i64,
+            desc.as_ptr() as i64,
+            0,
+        );
+        if id < 0 {
+            Err(-id)
+        } else {
+            Ok(id)
+        }
+    }
+
+    fn find() -> Option<i64> {
+        if let Ok(id) = search(KEY_SPEC_USER_KEYRING) {
+            return Some(id);
+        }
+        match search(KEY_SPEC_SESSION_KEYRING) {
+            Ok(id) => return Some(id),
+            Err(e) if e == EPERM || e == EACCES => {
+                let _ = new_session();
+                if let Ok(id) = search(KEY_SPEC_SESSION_KEYRING) {
+                    return Some(id);
+                }
+            }
+            Err(_) => {}
+        }
+        let typ = CString::new("user").ok()?;
+        let desc = CString::new(description()).ok()?;
+        let id = sys5(
+            SYS_REQUEST_KEY,
+            typ.as_ptr() as i64,
+            desc.as_ptr() as i64,
+            0,
+            0,
+            0,
+        );
+        if id >= 0 {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    fn read_key(id: i64) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; 64];
         let n = sys5(
             SYS_KEYCTL,
@@ -101,35 +193,6 @@ mod backend {
             buf.truncate(n);
         }
         Some(buf)
-    }
-
-    pub(super) fn delete() -> anyhow::Result<()> {
-        let Some(id) = find() else {
-            return Ok(());
-        };
-        let rc = sys5(SYS_KEYCTL, KEYCTL_INVALIDATE, id, 0, 0, 0);
-        if rc < 0 {
-            anyhow::bail!("keyring delete failed ({})", -rc);
-        }
-        Ok(())
-    }
-
-    fn find() -> Option<i64> {
-        let typ = CString::new("user").ok()?;
-        let desc = CString::new(description()).ok()?;
-        let id = sys5(
-            SYS_REQUEST_KEY,
-            typ.as_ptr() as i64,
-            desc.as_ptr() as i64,
-            0,
-            KEY_SPEC_USER_KEYRING,
-            0,
-        );
-        if id < 0 {
-            None
-        } else {
-            Some(id)
-        }
     }
 
     fn sys5(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
