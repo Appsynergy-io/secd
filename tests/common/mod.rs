@@ -44,18 +44,43 @@ pub struct Assets {
 pub struct Harness {
     pub home: PathBuf,
     pub runtime: PathBuf,
-    desc: String,
     port: u16,
     _data: PathBuf,
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        invalidate_key(&self.desc);
+        let _ = with_secd_home(&self.home, secd::keyring::delete);
         let _ = fs::remove_dir_all(&self.home);
         let _ = fs::remove_dir_all(&self.runtime);
         let _ = fs::remove_dir_all(&self._data);
     }
+}
+
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn set_var(key: &str, val: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: caller holds ENV; only T7 tests mutate these keys.
+    unsafe { std::env::set_var(key, val) }
+}
+
+pub fn remove_var(key: &str) {
+    // SAFETY: caller holds ENV.
+    unsafe { std::env::remove_var(key) }
+}
+
+pub fn with_secd_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+    let _g = env_lock();
+    let prev = std::env::var_os("SECD_HOME");
+    set_var("SECD_HOME", home);
+    let out = f();
+    match prev {
+        Some(v) => set_var("SECD_HOME", v),
+        None => remove_var("SECD_HOME"),
+    }
+    out
 }
 
 pub fn assets() -> &'static Assets {
@@ -148,14 +173,12 @@ impl Harness {
         wait_port(addr);
 
         write_session(&home, token.as_bytes());
-        let desc = dek_desc(&home);
-        padd_key(&desc, &dek);
+        with_secd_home(&home, || secd::keyring::store(&dek).expect("store"));
         dek.zeroize();
 
         Self {
             home,
             runtime,
-            desc,
             port: addr.port(),
             _data: data,
         }
@@ -377,49 +400,6 @@ fn write_session(home: &Path, token: &[u8]) {
     let mut perms = f.metadata().expect("meta").permissions();
     perms.set_mode(0o600);
     fs::set_permissions(&path, perms).expect("session mode");
-}
-
-pub fn dek_desc(home: &Path) -> String {
-    let raw = home.to_string_lossy();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in raw.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    format!("secd-dek-{h:016x}")
-}
-
-fn padd_key(desc: &str, dek: &[u8]) {
-    let mut child = Command::new("keyctl")
-        .args(["padd", "user", desc, "@u"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("keyctl padd");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        stdin.write_all(dek).expect("dek write");
-    }
-    let out = child.wait_with_output().expect("keyctl wait");
-    assert!(out.status.success(), "keyctl padd failed");
-}
-
-fn invalidate_key(desc: &str) {
-    let out = Command::new("keyctl")
-        .args(["search", "@u", "user", desc])
-        .output();
-    let Ok(out) = out else {
-        return;
-    };
-    if !out.status.success() {
-        return;
-    }
-    let id = utf8(&out.stdout);
-    let id = id.trim();
-    if !id.is_empty() {
-        let _ = Command::new("keyctl").args(["invalidate", id]).status();
-    }
 }
 
 fn chmod_exec(path: &Path) {

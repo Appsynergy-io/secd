@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize;
 
 use common::{
-    assert_no_value, gitea_blob, isolated_secd, sha256, utf8, Harness, ENV, FIXTURE, GITEA_URL,
-    LOCKED,
+    assert_no_value, env_lock, gitea_blob, isolated_secd, remove_var, set_var, sha256, utf8,
+    with_secd_home, Harness, FIXTURE, GITEA_URL, LOCKED,
 };
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -24,16 +24,6 @@ fn tmp(tag: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&p);
     fs::create_dir_all(&p).expect("tmp");
     p
-}
-
-fn set_var(key: &str, val: &str) {
-    // SAFETY: caller holds ENV; only these tests mutate this process env.
-    unsafe { std::env::set_var(key, val) }
-}
-
-fn remove_var(key: &str) {
-    // SAFETY: caller holds ENV.
-    unsafe { std::env::remove_var(key) }
 }
 
 #[test]
@@ -221,52 +211,42 @@ fn T_CLI_LOCKED() {
 
 #[test]
 fn T_KEYRING_ROUNDTRIP() {
-    let _g = ENV.lock().expect("env lock");
     let home = tmp("keyring");
-    let prev = std::env::var_os("SECD_HOME");
-    set_var("SECD_HOME", home.to_str().expect("utf8 home"));
     let mut dek = [0u8; 32];
     fs::File::open("/dev/urandom")
         .expect("urandom")
         .read_exact(&mut dek)
         .expect("dek");
-    secd::keyring::store(&dek).expect("store");
-    let loaded = secd::keyring::load().expect("load");
-    let ok = sha256(loaded.as_bytes()) == sha256(&dek);
-    drop(loaded);
-    assert!(ok, "loaded DEK hash mismatch");
-    secd::logout::run().expect("logout");
-    assert!(
-        secd::keyring::load().is_none(),
-        "logout must delete the DEK"
-    );
+    with_secd_home(&home, || {
+        secd::keyring::store(&dek).expect("store");
+        let loaded = secd::keyring::load().expect("load");
+        let ok = sha256(loaded.as_bytes()) == sha256(&dek);
+        drop(loaded);
+        assert!(ok, "loaded DEK hash mismatch");
+        secd::logout::run().expect("logout");
+        assert!(
+            secd::keyring::load().is_none(),
+            "logout must delete the DEK"
+        );
+    });
     dek.zeroize();
-    match prev {
-        Some(v) => set_var("SECD_HOME", v.to_str().unwrap_or("")),
-        None => remove_var("SECD_HOME"),
-    }
 }
 
 #[test]
 fn T_SESSION_MODE() {
-    let _g = ENV.lock().expect("env lock");
     let home = tmp("session");
-    let prev = std::env::var_os("SECD_HOME");
-    set_var("SECD_HOME", home.to_str().expect("utf8 home"));
-    secd::login::save_session("t7-session").expect("save_session");
-    let path = secd::login::session_path();
-    let meta = fs::metadata(&path).expect("session meta");
-    let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "login.session must be 0600");
-    match prev {
-        Some(v) => set_var("SECD_HOME", v.to_str().unwrap_or("")),
-        None => remove_var("SECD_HOME"),
-    }
+    with_secd_home(&home, || {
+        secd::login::save_session("t7-session").expect("save_session");
+        let path = secd::login::session_path();
+        let meta = fs::metadata(&path).expect("session meta");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "login.session must be 0600");
+    });
 }
 
 #[test]
 fn T_RUN_FILE_LEASE() {
-    let _g = ENV.lock().expect("env lock");
+    let _g = env_lock();
     let runtime = tmp("lease");
     let prev = std::env::var_os("XDG_RUNTIME_DIR");
     set_var("XDG_RUNTIME_DIR", runtime.to_str().expect("utf8 runtime"));
