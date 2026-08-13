@@ -1,0 +1,9 @@
+[package]
+name = "secd-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "=0.2.189"
+zeroize = "=1.9.0"

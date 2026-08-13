@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/secd-core"]
+resolver = "2"
+
+[package]
+name = "secd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "LAN secrets store"
+
+[[bin]]
+name = "secd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+clap = "=4.6.6"
+secd-core = { path = "crates/secd-core" }
