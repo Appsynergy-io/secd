@@ -135,6 +135,47 @@ with open(dest, "w", encoding="utf-8") as f:
 PY
 }
 
+smoke_linux() {
+  local bin="$1" kind="$2"
+  if ! command -v file >/dev/null 2>&1; then
+    echo "release: file is required" >&2
+    exit 1
+  fi
+  if ! command -v readelf >/dev/null 2>&1; then
+    echo "release: readelf is required" >&2
+    exit 1
+  fi
+  local info
+  info="$(file -b "$bin")"
+  if [[ "$info" != *static-pie* ]]; then
+    echo "release: ${bin} is not static-pie: ${info}" >&2
+    exit 1
+  fi
+  local headers
+  headers="$(readelf -l "$bin")"
+  if printf '%s\n' "$headers" | grep -q INTERP; then
+    echo "release: ${bin} has INTERP" >&2
+    exit 1
+  fi
+  case "$kind" in
+    secd)
+      local got
+      got="$("$bin" --version)"
+      if [[ "$got" != "secd ${ver}" ]]; then
+        echo "release: ${bin} --version was ${got}, want secd ${ver}" >&2
+        exit 1
+      fi
+      ;;
+    secd-web)
+      "$bin" --help >/dev/null
+      ;;
+    *)
+      echo "release: unknown smoke kind ${kind}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 push_image() {
   local bin="$1"
   local img="git.appsynergy.io/imabee/secd-web:${ver}"
@@ -144,9 +185,7 @@ push_image() {
   chmod 0755 "$ctx/secd-web"
   # Image expose stays off (no EXPOSE).
   cat >"$ctx/Dockerfile" <<'EOF'
-FROM alpine:3.21 AS musl
 FROM scratch
-COPY --from=musl /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 COPY secd-web /secd-web
 USER 1000
 ENTRYPOINT ["/secd-web"]
@@ -324,9 +363,8 @@ case "$target" in
   x86_64-unknown-linux-musl)
     if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
       export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
     elif command -v musl-gcc >/dev/null 2>&1; then
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+      export CC_x86_64_unknown_linux_musl=musl-gcc
     fi
     # scratch has no musl loader; default musl target is dynamically linked.
     export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
@@ -344,10 +382,18 @@ case "$target" in
     ;;
 esac
 
-src="target/${target}/release/secd"
+out="${CARGO_TARGET_DIR:-target}/${target}/release"
+src="${out}/secd"
 if [[ ! -f "$src" ]]; then
   echo "release: missing ${src}" >&2
   exit 1
+fi
+
+if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
+  smoke_linux "$out/secd" secd
+  if [[ "$do_image" -eq 1 ]]; then
+    smoke_linux "$out/secd-web" secd-web
+  fi
 fi
 
 name="secd-${target}"
@@ -375,7 +421,7 @@ write_latest_json "${dist}/latest.json" "$name" "$digest"
 cp "${dist}/latest.json" "${dist}/latest-${target}.json"
 
 if [[ "$do_image" -eq 1 ]]; then
-  web="target/${target}/release/secd-web"
+  web="${out}/secd-web"
   if [[ ! -f "$web" ]]; then
     echo "release: missing ${web}" >&2
     exit 1

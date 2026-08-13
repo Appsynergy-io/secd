@@ -2481,7 +2481,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "secd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "secd-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "secd-import-legacy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "secd",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "secd-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "secd-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",

@@ -7,7 +7,13 @@ on:
 jobs:
   check:
     runs-on: arch-host
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /data/build/target/secd
+      SECD_CACHE_CAP_GB: "20"
     steps:
       - uses: actions/checkout@v4
       - name: check
-        run: scripts/check.sh
+        run: |
+          scripts/ci-cache.sh
+          scripts/check.sh

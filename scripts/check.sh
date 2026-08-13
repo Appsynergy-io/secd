@@ -2,6 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
