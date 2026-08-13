@@ -186,199 +186,199 @@ pending = false
 pending = false
 
 [tests.T_AUTH_START_EMPTY]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_BAD_EMAIL]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_EMPTY_SERVER]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_PASSKEY_ONLY]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_PASSWORD_ONLY]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_BOTH]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_UNKNOWN]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_CASE]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_RATE]
-pending = true
+pending = false
 
 [tests.T_AUTH_START_CT]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_NONEMPTY_NEW]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_NO_PRF]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_BAD_HANDLE]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_EXPIRED]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_REPLAY]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_REG_CROSS]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_LOGIN_BAD]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_LOGIN_NO_PRF]
-pending = true
+pending = false
 
 [tests.T_AUTH_PK_LOGIN_WRAPS_ARE_CIPHER]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_SHORT]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_LONG]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_REG_NONEMPTY]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_WRONG]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_UNKNOWN]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_TIMING]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_RATE]
-pending = true
+pending = false
 
 [tests.T_AUTH_PW_LOG]
-pending = true
+pending = false
 
 [tests.T_AUTH_SESSION_NONE]
-pending = true
+pending = false
 
 [tests.T_AUTH_SESSION_OK]
-pending = true
+pending = false
 
 [tests.T_AUTH_LOGOUT]
-pending = true
+pending = false
 
 [tests.T_AUTH_COOKIE_FLAGS]
-pending = true
+pending = false
 
 [tests.T_AUTH_NO_CORS]
-pending = true
+pending = false
 
 [tests.T_AUTH_FAIL_SENTENCE]
-pending = true
+pending = false
 
 [tests.T_DEV_START_OK]
-pending = true
+pending = false
 
 [tests.T_DEV_START_BAD_PUB]
-pending = true
+pending = false
 
 [tests.T_DEV_POLL_UNKNOWN]
-pending = true
+pending = false
 
 [tests.T_DEV_POLL_PENDING]
-pending = true
+pending = false
 
 [tests.T_DEV_POLL_OK]
-pending = true
+pending = false
 
 [tests.T_DEV_POLL_EXPIRED]
-pending = true
+pending = false
 
 [tests.T_DEV_APPROVE_NO_SESSION]
-pending = true
+pending = false
 
 [tests.T_DEV_APPROVE_BAD_CODE]
-pending = true
+pending = false
 
 [tests.T_DEV_APPROVE_DOUBLE]
-pending = true
+pending = false
 
 [tests.T_DEV_SERVER_NO_DEK]
-pending = true
+pending = false
 
 [tests.T_DEV_REVOKE]
-pending = true
+pending = false
 
 [tests.T_DEV_REVOKE_BAD]
-pending = true
+pending = false
 
 [tests.T_SESS_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_SESS_BEARER]
-pending = true
+pending = false
 
 [tests.T_SESS_LIST]
-pending = true
+pending = false
 
 [tests.T_SESS_SHAPE]
-pending = true
+pending = false
 
 [tests.T_SESS_REVOKE_OTHER]
-pending = true
+pending = false
 
 [tests.T_SESS_REVOKE_SELF]
-pending = true
+pending = false
 
 [tests.T_SESS_REVOKE_UNKNOWN]
-pending = true
+pending = false
 
 [tests.T_SESS_REVOKE_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_SESS_REVOKE_FOREIGN]
-pending = true
+pending = false
 
 [tests.T_SESS_AUDIT]
-pending = true
+pending = false
 
 [tests.T_PK_LIST_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_PK_LIST_SHAPE]
-pending = true
+pending = false
 
 [tests.T_PK_ADD_WHILE_IN]
-pending = true
+pending = false
 
 [tests.T_PK_ADD_NO_PRF]
-pending = true
+pending = false
 
 [tests.T_PK_DEL]
-pending = true
+pending = false
 
 [tests.T_PK_DEL_LAST_NO_PW]
-pending = true
+pending = false
 
 [tests.T_PK_DEL_LAST_WITH_PW]
-pending = true
+pending = false
 
 [tests.T_PK_DEL_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_PK_DEL_UNKNOWN]
-pending = true
+pending = false
 
 [tests.T_PK_DEL_FOREIGN]
-pending = true
+pending = false
 
 [tests.T_VAULT_GET_UNAUTH]
 pending = true
@@ -618,76 +618,76 @@ pending = true
 pending = true
 
 [tests.T_HDR_HSTS]
-pending = true
+pending = false
 
 [tests.T_HDR_CSP]
-pending = true
+pending = false
 
 [tests.T_HDR_FRAME]
-pending = true
+pending = false
 
 [tests.T_HDR_NOSNIFF]
-pending = true
+pending = false
 
 [tests.T_HDR_XSS0]
-pending = true
+pending = false
 
 [tests.T_HDR_REFERRER]
-pending = true
+pending = false
 
 [tests.T_HDR_PERM]
-pending = true
+pending = false
 
 [tests.T_HDR_COOP]
-pending = true
+pending = false
 
 [tests.T_HDR_COEP]
-pending = true
+pending = false
 
 [tests.T_HDR_CORP]
-pending = true
+pending = false
 
 [tests.T_HDR_CACHE]
-pending = true
+pending = false
 
 [tests.T_HDR_ROBOTS]
-pending = true
+pending = false
 
 [tests.T_HDR_JSON_CT]
-pending = true
+pending = false
 
 [tests.T_HDR_HTML_CT]
-pending = true
+pending = false
 
 [tests.T_HDR_NO_SERVER]
-pending = true
+pending = false
 
 [tests.T_HDR_NO_POWERED]
-pending = true
+pending = false
 
 [tests.T_HDR_NO_EXPECT_CT]
-pending = true
+pending = false
 
 [tests.T_HDR_NO_HPKP]
-pending = true
+pending = false
 
 [tests.T_HDR_NO_CORS]
-pending = true
+pending = false
 
 [tests.T_HDR_ON_ERROR]
-pending = true
+pending = false
 
 [tests.T_HDR_TRACE]
-pending = true
+pending = false
 
 [tests.T_HDR_BAD_CT]
-pending = true
+pending = false
 
 [tests.T_HDR_BODY_AUTH]
-pending = true
+pending = false
 
 [tests.T_HDR_BODY_VAULT]
-pending = true
+pending = false
 
 [tests.T_HDR_TLS13]
-pending = true
+pending = false

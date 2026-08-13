@@ -1353,8 +1353,16 @@ name = "secd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "axum-server",
  "clap",
+ "hex",
+ "openssl",
  "secd-core",
+ "secd-web",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

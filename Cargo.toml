@@ -17,3 +17,13 @@ path = "src/main.rs"
 anyhow = "=1.0.104"
 clap = "=4.6.6"
 secd-core = { path = "crates/secd-core" }
+
+[dev-dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+axum-server = { version = "=0.7.3", default-features = false, features = ["tls-rustls"] }
+hex = "=0.4.3"
+openssl = "=0.10.81"
+secd-web = { path = "crates/secd-web" }
+serde_json = "=1.0.151"
+tokio = { version = "=1.44.2", features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
+tower = { version = "=0.5.3", features = ["util"] }
