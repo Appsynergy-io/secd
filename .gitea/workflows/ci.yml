@@ -1,0 +1,13 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: arch-host
+    steps:
+      - uses: actions/checkout@v4
+      - name: check
+        run: scripts/check.sh

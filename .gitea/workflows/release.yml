@@ -1,0 +1,19 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: arch-host
+    steps:
+      - uses: actions/checkout@v4
+      - name: release
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          SECD_RELEASE_TOKEN: ${{ secrets.SECD_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          scripts/release.sh
+          scripts/publish-release.sh
