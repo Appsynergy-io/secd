@@ -22,7 +22,6 @@ pub use state::AppState;
 
 pub fn app(state: AppState) -> Router {
     Router::new()
-        .without_v07_checks()
         .merge(auth_routes::router())
         .merge(device::router())
         .merge(sessions::router())
