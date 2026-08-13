@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "secd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 publish = false
 description = "LAN secrets store"
@@ -36,3 +36,16 @@ secd-web = { path = "crates/secd-web" }
 serde_json = "=1.0.151"
 tokio = { version = "=1.44.2", features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
 tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package.aws-lc-sys]
+opt-level = 2
+
+[profile.dev.package.openssl-sys]
+opt-level = 2
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+
