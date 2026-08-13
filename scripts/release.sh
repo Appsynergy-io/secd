@@ -326,6 +326,8 @@ case "$target" in
     elif command -v musl-gcc >/dev/null 2>&1; then
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
     fi
+    # scratch has no musl loader; default musl target is dynamically linked.
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
     cargo build --release --target "$target" --bin secd
     if [[ "$do_image" -eq 1 ]]; then
       if [[ ! -d crates/secd-web ]]; then
