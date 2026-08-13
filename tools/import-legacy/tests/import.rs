@@ -1,0 +1,615 @@
+#![allow(non_snake_case)]
+
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use secd_import_legacy::{buffer_is_zeroed, take_get_bytes, wipe_get_buffer, AFTER_EACH_WIPE};
+
+const FIXTURE: &str = "t9-fix-IMP-val-do-not-print-c4e1";
+const NAME_A: &str = "kv/alpha";
+const NAME_B: &str = "kv/beta";
+const NO_SDXD: &str = "old secrets CLI not on PATH";
+const ROOT_PEM: &[u8] = include_bytes!("../../../keys/appsynergy-root.pem");
+
+static SEQ: AtomicU64 = AtomicU64::new(1);
+static ASSETS: OnceLock<Assets> = OnceLock::new();
+static ZERO_HITS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
+struct Assets {
+    bin: PathBuf,
+    redir: PathBuf,
+    cert: PathBuf,
+    key: PathBuf,
+    sdxd_dir: PathBuf,
+    vault_py: PathBuf,
+}
+
+struct Harness {
+    dir: PathBuf,
+    home: PathBuf,
+    runtime: PathBuf,
+    put_log: PathBuf,
+    server: Child,
+    port: u16,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn work_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_secd-import-legacy"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("target dir")
+        .join("t9-import")
+}
+
+fn unique(tag: &str) -> PathBuf {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let root = work_root();
+    fs::create_dir_all(&root).expect("t9 root");
+    root.join(format!("{tag}-{}-{n}", std::process::id()))
+}
+
+fn pty_script() -> &'static Path {
+    static PTY: OnceLock<PathBuf> = OnceLock::new();
+    PTY.get_or_init(|| {
+        let p = work_root().join("pty_run.py");
+        fs::create_dir_all(work_root()).expect("t9 root");
+        fs::write(&p, PTY_PY).expect("pty_run.py");
+        p
+    })
+}
+
+fn utf8(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn leaked(hay: &str) -> bool {
+    hay.contains(FIXTURE)
+}
+
+fn chmod_exec(path: &Path) {
+    let mut p = fs::metadata(path).expect("meta").permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(path, p).expect("chmod");
+}
+
+fn dek_desc(home: &Path) -> String {
+    let raw = home.to_string_lossy();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in raw.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("secd-dek-{h:016x}")
+}
+
+fn write_0600(path: &Path, bytes: &[u8]) {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).expect("mkdir");
+        if let Ok(meta) = fs::metadata(dir) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = fs::set_permissions(dir, perms);
+        }
+    }
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .expect("open 0600");
+    f.write_all(bytes).expect("write");
+    f.flush().expect("flush");
+    let mut perms = f.metadata().expect("meta").permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(path, perms).expect("mode");
+}
+
+fn reflink_copy(src: &Path, dst: &Path) {
+    let st = Command::new("/usr/bin/cp")
+        .args(["--reflink=auto", "--"])
+        .arg(src)
+        .arg(dst)
+        .status()
+        .expect("cp");
+    assert!(st.success(), "cp --reflink failed");
+}
+
+fn patch_embedded_ca(path: &Path, repl: &[u8]) {
+    assert_eq!(repl.len(), ROOT_PEM.len());
+    let data = fs::read(path).expect("read importer");
+    let n = ROOT_PEM.len();
+    let mut offs = Vec::new();
+    let mut i = 0;
+    while i + n <= data.len() {
+        if data[i] == ROOT_PEM[0] && &data[i..i + n] == ROOT_PEM {
+            offs.push(i);
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    assert!(!offs.is_empty(), "embedded root PEM not found");
+    drop(data);
+    let mut f = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open importer");
+    for off in offs {
+        f.seek(SeekFrom::Start(off as u64)).expect("seek");
+        f.write_all(repl).expect("patch pem");
+    }
+    f.flush().expect("flush patch");
+}
+
+fn wait_port(addr: SocketAddr) {
+    for _ in 0..100 {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("tls server did not start on {addr}");
+}
+
+fn assets() -> &'static Assets {
+    ASSETS.get_or_init(build_assets)
+}
+
+fn build_assets() -> Assets {
+    let dir = unique("assets");
+    fs::create_dir_all(&dir).expect("assets dir");
+
+    let ca = dir.join("ca.pem");
+    let ca_key = dir.join("ca.key");
+    let cert = dir.join("tls.crt");
+    let key = dir.join("tls.key");
+    let csr = dir.join("leaf.csr");
+    let ext = dir.join("leaf.ext");
+    let out = Command::new("/usr/bin/openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes", "-keyout",
+        ])
+        .arg(&ca_key)
+        .arg("-out")
+        .arg(&ca)
+        .args([
+            "-subj",
+            "/CN=T9 Test CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+        ])
+        .output()
+        .expect("openssl ca");
+    assert!(out.status.success(), "openssl ca failed");
+    let out = Command::new("/usr/bin/openssl")
+        .args(["req", "-newkey", "rsa:2048", "-nodes", "-keyout"])
+        .arg(&key)
+        .arg("-out")
+        .arg(&csr)
+        .args(["-subj", "/CN=secd.imabee.com"])
+        .output()
+        .expect("openssl csr");
+    assert!(out.status.success(), "openssl csr failed");
+    fs::write(
+        &ext,
+        "subjectAltName=DNS:secd.imabee.com\n\
+         basicConstraints=CA:FALSE\n\
+         keyUsage=digitalSignature,keyEncipherment\n\
+         extendedKeyUsage=serverAuth\n",
+    )
+    .expect("ext");
+    let out = Command::new("/usr/bin/openssl")
+        .args(["x509", "-req", "-in"])
+        .arg(&csr)
+        .arg("-CA")
+        .arg(&ca)
+        .arg("-CAkey")
+        .arg(&ca_key)
+        .args(["-CAcreateserial", "-out"])
+        .arg(&cert)
+        .args(["-days", "1", "-extfile"])
+        .arg(&ext)
+        .output()
+        .expect("openssl leaf");
+    assert!(out.status.success(), "openssl leaf failed");
+
+    let pem = fs::read(&ca).expect("read ca");
+    assert!(
+        pem.len() <= ROOT_PEM.len(),
+        "test CA longer than embedded root PEM"
+    );
+    let mut padded = pem;
+    padded.resize(ROOT_PEM.len(), b'\n');
+    let src = Path::new(env!("CARGO_BIN_EXE_secd-import-legacy"));
+    let bin = dir.join("secd-import-legacy");
+    reflink_copy(src, &bin);
+    patch_embedded_ca(&bin, &padded);
+    chmod_exec(&bin);
+
+    let redir_c = dir.join("redir.c");
+    fs::write(&redir_c, REDIR_C).expect("redir.c");
+    let redir = dir.join("redir.so");
+    let st = Command::new("/usr/bin/cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&redir)
+        .arg(&redir_c)
+        .arg("-ldl")
+        .status()
+        .expect("cc redir");
+    assert!(st.success(), "cc redir.so failed");
+
+    let sdxd_dir = dir.join("sdxd-bin");
+    fs::create_dir_all(&sdxd_dir).expect("sdxd dir");
+    let sdxd = sdxd_dir.join("sdxd");
+    fs::write(&sdxd, SDXD_SH).expect("sdxd");
+    chmod_exec(&sdxd);
+
+    let vault_py = dir.join("vault.py");
+    fs::write(&vault_py, VAULT_PY).expect("vault.py");
+
+    Assets {
+        bin,
+        redir,
+        cert,
+        key,
+        sdxd_dir,
+        vault_py,
+    }
+}
+
+impl Harness {
+    fn new() -> Self {
+        let a = assets();
+        let dir = unique("h");
+        let home = dir.join("home");
+        let runtime = dir.join("run");
+        let put_log = dir.join("put.log");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(runtime.join("secd")).expect("runtime");
+        write_0600(&home.join("login.session"), b"t9-token\n");
+        write_0600(&runtime.join("secd").join(dek_desc(&home)), &[0x44; 32]);
+        write_0600(&put_log, b"");
+
+        let mut server = Command::new("/usr/bin/python3")
+            .arg(&a.vault_py)
+            .arg(&a.cert)
+            .arg(&a.key)
+            .arg(&put_log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("vault server");
+        let stdout = server.stdout.take().expect("vault stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("vault port");
+        let port: u16 = line.trim().parse().unwrap_or_else(|_| {
+            let err = server.stderr.take().map(|e| {
+                let mut s = String::new();
+                let _ = BufReader::new(e).read_line(&mut s);
+                s
+            });
+            panic!("vault port: {line:?} stderr={err:?}");
+        });
+        wait_port(SocketAddr::from(([127, 0, 0, 1], port)));
+        Self {
+            dir,
+            home,
+            runtime,
+            put_log,
+            server,
+            port,
+        }
+    }
+
+    fn child_env(&self, cmd: &mut Command) {
+        let a = assets();
+        cmd.env("SECD_HOME", &self.home)
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .env("LD_PRELOAD", &a.redir)
+            .env("SECD_TEST_REDIR", format!("127.0.0.1:{}", self.port))
+            .env("PATH", &a.sdxd_dir)
+            .env_remove("GITEA_TOKEN");
+    }
+
+    fn run_notty(&self) -> Output {
+        let mut cmd = Command::new(&assets().bin);
+        self.child_env(&mut cmd);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("import notty")
+    }
+
+    fn run_tty(&self) -> Output {
+        pty_run(&assets().bin, |cmd| self.child_env(cmd))
+    }
+
+    fn put_count(&self) -> usize {
+        let raw = fs::read_to_string(&self.put_log).unwrap_or_default();
+        raw.lines().filter(|l| l.starts_with("PUT")).count()
+    }
+}
+
+fn pty_run(bin: &Path, env: impl FnOnce(&mut Command)) -> Output {
+    let err_path = unique("err");
+    let _ = fs::remove_file(&err_path);
+    let mut cmd = Command::new("/usr/bin/python3");
+    cmd.arg(pty_script())
+        .arg(&err_path)
+        .arg(bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    env(&mut cmd);
+    let out = cmd.output().expect("pty_run");
+    let stderr = fs::read(&err_path).unwrap_or_default();
+    let _ = fs::remove_file(&err_path);
+    Output {
+        status: out.status,
+        stdout: out.stdout,
+        stderr,
+    }
+}
+
+fn wipe_hook(buf: &[u8]) {
+    ZERO_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(buffer_is_zeroed(buf));
+}
+
+struct HookGuard;
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        *AFTER_EACH_WIPE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+#[test]
+fn T_IMP_NOTTY() {
+    let h = Harness::new();
+    let out = h.run_notty();
+    assert!(!out.status.success(), "non-TTY must exit != 0");
+    assert_eq!(h.put_count(), 0, "non-TTY must not PUT");
+    assert!(!leaked(&utf8(&out.stdout)), "fixture leaked on stdout");
+    assert!(!leaked(&utf8(&out.stderr)), "fixture leaked on stderr");
+}
+
+#[test]
+fn T_IMP_NO_SDXD() {
+    let empty = unique("nopath");
+    fs::create_dir_all(&empty).expect("empty path");
+    let bin = Path::new(env!("CARGO_BIN_EXE_secd-import-legacy"));
+    let out = pty_run(bin, |cmd| {
+        cmd.env("PATH", &empty)
+            .env_remove("LD_PRELOAD")
+            .env_remove("SECD_TEST_REDIR");
+    });
+    let _ = fs::remove_dir_all(&empty);
+    assert_eq!(out.status.code(), Some(2), "missing sdxd must exit 2");
+    let stdout = utf8(&out.stdout);
+    let stderr = utf8(&out.stderr);
+    assert!(
+        stderr.contains(NO_SDXD) || stdout.contains(NO_SDXD),
+        "missing sdxd locked sentence"
+    );
+}
+
+#[test]
+fn T_IMP_COUNT() {
+    let h = Harness::new();
+    let out = h.run_tty();
+    assert!(out.status.success(), "import failed: {}", utf8(&out.stderr));
+    let stdout = utf8(&out.stdout);
+    let stderr = utf8(&out.stderr);
+    assert!(stdout.contains(NAME_A), "must print {NAME_A}");
+    assert!(stdout.contains(NAME_B), "must print {NAME_B}");
+    assert!(stdout.contains("imported 2"), "must print imported count");
+    assert!(!leaked(&stdout), "fixture value leaked on stdout");
+    assert!(!leaked(&stderr), "fixture value leaked on stderr");
+}
+
+#[test]
+fn T_IMP_ZEROIZE() {
+    let _guard = HookGuard;
+    ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *AFTER_EACH_WIPE.lock().unwrap_or_else(|e| e.into_inner()) = Some(wipe_hook);
+
+    for _ in 0..2 {
+        let mut buf = take_get_bytes(FIXTURE.as_bytes().to_vec());
+        assert!(
+            !buffer_is_zeroed(&buf),
+            "fixture buffer must be live before wipe"
+        );
+        wipe_get_buffer(&mut buf);
+        assert!(buffer_is_zeroed(&buf), "buffer must be zeroed after wipe");
+        drop(buf);
+    }
+
+    let hits = ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(hits.len(), 2, "hook after each name");
+    assert!(hits.iter().all(|&z| z), "test hooks must see buffer zeroed");
+}
+
+const SDXD_SH: &str = r#"#!/bin/sh
+case "$1" in
+  ls) printf '%s\n' 'kv/alpha' 'kv/beta' ;;
+  info) printf '%s\n' 'note: lab' 'service: xai' ;;
+  get)
+    if [ "$2" = "--force" ]; then
+      printf '%s\n' 't9-fix-IMP-val-do-not-print-c4e1'
+      exit 0
+    fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+"#;
+
+const VAULT_PY: &str = r#"
+import ssl, sys, traceback
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CERT, KEY, PUT_LOG = sys.argv[1], sys.argv[2], sys.argv[3]
+
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, code, data):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=UTF-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.unwrap()
+        except Exception:
+            pass
+
+    def do_GET(self):
+        self._send(200, b'{"entries":[]}')
+
+    def do_PUT(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        with open(PUT_LOG, "ab") as f:
+            f.write(b"PUT\n")
+        self._send(200, b'{"ok":true}')
+
+class S(HTTPServer):
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.load_cert_chain(CERT, KEY)
+        try:
+            ctx.set_alpn_protocols(["http/1.1"])
+        except ssl.SSLError:
+            pass
+        try:
+            return ctx.wrap_socket(sock, server_side=True), addr
+        except Exception:
+            traceback.print_exc()
+            sock.close()
+            raise
+
+httpd = S(("127.0.0.1", 0), H)
+print(httpd.server_address[1], flush=True)
+httpd.serve_forever()
+"#;
+
+const PTY_PY: &str = r#"
+import os, pty, select, subprocess, sys
+
+err_path = sys.argv[1]
+argv = sys.argv[2:]
+master, slave = pty.openpty()
+with open(err_path, "wb") as err:
+    p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=err, close_fds=True)
+os.close(slave)
+out = bytearray()
+try:
+    while True:
+        timeout = 0.05 if p.poll() is not None else 0.2
+        r, _, _ = select.select([master], [], [], timeout)
+        if r:
+            try:
+                chunk = os.read(master, 8192)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out.extend(chunk)
+        elif p.poll() is not None:
+            break
+finally:
+    os.close(master)
+rc = p.wait()
+sys.stdout.buffer.write(out)
+raise SystemExit(rc if rc is not None and rc >= 0 else 1)
+"#;
+
+const REDIR_C: &str = r#"
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+
+int getaddrinfo(const char *node, const char *service,
+                const struct addrinfo *hints, struct addrinfo **res) {
+    static int (*real_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = 0;
+    if (!real_getaddrinfo)
+        real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
+    if (node && strcmp(node, "secd.imabee.com") == 0)
+        return real_getaddrinfo("192.168.101.122", service, hints, res);
+    return real_getaddrinfo(node, service, hints, res);
+}
+
+int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    static int (*real_connect)(int, const struct sockaddr *, socklen_t) = 0;
+    if (!real_connect)
+        real_connect = dlsym(RTLD_NEXT, "connect");
+    if (addr && addr->sa_family == AF_INET && addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+        struct sockaddr_in copy = *(const struct sockaddr_in *)addr;
+        unsigned ip = ntohl(copy.sin_addr.s_addr);
+        unsigned port = ntohs(copy.sin_port);
+        if (port == 443 && ip == 0xC0A8657Au) {
+            const char *redir = getenv("SECD_TEST_REDIR");
+            unsigned hip = 0x7F000001u;
+            unsigned hport = 18443;
+            if (redir) {
+                char buf[64];
+                strncpy(buf, redir, sizeof buf - 1);
+                buf[sizeof buf - 1] = 0;
+                char *col = strchr(buf, ':');
+                if (col) {
+                    *col = 0;
+                    hport = (unsigned)atoi(col + 1);
+                    hip = ntohl(inet_addr(buf));
+                }
+            }
+            copy.sin_addr.s_addr = htonl(hip);
+            copy.sin_port = htons((unsigned short)hport);
+            return real_connect(sockfd, (struct sockaddr *)&copy, addrlen);
+        }
+    }
+    return real_connect(sockfd, addr, addrlen);
+}
+"#;
