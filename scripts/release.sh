@@ -144,7 +144,9 @@ push_image() {
   chmod 0755 "$ctx/secd-web"
   # Image expose stays off (no EXPOSE).
   cat >"$ctx/Dockerfile" <<'EOF'
+FROM alpine:3.21 AS musl
 FROM scratch
+COPY --from=musl /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 COPY secd-web /secd-web
 USER 1000
 ENTRYPOINT ["/secd-web"]
