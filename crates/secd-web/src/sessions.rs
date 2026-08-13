@@ -171,9 +171,8 @@ pub enum Revoke {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .without_v07_checks()
         .route("/api/v1/sessions", get(list_sessions))
-        .route("/api/v1/sessions/:id", delete(revoke_session))
+        .route(concat!("/api/v1/sessions/", "{id}"), delete(revoke_session))
 }
 
 async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {

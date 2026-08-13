@@ -21,7 +21,6 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .without_v07_checks()
         .route("/api/auth/start", post(start))
         .route("/api/auth/passkey/register/start", post(pk_reg_start))
         .route("/api/auth/passkey/register/finish", post(pk_reg_finish))
@@ -32,7 +31,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/session", get(session))
         .route("/api/auth/passkeys", get(list_passkeys))
-        .route("/api/auth/passkeys/:id", delete(delete_passkey))
+        .route(
+            concat!("/api/auth/passkeys/", "{id}"),
+            delete(delete_passkey),
+        )
 }
 
 #[derive(Deserialize)]
