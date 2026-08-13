@@ -2493,6 +2493,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "secd-import-legacy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "secd",
+ "secd-core",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "secd-ui"
 version = "0.1.0"
 dependencies = [

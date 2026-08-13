@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/secd-core", "crates/secd-web", "crates/secd-ui"]
+members = ["crates/secd-core", "crates/secd-web", "crates/secd-ui", "tools/import-legacy"]
 resolver = "2"
 
 [package]
