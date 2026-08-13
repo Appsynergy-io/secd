@@ -381,61 +381,61 @@ pending = false
 pending = false
 
 [tests.T_VAULT_GET_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_VAULT_GET_EMPTY]
-pending = true
+pending = false
 
 [tests.T_VAULT_GET_SHAPE]
-pending = true
+pending = false
 
 [tests.T_VAULT_PUT_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_VAULT_PUT_GET]
-pending = true
+pending = false
 
 [tests.T_VAULT_PUT_PLAINTEXT_FIELD]
-pending = true
+pending = false
 
 [tests.T_VAULT_PUT_BAD_NAME]
-pending = true
+pending = false
 
 [tests.T_VAULT_PUT_SQL]
-pending = true
+pending = false
 
 [tests.T_VAULT_AAD]
-pending = true
+pending = false
 
 [tests.T_VAULT_BEARER_AND_COOKIE]
-pending = true
+pending = false
 
 [tests.T_VAULT_NO_DECRYPT_WITHOUT_KEK]
-pending = true
+pending = false
 
 [tests.T_PROV_GET_BUILTIN]
-pending = true
+pending = false
 
 [tests.T_PROV_PUT_CUSTOM]
-pending = true
+pending = false
 
 [tests.T_PROV_DEL_CUSTOM]
-pending = true
+pending = false
 
 [tests.T_PROV_DEL_BUILTIN]
-pending = true
+pending = false
 
 [tests.T_PROV_PUT_MALFORMED]
-pending = true
+pending = false
 
 [tests.T_AUDIT_NO_VALUE]
-pending = true
+pending = false
 
 [tests.T_AUDIT_CHAIN]
-pending = true
+pending = false
 
 [tests.T_AUDIT_UNAUTH]
-pending = true
+pending = false
 
 [tests.T_TUI_REGIONS]
 pending = true
@@ -594,28 +594,28 @@ pending = true
 pending = true
 
 [tests.T_ADV_NO_HTTP_CLEAR]
-pending = true
+pending = false
 
 [tests.T_ADV_UNKNOWN_ROUTE]
-pending = true
+pending = false
 
 [tests.T_ADV_METHOD]
-pending = true
+pending = false
 
 [tests.T_ADV_JSON_BOMB]
-pending = true
+pending = false
 
 [tests.T_ADV_HOST_HEADER]
-pending = true
+pending = false
 
 [tests.T_ADV_PATH_DOTDOT]
-pending = true
+pending = false
 
 [tests.T_ADV_SSRF_URI]
-pending = true
+pending = false
 
 [tests.T_ADV_COOKIE_PREFIX]
-pending = true
+pending = false
 
 [tests.T_HDR_HSTS]
 pending = false
