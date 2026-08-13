@@ -546,40 +546,40 @@ pending = false
 pending = false
 
 [tests.T_UPD_BAD_HASH]
-pending = true
+pending = false
 
 [tests.T_UPD_BAD_SIG]
-pending = true
+pending = false
 
 [tests.T_UPD_WRONG_HOST]
-pending = true
+pending = false
 
 [tests.T_UPD_GOOD]
-pending = true
+pending = false
 
 [tests.T_UPD_PACMAN]
-pending = true
+pending = false
 
 [tests.T_SKILL_IDENTICAL]
-pending = true
+pending = false
 
 [tests.T_SKILL_LEN]
-pending = true
+pending = false
 
 [tests.T_SKILL_TABLE]
-pending = true
+pending = false
 
 [tests.T_SKILL_NO_GET]
-pending = true
+pending = false
 
 [tests.T_SKILL_NO_FORCE]
-pending = true
+pending = false
 
 [tests.T_SKILL_NO_FIXTURE]
-pending = true
+pending = false
 
 [tests.T_SKILL_INSTALL]
-pending = true
+pending = false
 
 [tests.T_IMP_NOTTY]
 pending = true
