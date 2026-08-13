@@ -212,12 +212,13 @@ fn T_CLI_LOCKED() {
 #[test]
 fn T_KEYRING_ROUNDTRIP() {
     let home = tmp("keyring");
+    let runtime = tmp("keyring-run");
     let mut dek = [0u8; 32];
     fs::File::open("/dev/urandom")
         .expect("urandom")
         .read_exact(&mut dek)
         .expect("dek");
-    with_secd_home(&home, || {
+    common::with_secd_env(&home, Some(&runtime), || {
         secd::keyring::store(&dek).expect("store");
         let loaded = secd::keyring::load().expect("load");
         let ok = sha256(loaded.as_bytes()) == sha256(&dek);

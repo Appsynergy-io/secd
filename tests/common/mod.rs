@@ -50,7 +50,7 @@ pub struct Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        let _ = with_secd_home(&self.home, secd::keyring::delete);
+        let _ = with_secd_env(&self.home, Some(&self.runtime), secd::keyring::delete);
         let _ = fs::remove_dir_all(&self.home);
         let _ = fs::remove_dir_all(&self.runtime);
         let _ = fs::remove_dir_all(&self._data);
@@ -72,13 +72,27 @@ pub fn remove_var(key: &str) {
 }
 
 pub fn with_secd_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+    with_secd_env(home, None, f)
+}
+
+pub fn with_secd_env<T>(home: &Path, runtime: Option<&Path>, f: impl FnOnce() -> T) -> T {
     let _g = env_lock();
-    let prev = std::env::var_os("SECD_HOME");
+    let prev_home = std::env::var_os("SECD_HOME");
+    let prev_rt = std::env::var_os("XDG_RUNTIME_DIR");
     set_var("SECD_HOME", home);
+    if let Some(rt) = runtime {
+        set_var("XDG_RUNTIME_DIR", rt);
+    }
     let out = f();
-    match prev {
+    match prev_home {
         Some(v) => set_var("SECD_HOME", v),
         None => remove_var("SECD_HOME"),
+    }
+    if runtime.is_some() {
+        match prev_rt {
+            Some(v) => set_var("XDG_RUNTIME_DIR", v),
+            None => remove_var("XDG_RUNTIME_DIR"),
+        }
     }
     out
 }
@@ -111,10 +125,13 @@ pub fn utf8(bytes: &[u8]) -> String {
 
 pub fn isolated_secd(args: &[&str]) -> Command {
     let home = unique("iso-home");
+    let runtime = unique("iso-run");
     fs::create_dir_all(&home).expect("iso home");
+    fs::create_dir_all(&runtime).expect("iso runtime");
     let mut c = Command::new(env!("CARGO_BIN_EXE_secd"));
     c.args(args)
         .env("SECD_HOME", home)
+        .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("GITEA_TOKEN")
         .env_remove("GITEA_URL")
         .env_remove("GITEA_USER")
@@ -173,7 +190,12 @@ impl Harness {
         wait_port(addr);
 
         write_session(&home, token.as_bytes());
-        with_secd_home(&home, || secd::keyring::store(&dek).expect("store"));
+        with_secd_env(&home, Some(&runtime), || {
+            secd::keyring::store(&dek).expect("store")
+        });
+        // Child cannot see a parent session keyring. Seed the EPERM fallback
+        // so load() finds the DEK when user keyctl is denied.
+        seed_runtime_dek(&home, &runtime, &dek);
         dek.zeroize();
 
         Self {
@@ -209,6 +231,7 @@ impl Harness {
             .env("SECD_BIN", &assets().secd)
             .env("SECD_GIT_REQFILE", &req)
             .env("SECD_HOME", &self.home)
+            .env("XDG_RUNTIME_DIR", &self.runtime)
             .env("LD_PRELOAD", &assets().redir)
             .env("SECD_TEST_REDIR", format!("127.0.0.1:{}", self.port))
             .env_remove("GITEA_TOKEN")
@@ -384,6 +407,37 @@ fn wait_port(addr: SocketAddr) {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("tls server did not start");
+}
+
+fn dek_desc(home: &Path) -> String {
+    let raw = home.to_string_lossy();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in raw.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("secd-dek-{h:016x}")
+}
+
+fn seed_runtime_dek(home: &Path, runtime: &Path, dek: &[u8]) {
+    let dir = runtime.join("secd");
+    fs::create_dir_all(&dir).expect("runtime secd");
+    let mut perms = fs::metadata(&dir).expect("runtime meta").permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(&dir, perms).expect("runtime 0700");
+    let path = dir.join(dek_desc(home));
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .expect("runtime dek");
+    f.write_all(dek).expect("runtime dek write");
+    f.flush().expect("runtime dek flush");
+    let mut perms = f.metadata().expect("dek meta").permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(&path, perms).expect("runtime dek 0600");
 }
 
 fn write_session(home: &Path, token: &[u8]) {
