@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
-use axum::middleware;
-use axum::response::{Html, IntoResponse, Response};
 use axum::Router;
 use secd_web::auth::{password_wrap, User};
 use secd_web::AppState;
@@ -39,53 +37,10 @@ fn fresh() -> H {
     std::fs::create_dir_all(&dir).expect("data dir");
     let state = AppState::open(&dir).expect("open");
     H {
-        app: build_app(state.clone()),
+        app: secd_web::app(state.clone()),
         state,
         dir,
     }
-}
-
-fn build_app(state: AppState) -> Router {
-    Router::new()
-        .without_v07_checks()
-        .merge(secd_web::auth_routes::router())
-        .merge(secd_web::sessions::router())
-        .merge(secd_web::device::router())
-        .merge(secd_web::vault::router())
-        .merge(secd_web::providers_api::router())
-        .merge(secd_web::audit::router())
-        .merge(secd_web::static_ui::router())
-        .fallback(fallback)
-        .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state.clone(), vault_auth))
-        .layer(middleware::from_fn_with_state(
-            state,
-            secd_web::headers::gate,
-        ))
-}
-
-async fn vault_auth(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    req: Request<Body>,
-    next: axum::middleware::Next,
-) -> Response {
-    let path = req.uri().path();
-    if (path == "/api/v1/vault" || path.starts_with("/api/v1/vault/") || path == "/api/v1/audit")
-        && state.sessions.vault_from_headers(req.headers()).is_none()
-    {
-        return secd_web::headers::fail_auth();
-    }
-    next.run(req).await
-}
-
-async fn fallback(req: Request<Body>) -> Response {
-    if req.uri().path().starts_with("/api/") {
-        return secd_web::headers::json_status(StatusCode::NOT_FOUND, "not found");
-    }
-    if req.method() != Method::GET {
-        return secd_web::headers::json_status(StatusCode::METHOD_NOT_ALLOWED, "method");
-    }
-    Html("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>secd</title></head><body></body></html>").into_response()
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
