@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use secd_import_legacy::{buffer_is_zeroed, take_get_bytes, wipe_get_buffer, AFTER_EACH_WIPE};
+use secd_import_legacy::{buffer_is_zeroed, ImportError, AFTER_EACH_WIPE};
 
 const FIXTURE: &str = "t9-fix-IMP-val-do-not-print-c4e1";
 const NAME_A: &str = "kv/alpha";
@@ -29,6 +29,7 @@ struct Assets {
     key: PathBuf,
     sdxd_dir: PathBuf,
     vault_py: PathBuf,
+    ca_padded: Vec<u8>,
 }
 
 struct Harness {
@@ -272,6 +273,7 @@ fn build_assets() -> Assets {
         key,
         sdxd_dir,
         vault_py,
+        ca_padded: padded,
     }
 }
 
@@ -374,10 +376,44 @@ fn pty_run(bin: &Path, env: impl FnOnce(&mut Command)) -> Output {
 }
 
 fn wipe_hook(buf: &[u8]) {
-    ZERO_HITS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(buffer_is_zeroed(buf));
+    let z = buffer_is_zeroed(buf);
+    ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).push(z);
+    if let Ok(path) = std::env::var("T9_ZEROIZE_OUT") {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(if z { b"1\n" } else { b"0\n" });
+        }
+    }
+}
+
+fn patched_test_exe() -> PathBuf {
+    static PATCHED: OnceLock<PathBuf> = OnceLock::new();
+    PATCHED
+        .get_or_init(|| {
+            let src = std::env::current_exe().expect("current_exe");
+            let dst = work_root().join(format!("import-test-{}", std::process::id()));
+            let _ = fs::remove_file(&dst);
+            reflink_copy(&src, &dst);
+            patch_embedded_ca(&dst, &assets().ca_padded);
+            chmod_exec(&dst);
+            dst
+        })
+        .clone()
+}
+
+fn zeroize_worker() {
+    let _guard = HookGuard;
+    ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *AFTER_EACH_WIPE.lock().unwrap_or_else(|e| e.into_inner()) = Some(wipe_hook);
+    match secd_import_legacy::import() {
+        Ok(()) => {}
+        Err(ImportError::NoSdxd) => panic!("import: NoSdxd"),
+        Err(ImportError::SdxdLocked) => panic!("import: SdxdLocked"),
+        Err(ImportError::SecdLocked) => panic!("import: SecdLocked"),
+        Err(ImportError::Other(e)) => panic!("import: {e}"),
+    }
+    let hits = ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(hits.len(), 2, "hook after each name");
+    assert!(hits.iter().all(|&z| z), "test hooks must see buffer zeroed");
 }
 
 struct HookGuard;
@@ -435,24 +471,40 @@ fn T_IMP_COUNT() {
 
 #[test]
 fn T_IMP_ZEROIZE() {
-    let _guard = HookGuard;
-    ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    *AFTER_EACH_WIPE.lock().unwrap_or_else(|e| e.into_inner()) = Some(wipe_hook);
-
-    for _ in 0..2 {
-        let mut buf = take_get_bytes(FIXTURE.as_bytes().to_vec());
-        assert!(
-            !buffer_is_zeroed(&buf),
-            "fixture buffer must be live before wipe"
-        );
-        wipe_get_buffer(&mut buf);
-        assert!(buffer_is_zeroed(&buf), "buffer must be zeroed after wipe");
-        drop(buf);
+    if std::env::var_os("T9_ZEROIZE_WORKER").is_some() {
+        zeroize_worker();
+        return;
     }
 
-    let hits = ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(hits.len(), 2, "hook after each name");
-    assert!(hits.iter().all(|&z| z), "test hooks must see buffer zeroed");
+    let h = Harness::new();
+    let hits = unique("zero-hits");
+    write_0600(&hits, b"");
+    let mut cmd = Command::new(patched_test_exe());
+    h.child_env(&mut cmd);
+    let out = cmd
+        .env("T9_ZEROIZE_WORKER", "1")
+        .env("T9_ZEROIZE_OUT", &hits)
+        .args(["--exact", "T_IMP_ZEROIZE"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("zeroize worker");
+    assert!(
+        out.status.success(),
+        "import worker failed: {}",
+        utf8(&out.stderr)
+    );
+    let raw = fs::read_to_string(&hits).unwrap_or_default();
+    let bits: Vec<bool> = raw
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l == "1")
+        .collect();
+    assert_eq!(bits.len(), 2, "hook after each name");
+    assert!(bits.iter().all(|&z| z), "test hooks must see buffer zeroed");
+    assert!(!leaked(&utf8(&out.stdout)), "fixture leaked on stdout");
+    assert!(!leaked(&utf8(&out.stderr)), "fixture leaked on stderr");
 }
 
 const SDXD_SH: &str = r#"#!/bin/sh
