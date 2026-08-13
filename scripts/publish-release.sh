@@ -111,6 +111,7 @@ readback() {
 collect_latest_inputs() {
   local dest_dir="$1"
   local -n _out=$2
+  local published_ver
   _out=()
   if [[ -f "${dist}/latest.json" ]]; then
     _out+=("${dist}/latest.json")
@@ -126,7 +127,24 @@ collect_latest_inputs() {
     done
   fi
   if curl -fsS -o "${dest_dir}/published.json" "${base}/latest/latest.json"; then
-    _out+=("${dest_dir}/published.json")
+    published_ver="$(
+      python3 - "${dest_dir}/published.json" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        doc = json.load(f)
+    ver = doc.get("version") if isinstance(doc, dict) else None
+    if isinstance(ver, str):
+        print(ver)
+except Exception:
+    pass
+PY
+    )"
+    if [[ "$published_ver" == "$ver" ]]; then
+      _out+=("${dest_dir}/published.json")
+    fi
   fi
   local frag
   for frag in \
