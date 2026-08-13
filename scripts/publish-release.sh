@@ -61,6 +61,9 @@ owner="${GITEA_PACKAGE_OWNER:-appsynergy}"
 pkg="${GITEA_PACKAGE_NAME:-secd}"
 base="${host}/api/packages/${owner}/generic/${pkg}"
 dist="${RELEASE_DIST:-target/release-dist}"
+forge="${GITEA_URL:-https://git.appsynergy.io}"
+api="${forge%/}/api/v1/repos/imabee/secd"
+auth="Authorization: token ${SECD_RELEASE_TOKEN}"
 
 auth_cfg() {
   local cfg
@@ -156,6 +159,67 @@ PY
   done
 }
 
+ensure_release() {
+  local rel_tag="$1" name="$2"
+  local code payload tmp created
+  tmp="$(mktemp)"
+  code="$(
+    curl -sS -o "$tmp" -w "%{http_code}" -H "$auth" \
+      "$api/releases/tags/${rel_tag}" || true
+  )"
+  if [[ "$code" == "200" ]]; then
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmp"
+    rm -f "$tmp"
+    return 0
+  fi
+  echo "create release ${rel_tag}" >&2
+  payload="$(
+    python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[2],"body":"","draft":False,"prerelease":False}))' \
+      "$rel_tag" "$name"
+  )"
+  created="$(mktemp)"
+  curl -sS -f -H "$auth" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "$api/releases" -o "$created"
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$created"
+  rm -f "$tmp" "$created"
+}
+
+upload_asset() {
+  local rel_id="$1" file="$2"
+  local name
+  name="$(basename "$file")"
+  echo "upload release ${rel_id}: $name"
+  curl -sS -f -H "$auth" \
+    -F "attachment=@${file}" \
+    "$api/releases/${rel_id}/assets?name=${name}" \
+    -o /dev/null
+}
+
+delete_asset_if_present() {
+  local rel_id="$1" asset_name="$2"
+  local id
+  id="$(
+    curl -sS -H "$auth" "$api/releases/${rel_id}/assets" \
+      | ASSET_NAME="$asset_name" python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+name = os.environ["ASSET_NAME"]
+for a in d if isinstance(d, list) else []:
+    if a.get("name") == name:
+        print(a["id"])
+        break
+' || true
+  )"
+  if [[ -n "${id:-}" ]]; then
+    curl -sS -f -X DELETE -H "$auth" "$api/releases/${rel_id}/assets/${id}" -o /dev/null
+  fi
+}
+
 if [[ "$do_files" -eq 1 ]]; then
   if [[ ! -d "$dist" ]]; then
     echo "publish-release: missing ${dist}" >&2
@@ -209,6 +273,26 @@ if [[ "$do_latest" -eq 1 ]]; then
     echo "publish-release: latest.json did not settle" >&2
     exit 1
   fi
+fi
+
+if [[ "$do_files" -eq 1 ]]; then
+  rel_id="$(ensure_release "v${ver}" "secd ${ver}")"
+  for src in \
+    "${dist}/secd-x86_64-unknown-linux-musl" \
+    "${dist}/secd-x86_64-unknown-linux-musl.sig" \
+    "${dist}/secd-aarch64-apple-darwin" \
+    "${dist}/secd-aarch64-apple-darwin.sig" \
+    "${dist}/SHA256SUMS" \
+    "${dist}/SHA256SUMS-x86_64-unknown-linux-musl" \
+    "${dist}/SHA256SUMS-aarch64-apple-darwin" \
+    "${root}/keys/cosign.pub" \
+    "${root}/packaging/install.sh"
+  do
+    [[ -f "$src" ]] || continue
+    name="$(basename "$src")"
+    delete_asset_if_present "$rel_id" "$name"
+    upload_asset "$rel_id" "$src"
+  done
 fi
 
 echo "publish-release: secd/${ver} ok"

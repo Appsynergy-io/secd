@@ -151,6 +151,7 @@ fn T_CONTRACT_ONE_DOC() {
     let allowed = [
         "AGENTS.md",
         "CLAUDE.md",
+        "README.md",
         "skills/grok/SKILL.md",
         "skills/claude/SKILL.md",
     ];

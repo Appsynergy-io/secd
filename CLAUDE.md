@@ -2,7 +2,7 @@
 
 LAN-only secrets store. Humans see values in the TUI and web console; agents never see a value. There is no `secd get`.
 
-Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.1.
+Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.2.
 
 ## Commands
 
@@ -51,5 +51,5 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - Unlock: passkey PRF and/or password (argon2id). Terminal never prompts.
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.
 - Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`.
-- One prose file: this document. `CLAUDE.md` is the same bytes. No README, `docs/`, or `CODE.md`.
+- One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
