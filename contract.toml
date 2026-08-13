@@ -1,0 +1,693 @@
+# Machine-readable Locked contracts. U1 only.
+
+commands = [
+  "logout",
+  "gitea",
+  "git-credential",
+  "run",
+  "ls",
+  "info",
+  "providers",
+  "redact",
+  "gen",
+  "doctor",
+  "update",
+]
+
+routes = [
+  "POST /api/auth/start",
+  "POST /api/auth/passkey/register/start",
+  "POST /api/auth/passkey/register/finish",
+  "POST /api/auth/passkey/login/start",
+  "POST /api/auth/passkey/login/finish",
+  "POST /api/auth/password/register",
+  "POST /api/auth/password/login",
+  "POST /api/auth/logout",
+  "GET /api/session",
+  "GET /api/v1/sessions",
+  "DELETE /api/v1/sessions/:id",
+  "GET /api/auth/passkeys",
+  "DELETE /api/auth/passkeys/:id",
+  "POST /api/v1/device/start",
+  "POST /api/v1/device/poll",
+  "POST /api/v1/device/approve",
+  "POST /api/v1/device/revoke",
+  "GET /api/v1/vault",
+  "PUT /api/v1/vault",
+  "GET /api/v1/providers",
+  "PUT /api/v1/providers",
+  "DELETE /api/v1/providers/:name",
+  "GET /api/v1/audit",
+]
+
+providers = [
+  "cloudflare",
+  "aws",
+  "s3",
+  "github",
+  "gitea",
+  "gitlab",
+  "slack",
+  "digitalocean",
+  "npm",
+  "xai",
+  "sendgrid",
+  "pypi",
+  "anthropic",
+  "openai",
+  "vault",
+]
+
+files = [
+  "src/main.rs",
+  "src/lib.rs",
+  "src/tui.rs",
+  "src/tui/",
+  "src/logout.rs",
+  "src/gitea.rs",
+  "src/run.rs",
+  "src/ls.rs",
+  "src/info.rs",
+  "src/providers.rs",
+  "src/redact.rs",
+  "src/gen.rs",
+  "src/doctor.rs",
+  "src/git_credential.rs",
+  "src/keyring.rs",
+  "src/policy.rs",
+  "src/skills_install.rs",
+  "src/update.rs",
+  "src/login.rs",
+  "crates/secd-core/src/",
+  "crates/secd-web/src/",
+  "crates/secd-ui/src/",
+]
+
+[tests.T_CONTRACT_COMMANDS]
+pending = false
+
+[tests.T_CONTRACT_NO_GET]
+pending = false
+
+[tests.T_CONTRACT_ROUTES]
+pending = false
+
+[tests.T_CONTRACT_PROVIDERS]
+pending = false
+
+[tests.T_NO_LEAK_SECRET]
+pending = false
+
+[tests.T_NO_LEAK_DEBUG]
+pending = false
+
+[tests.T_CONTRACT_ONE_DOC]
+pending = false
+
+[tests.T_CONTRACT_AGENTS_EQ_CLAUDE]
+pending = false
+
+[tests.T_AEAD_ROUNDTRIP]
+pending = true
+
+[tests.T_AEAD_WRONG_NAME]
+pending = true
+
+[tests.T_AEAD_TRUNCATED]
+pending = true
+
+[tests.T_AEAD_FLIP_BYTE]
+pending = true
+
+[tests.T_AEAD_EMPTY]
+pending = true
+
+[tests.T_WRAP_PASSWORD]
+pending = true
+
+[tests.T_WRAP_PASSWORD_WRONG]
+pending = true
+
+[tests.T_WRAP_PASSKEY]
+pending = true
+
+[tests.T_WRAP_PASSKEY_WRONG]
+pending = true
+
+[tests.T_WRAP_LAST_FACTOR]
+pending = true
+
+[tests.T_WRAP_TWO_FACTORS]
+pending = true
+
+[tests.T_NAME_OK]
+pending = true
+
+[tests.T_NAME_DOTDOT]
+pending = true
+
+[tests.T_NAME_SLASH]
+pending = true
+
+[tests.T_NAME_LONG]
+pending = true
+
+[tests.T_NAME_BAD_CHAR]
+pending = true
+
+[tests.T_GROUP_PREFIX]
+pending = true
+
+[tests.T_GROUP_DIR]
+pending = true
+
+[tests.T_GROUP_STRAY]
+pending = true
+
+[tests.T_REDACT_VALUE]
+pending = true
+
+[tests.T_REDACT_PARTIAL]
+pending = true
+
+[tests.T_PROVIDER_GITEA_ENV]
+pending = true
+
+[tests.T_PROVIDER_VAULT_SHARES]
+pending = true
+
+[tests.T_PROVIDER_COUNT]
+pending = true
+
+[tests.T_INFER_VAULT]
+pending = true
+
+[tests.T_INFER_AMBIGUOUS]
+pending = true
+
+[tests.T_AUTH_START_EMPTY]
+pending = true
+
+[tests.T_AUTH_START_BAD_EMAIL]
+pending = true
+
+[tests.T_AUTH_START_EMPTY_SERVER]
+pending = true
+
+[tests.T_AUTH_START_PASSKEY_ONLY]
+pending = true
+
+[tests.T_AUTH_START_PASSWORD_ONLY]
+pending = true
+
+[tests.T_AUTH_START_BOTH]
+pending = true
+
+[tests.T_AUTH_START_UNKNOWN]
+pending = true
+
+[tests.T_AUTH_START_CASE]
+pending = true
+
+[tests.T_AUTH_START_RATE]
+pending = true
+
+[tests.T_AUTH_START_CT]
+pending = true
+
+[tests.T_AUTH_PK_REG_NONEMPTY_NEW]
+pending = true
+
+[tests.T_AUTH_PK_REG_NO_PRF]
+pending = true
+
+[tests.T_AUTH_PK_REG_BAD_HANDLE]
+pending = true
+
+[tests.T_AUTH_PK_REG_EXPIRED]
+pending = true
+
+[tests.T_AUTH_PK_REG_REPLAY]
+pending = true
+
+[tests.T_AUTH_PK_REG_CROSS]
+pending = true
+
+[tests.T_AUTH_PK_LOGIN_BAD]
+pending = true
+
+[tests.T_AUTH_PK_LOGIN_NO_PRF]
+pending = true
+
+[tests.T_AUTH_PK_LOGIN_WRAPS_ARE_CIPHER]
+pending = true
+
+[tests.T_AUTH_PW_SHORT]
+pending = true
+
+[tests.T_AUTH_PW_LONG]
+pending = true
+
+[tests.T_AUTH_PW_REG_NONEMPTY]
+pending = true
+
+[tests.T_AUTH_PW_WRONG]
+pending = true
+
+[tests.T_AUTH_PW_UNKNOWN]
+pending = true
+
+[tests.T_AUTH_PW_TIMING]
+pending = true
+
+[tests.T_AUTH_PW_RATE]
+pending = true
+
+[tests.T_AUTH_PW_LOG]
+pending = true
+
+[tests.T_AUTH_SESSION_NONE]
+pending = true
+
+[tests.T_AUTH_SESSION_OK]
+pending = true
+
+[tests.T_AUTH_LOGOUT]
+pending = true
+
+[tests.T_AUTH_COOKIE_FLAGS]
+pending = true
+
+[tests.T_AUTH_NO_CORS]
+pending = true
+
+[tests.T_AUTH_FAIL_SENTENCE]
+pending = true
+
+[tests.T_DEV_START_OK]
+pending = true
+
+[tests.T_DEV_START_BAD_PUB]
+pending = true
+
+[tests.T_DEV_POLL_UNKNOWN]
+pending = true
+
+[tests.T_DEV_POLL_PENDING]
+pending = true
+
+[tests.T_DEV_POLL_OK]
+pending = true
+
+[tests.T_DEV_POLL_EXPIRED]
+pending = true
+
+[tests.T_DEV_APPROVE_NO_SESSION]
+pending = true
+
+[tests.T_DEV_APPROVE_BAD_CODE]
+pending = true
+
+[tests.T_DEV_APPROVE_DOUBLE]
+pending = true
+
+[tests.T_DEV_SERVER_NO_DEK]
+pending = true
+
+[tests.T_DEV_REVOKE]
+pending = true
+
+[tests.T_DEV_REVOKE_BAD]
+pending = true
+
+[tests.T_SESS_UNAUTH]
+pending = true
+
+[tests.T_SESS_BEARER]
+pending = true
+
+[tests.T_SESS_LIST]
+pending = true
+
+[tests.T_SESS_SHAPE]
+pending = true
+
+[tests.T_SESS_REVOKE_OTHER]
+pending = true
+
+[tests.T_SESS_REVOKE_SELF]
+pending = true
+
+[tests.T_SESS_REVOKE_UNKNOWN]
+pending = true
+
+[tests.T_SESS_REVOKE_UNAUTH]
+pending = true
+
+[tests.T_SESS_REVOKE_FOREIGN]
+pending = true
+
+[tests.T_SESS_AUDIT]
+pending = true
+
+[tests.T_PK_LIST_UNAUTH]
+pending = true
+
+[tests.T_PK_LIST_SHAPE]
+pending = true
+
+[tests.T_PK_ADD_WHILE_IN]
+pending = true
+
+[tests.T_PK_ADD_NO_PRF]
+pending = true
+
+[tests.T_PK_DEL]
+pending = true
+
+[tests.T_PK_DEL_LAST_NO_PW]
+pending = true
+
+[tests.T_PK_DEL_LAST_WITH_PW]
+pending = true
+
+[tests.T_PK_DEL_UNAUTH]
+pending = true
+
+[tests.T_PK_DEL_UNKNOWN]
+pending = true
+
+[tests.T_PK_DEL_FOREIGN]
+pending = true
+
+[tests.T_VAULT_GET_UNAUTH]
+pending = true
+
+[tests.T_VAULT_GET_EMPTY]
+pending = true
+
+[tests.T_VAULT_GET_SHAPE]
+pending = true
+
+[tests.T_VAULT_PUT_UNAUTH]
+pending = true
+
+[tests.T_VAULT_PUT_GET]
+pending = true
+
+[tests.T_VAULT_PUT_PLAINTEXT_FIELD]
+pending = true
+
+[tests.T_VAULT_PUT_BAD_NAME]
+pending = true
+
+[tests.T_VAULT_PUT_SQL]
+pending = true
+
+[tests.T_VAULT_AAD]
+pending = true
+
+[tests.T_VAULT_BEARER_AND_COOKIE]
+pending = true
+
+[tests.T_VAULT_NO_DECRYPT_WITHOUT_KEK]
+pending = true
+
+[tests.T_PROV_GET_BUILTIN]
+pending = true
+
+[tests.T_PROV_PUT_CUSTOM]
+pending = true
+
+[tests.T_PROV_DEL_CUSTOM]
+pending = true
+
+[tests.T_PROV_DEL_BUILTIN]
+pending = true
+
+[tests.T_PROV_PUT_MALFORMED]
+pending = true
+
+[tests.T_AUDIT_NO_VALUE]
+pending = true
+
+[tests.T_AUDIT_CHAIN]
+pending = true
+
+[tests.T_AUDIT_UNAUTH]
+pending = true
+
+[tests.T_TUI_REGIONS]
+pending = true
+
+[tests.T_TUI_HIT_EQ_DRAW]
+pending = true
+
+[tests.T_TUI_CLIP]
+pending = true
+
+[tests.T_TUI_CLICK_IS_KEY]
+pending = true
+
+[tests.T_TUI_ESC_IDLE]
+pending = true
+
+[tests.T_TUI_ESC_MODAL]
+pending = true
+
+[tests.T_TUI_VIEW_NO_GET]
+pending = true
+
+[tests.T_TUI_THEME]
+pending = true
+
+[tests.T_WEB_PK_ONLY_NO_PASSWORD_NODE]
+pending = true
+
+[tests.T_WEB_REMEMBERED_NO_EMAIL]
+pending = true
+
+[tests.T_WEB_LIVE_SESSION_APPROVE_ONLY]
+pending = true
+
+[tests.T_WEB_STALE_REMEMBER]
+pending = true
+
+[tests.T_WEB_CONDITIONAL]
+pending = true
+
+[tests.T_WEB_XSS_NAME]
+pending = true
+
+[tests.T_WEB_MOBILE_BREAKPOINT]
+pending = true
+
+[tests.T_WEB_COPY_DEFAULT]
+pending = true
+
+[tests.T_WEB_ACCOUNT_SESSIONS]
+pending = true
+
+[tests.T_WEB_ACCOUNT_REVOKE]
+pending = true
+
+[tests.T_WEB_ACCOUNT_PASSKEYS]
+pending = true
+
+[tests.T_WEB_ACCOUNT_REMOVE_LAST_DISABLED]
+pending = true
+
+[tests.T_CLI_LS_NO_VALUE]
+pending = true
+
+[tests.T_CLI_INFO_NO_VALUE]
+pending = true
+
+[tests.T_CLI_PROVIDERS_ENV]
+pending = true
+
+[tests.T_CLI_GEN_LEN]
+pending = true
+
+[tests.T_CLI_GITEA_ZERO]
+pending = true
+
+[tests.T_CLI_GITEA_TWO]
+pending = true
+
+[tests.T_CLI_GITEA_ONE]
+pending = true
+
+[tests.T_CLI_GITEA_REDACT]
+pending = true
+
+[tests.T_CLI_WITH_COLLISION]
+pending = true
+
+[tests.T_CLI_LOCKED]
+pending = true
+
+[tests.T_GIT_PARENT_NOT_GIT]
+pending = true
+
+[tests.T_GIT_WRONG_HOST]
+pending = true
+
+[tests.T_GIT_OK]
+pending = true
+
+[tests.T_KEYRING_ROUNDTRIP]
+pending = true
+
+[tests.T_SESSION_MODE]
+pending = true
+
+[tests.T_RUN_FILE_LEASE]
+pending = true
+
+[tests.T_UPD_BAD_HASH]
+pending = true
+
+[tests.T_UPD_BAD_SIG]
+pending = true
+
+[tests.T_UPD_WRONG_HOST]
+pending = true
+
+[tests.T_UPD_GOOD]
+pending = true
+
+[tests.T_UPD_PACMAN]
+pending = true
+
+[tests.T_SKILL_IDENTICAL]
+pending = true
+
+[tests.T_SKILL_LEN]
+pending = true
+
+[tests.T_SKILL_TABLE]
+pending = true
+
+[tests.T_SKILL_NO_GET]
+pending = true
+
+[tests.T_SKILL_NO_FORCE]
+pending = true
+
+[tests.T_SKILL_NO_FIXTURE]
+pending = true
+
+[tests.T_SKILL_INSTALL]
+pending = true
+
+[tests.T_IMP_NOTTY]
+pending = true
+
+[tests.T_IMP_NO_SDXD]
+pending = true
+
+[tests.T_IMP_COUNT]
+pending = true
+
+[tests.T_IMP_ZEROIZE]
+pending = true
+
+[tests.T_ADV_NO_HTTP_CLEAR]
+pending = true
+
+[tests.T_ADV_UNKNOWN_ROUTE]
+pending = true
+
+[tests.T_ADV_METHOD]
+pending = true
+
+[tests.T_ADV_JSON_BOMB]
+pending = true
+
+[tests.T_ADV_HOST_HEADER]
+pending = true
+
+[tests.T_ADV_PATH_DOTDOT]
+pending = true
+
+[tests.T_ADV_SSRF_URI]
+pending = true
+
+[tests.T_ADV_COOKIE_PREFIX]
+pending = true
+
+[tests.T_HDR_HSTS]
+pending = true
+
+[tests.T_HDR_CSP]
+pending = true
+
+[tests.T_HDR_FRAME]
+pending = true
+
+[tests.T_HDR_NOSNIFF]
+pending = true
+
+[tests.T_HDR_XSS0]
+pending = true
+
+[tests.T_HDR_REFERRER]
+pending = true
+
+[tests.T_HDR_PERM]
+pending = true
+
+[tests.T_HDR_COOP]
+pending = true
+
+[tests.T_HDR_COEP]
+pending = true
+
+[tests.T_HDR_CORP]
+pending = true
+
+[tests.T_HDR_CACHE]
+pending = true
+
+[tests.T_HDR_ROBOTS]
+pending = true
+
+[tests.T_HDR_JSON_CT]
+pending = true
+
+[tests.T_HDR_HTML_CT]
+pending = true
+
+[tests.T_HDR_NO_SERVER]
+pending = true
+
+[tests.T_HDR_NO_POWERED]
+pending = true
+
+[tests.T_HDR_NO_EXPECT_CT]
+pending = true
+
+[tests.T_HDR_NO_HPKP]
+pending = true
+
+[tests.T_HDR_NO_CORS]
+pending = true
+
+[tests.T_HDR_ON_ERROR]
+pending = true
+
+[tests.T_HDR_TRACE]
+pending = true
+
+[tests.T_HDR_BAD_CT]
+pending = true
+
+[tests.T_HDR_BODY_AUTH]
+pending = true
+
+[tests.T_HDR_BODY_VAULT]
+pending = true
+
+[tests.T_HDR_TLS13]
+pending = true
