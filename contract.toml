@@ -438,28 +438,28 @@ pending = false
 pending = false
 
 [tests.T_TUI_REGIONS]
-pending = true
+pending = false
 
 [tests.T_TUI_HIT_EQ_DRAW]
-pending = true
+pending = false
 
 [tests.T_TUI_CLIP]
-pending = true
+pending = false
 
 [tests.T_TUI_CLICK_IS_KEY]
-pending = true
+pending = false
 
 [tests.T_TUI_ESC_IDLE]
-pending = true
+pending = false
 
 [tests.T_TUI_ESC_MODAL]
-pending = true
+pending = false
 
 [tests.T_TUI_VIEW_NO_GET]
-pending = true
+pending = false
 
 [tests.T_TUI_THEME]
-pending = true
+pending = false
 
 [tests.T_WEB_PK_ONLY_NO_PASSWORD_NODE]
 pending = true
