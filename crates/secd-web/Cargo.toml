@@ -1,0 +1,34 @@
+[package]
+name = "secd-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "LAN secrets store TLS API"
+
+[lib]
+name = "secd_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "secd-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+axum-server = { version = "=0.7.3", default-features = false, features = ["tls-rustls"] }
+base64 = "=0.22.1"
+bytes = "=1.10.1"
+hex = "=0.4.3"
+rand = "=0.8.5"
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls-pemfile = "=2.2.0"
+secd-core = { path = "../secd-core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+time = { version = "=0.3.41", default-features = false, features = ["formatting", "std"] }
+tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "net", "time", "fs"] }
+url = "=2.5.4"
+uuid = { version = "=1.24.0", features = ["v4", "serde"] }
+webauthn-rs = { version = "=0.5.5", default-features = false, features = ["conditional-ui"] }
+zeroize = "=1.9.0"
