@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "secd"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 publish = false
 description = "LAN secrets store"

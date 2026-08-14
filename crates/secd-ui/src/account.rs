@@ -46,7 +46,12 @@ pub fn passkey_delete_path(id: &str) -> String {
 }
 
 #[component]
-pub fn AccountPage(view: AccountView) -> impl IntoView {
+pub fn AccountPage(
+    view: AccountView,
+    #[prop(optional, default = Callback::new(|_| {}))] on_revoke: Callback<String>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_remove: Callback<String>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_add_passkey: Callback<()>,
+) -> impl IntoView {
     let remove_ok = view.remove_enabled();
     let email = view.email.clone();
     view! {
@@ -79,11 +84,17 @@ pub fn AccountPage(view: AccountView) -> impl IntoView {
                                                 move || format!("{kind} · {last}")
                                             }
                                         />
-                                        <span class="asy-btn--danger" data-action="revoke" data-session-id=s.id.clone()>
-                                            <Button variant=ButtonVariant::Danger size=ButtonSize::Sm>
-                                                "Revoke"
-                                            </Button>
-                                        </span>
+                                        <Button
+                                            variant=ButtonVariant::Danger
+                                            size=ButtonSize::Sm
+                                            attr:data-action="revoke"
+                                            on:click={
+                                                let id = s.id.clone();
+                                                move |_| on_revoke.run(id.clone())
+                                            }
+                                        >
+                                            "Revoke"
+                                        </Button>
                                     </div>
                                 }
                             })
@@ -102,32 +113,48 @@ pub fn AccountPage(view: AccountView) -> impl IntoView {
                             .passkeys
                             .iter()
                             .map(|p| {
+                                let short_id = if p.id.chars().count() > 12 {
+                                    let head: String = p.id.chars().take(12).collect();
+                                    format!("{head}\u{2026}")
+                                } else {
+                                    p.id.clone()
+                                };
+                                let created_day = p
+                                    .created
+                                    .split('T')
+                                    .next()
+                                    .unwrap_or(p.created.as_str())
+                                    .to_owned();
                                 view! {
                                     <div data-passkey-id=p.id.clone()>
                                         <KeyVal
-                                            label=p.id.clone()
-                                            value={
-                                                let created = p.created.clone();
-                                                move || created.clone()
-                                            }
+                                            label=short_id
+                                            value=move || created_day.clone()
                                             mono=true
                                         />
-                                        <span data-action="remove" data-passkey-id=p.id.clone()>
-                                            <Button
-                                                variant=ButtonVariant::Danger
-                                                size=ButtonSize::Sm
-                                                disabled=Signal::from(!remove_ok)
-                                            >
-                                                "Remove"
-                                            </Button>
-                                        </span>
+                                        <Button
+                                            variant=ButtonVariant::Danger
+                                            size=ButtonSize::Sm
+                                            disabled=Signal::from(!remove_ok)
+                                            attr:data-action="remove"
+                                            on:click={
+                                                let id = p.id.clone();
+                                                move |_| on_remove.run(id.clone())
+                                            }
+                                        >
+                                            "Remove"
+                                        </Button>
                                     </div>
                                 }
                             })
                             .collect_view()}
-                        <span class="asy-btn--primary" data-action="add-passkey">
-                            <Button variant=ButtonVariant::Primary>"Add passkey"</Button>
-                        </span>
+                        <Button
+                            variant=ButtonVariant::Primary
+                            attr:data-action="add-passkey"
+                            on:click=move |_| on_add_passkey.run(())
+                        >
+                            "Add passkey"
+                        </Button>
                         </div>
                     </CardContent>
                 </Card>

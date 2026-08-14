@@ -408,5 +408,12 @@ pub fn push_path(to: &str) {
     }
 }
 
+/// Runs `f` on the next macrotask. Handlers that unmount their own subtree
+/// must defer the state write past the current event dispatch.
+pub fn after_delay_ms(ms: i32, f: impl FnOnce() + 'static) {
+    let cb = wasm_bindgen::closure::Closure::once_into_js(f);
+    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ms);
+}
+
 #[allow(dead_code)]
 fn _keep_promise(_: Promise) {}

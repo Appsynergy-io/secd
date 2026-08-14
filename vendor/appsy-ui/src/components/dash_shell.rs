@@ -51,6 +51,9 @@ pub struct DashShellConfig {
     pub platform_href: Option<String>,
     pub notifications_href: String,
     pub help_href: String,
+    /// Topbar search caption; the VPN product copy when `None` (additive
+    /// 2026-08-14).
+    pub search_text: Option<String>,
     pub orgs: Vec<OrgMembership>,
     pub on_switch_org: Callback<String>,
     pub switching: Signal<bool>,
@@ -94,6 +97,9 @@ pub fn ConfiguredDashShell(
             platform_href=config.platform_href
             notifications_href=config.notifications_href
             help_href=config.help_href
+            search_text=config
+                .search_text
+                .unwrap_or_else(|| "Search devices, tunnels, IPs…".to_owned())
             orgs=config.orgs
             on_switch_org=config.on_switch_org
             switching=config.switching
@@ -132,6 +138,9 @@ pub fn DashShell(
     platform_href: Option<String>,
     #[prop(into)] notifications_href: String,
     #[prop(into)] help_href: String,
+    /// Topbar search caption — see [`Topbar`]'s `search_text`.
+    #[prop(optional, into, default = "Search devices, tunnels, IPs…".into())]
+    search_text: String,
     #[prop(optional)] orgs: Vec<OrgMembership>,
     #[prop(into)] on_switch_org: Callback<String>,
     #[prop(optional, into)] switching: Signal<bool>,
@@ -294,10 +303,11 @@ pub fn DashShell(
                     unread=unread
                     notifications_href=notifications_href
                     help_href=help_href
+                    search_text=search_text
                     on_open_search=Callback::new(move |_| search_open.set(true))
                     on_open_nav=Callback::new(move |_| nav_open.set(true))
                 />
-                <main class=SHELL_MAIN style=format!("padding: {content_pad}")>
+                <main class=SHELL_MAIN style:padding=content_pad>
                     // Re-keyed by path: each navigation replays the mount
                     // entrance (inert under prefers-reduced-motion).
                     {move || {

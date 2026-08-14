@@ -266,10 +266,7 @@ fn open_effects(
             for lead in [true, false] {
                 let span = document.create_element("span").expect("invariant: create guard");
                 let _ = span.set_attribute("tabindex", "0");
-                let _ = span.set_attribute(
-                    "style",
-                    "outline: none; opacity: 0; position: fixed; pointer-events: none;",
-                );
+                crate::behavior::focus_trap::style_guard(&span);
                 if lead {
                     let _ = body.insert_before(&span, body.first_child().as_ref());
                 } else {

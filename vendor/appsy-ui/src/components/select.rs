@@ -112,10 +112,18 @@ pub fn Select(
                                 aria-hidden="true"
                                 tabindex="-1"
                                 prop:value=move || ctx.value.get().unwrap_or_default()
-                                style="position: absolute; border: 0px; width: 1px; \
-                                       height: 1px; padding: 0px; margin: -1px; \
-                                       overflow: hidden; clip: rect(0px, 0px, 0px, 0px); \
-                                       white-space: nowrap; overflow-wrap: normal;"
+                                // Radix's visually-hidden style, as CSSOM
+                                // bindings so style-src stays attribute-free.
+                                style:position="absolute"
+                                style:border="0px"
+                                style:width="1px"
+                                style:height="1px"
+                                style:padding="0px"
+                                style:margin="-1px"
+                                style:overflow="hidden"
+                                style:clip="rect(0px, 0px, 0px, 0px)"
+                                style:white-space="nowrap"
+                                style:overflow-wrap="normal"
                             >
                                 {move || {
                                     ctx.native_options
@@ -220,11 +228,12 @@ pub fn SelectValue(
         }
     });
     view! {
-        // Bare span with Radix's literal inline style — an inline `style`
-        // attribute (vs a class) is what keeps Chromium treating this
-        // node as `generic` instead of pruning it as uninteresting, which
-        // the AX comparison measures.
-        <span style="pointer-events: none;" node_ref=span_ref>
+        // Bare span with Radix's inline style — an inline style (vs a class)
+        // is what keeps Chromium treating this node as `generic` instead of
+        // pruning it as uninteresting, which the AX comparison measures.
+        // CSSOM binding: reflects into the inline style without tripping a
+        // style-src that blocks attributes.
+        <span style:pointer-events="none" node_ref=span_ref>
             {move || {
                 match label {
                     Some(label) if ctx.value.with(Option::is_some) => Some(label.get()),
@@ -742,10 +751,7 @@ fn open_effects(
                 let _ = span.set_attribute("tabindex", "0");
                 let _ = span.set_attribute("aria-hidden", "true");
                 let _ = span.set_attribute("data-aria-hidden", "true");
-                let _ = span.set_attribute(
-                    "style",
-                    "outline: none; opacity: 0; position: fixed; pointer-events: none;",
-                );
+                crate::behavior::focus_trap::style_guard(&span);
                 let handler = {
                     let content = content.clone();
                     let last_focused = std::rc::Rc::clone(&last_focused);

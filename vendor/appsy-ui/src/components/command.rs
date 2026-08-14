@@ -48,9 +48,6 @@ pub const CMD_GROUP_HEADING: &str = "asy-cmd__group-heading";
 pub const CMD_ITEM: &str = "asy-cmd__item";
 pub const CMD_SEP: &str = "asy-cmd__sep";
 
-/// cmdk's visually-hidden label style, verbatim.
-const SR_ONLY: &str = "position: absolute; width: 1px; height: 1px; padding: 0px; margin: -1px; overflow: hidden; clip: rect(0px, 0px, 0px, 0px); white-space: nowrap; border-width: 0px;";
-
 // --- command-score (Superhuman's algorithm, as vendored by cmdk) ---
 
 const SCORE_CONTINUE_MATCH: f64 = 1.0;
@@ -478,7 +475,17 @@ pub fn Command(
                 cmdk-label=""
                 for=move || format!("{}-input", ctx.base_id.get())
                 id=move || format!("{}-label", ctx.base_id.get())
-                style=SR_ONLY
+                // cmdk's visually-hidden label style as CSSOM bindings, so
+                // style-src stays attribute-free.
+                style:position="absolute"
+                style:width="1px"
+                style:height="1px"
+                style:padding="0px"
+                style:margin="-1px"
+                style:overflow="hidden"
+                style:clip="rect(0px, 0px, 0px, 0px)"
+                style:white-space="nowrap"
+                style:border-width="0px"
             ></label>
             // Scoped Provider — bare provide_context would let a later sibling
             // instance shadow this ctx for lazily-built children (see select.rs).

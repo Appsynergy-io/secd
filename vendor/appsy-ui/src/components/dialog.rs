@@ -419,10 +419,7 @@ pub(crate) fn modal_open_effects<E>(
                 let _ = span.set_attribute("tabindex", "0");
                 let _ = span.set_attribute("aria-hidden", "true");
                 let _ = span.set_attribute("data-aria-hidden", "true");
-                let _ = span.set_attribute(
-                    "style",
-                    "outline: none; opacity: 0; position: fixed; pointer-events: none;",
-                );
+                crate::behavior::focus_trap::style_guard(&span);
                 let handler = {
                     let host = host.clone();
                     Closure::wrap(Box::new(move |_: web_sys::Event| {

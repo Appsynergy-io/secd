@@ -167,8 +167,16 @@ fn identity_gate(method: AuthMethod, q: &GateQuery) -> GateView {
 }
 
 #[component]
-pub fn DevicePage(view: GateView) -> impl IntoView {
+pub fn DevicePage(
+    view: GateView,
+    /// Live device-code signal; a page-local signal seeded from the view
+    /// when absent (SSR render).
+    #[prop(optional)]
+    user_code: Option<RwSignal<String>>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_approve: Callback<()>,
+) -> impl IntoView {
     let code = view.user_code.clone().unwrap_or_default();
+    let code_sig = user_code.unwrap_or_else(|| RwSignal::new(code.clone()));
     let challenge = if code.is_empty() {
         view! {
             <DeviceCodeChallenge
@@ -193,31 +201,56 @@ pub fn DevicePage(view: GateView) -> impl IntoView {
     };
     view! {
         <div data-page="device">
-            <AuthShell home_href="/" links=Vec::new()>
+            <AuthShell full_width=true home_href="/" links=Vec::new()>
                 <AuthHead title="Approve this machine." />
-                <div class="secd-auth-form">
+                <form
+                    class="secd-auth-form"
+                    on:submit=move |ev| {
+                        ev.prevent_default();
+                        on_approve.run(());
+                    }
+                >
                     {challenge}
                     <LabeledInput
                         id="user_code"
                         label="Device code"
                         autocomplete="off"
-                        value=code
+                        value=code_sig
+                        on:input=move |ev| code_sig.set(event_target_value(&ev))
                     />
-                    <span class="asy-btn--primary" data-action="approve">
-                        <Button variant=ButtonVariant::Primary size=ButtonSize::Lg class="secd-btn-block">
-                            "Approve"
-                        </Button>
-                    </span>
-                </div>
+                    <Button
+                        variant=ButtonVariant::Primary
+                        size=ButtonSize::Lg
+                        class="secd-btn-block"
+                        attr:r#type="submit"
+                        attr:data-action="approve"
+                    >
+                        "Approve"
+                    </Button>
+                </form>
             </AuthShell>
         </div>
     }
 }
 
 #[component]
-pub fn GatePage(view: GateView) -> impl IntoView {
+pub fn GatePage(
+    view: GateView,
+    /// Live form signals; page-local signals seeded from the view when
+    /// absent (SSR render).
+    #[prop(optional)]
+    email: Option<RwSignal<String>>,
+    #[prop(optional)] password: Option<RwSignal<String>>,
+    #[prop(optional, into)] pending: Signal<bool>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_continue: Callback<()>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_passkey: Callback<()>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_use_password: Callback<()>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_different: Callback<()>,
+) -> impl IntoView {
     let prefill = view.email_prefill.clone().unwrap_or_default();
     let ac = view.email_autocomplete.unwrap_or("username");
+    let email = email.unwrap_or_else(|| RwSignal::new(prefill.clone()));
+    let password = password.unwrap_or_else(|| RwSignal::new(String::new()));
     let title = match view.kind {
         GateKind::RememberedPasskey | GateKind::RememberedPassword => "Welcome back.",
         GateKind::Identity => "Continue.",
@@ -230,16 +263,30 @@ pub fn GatePage(view: GateView) -> impl IntoView {
         GateKind::Identity => "Choose a factor.",
         GateKind::ApproveOnly => "",
     };
+    let remembered_as = view
+        .email_prefill
+        .clone()
+        .filter(|_| !view.show_email && view.kind != GateKind::ApproveOnly);
     view! {
         <div data-page="gate">
-            <AuthShell home_href="/" links=Vec::new()>
-                <AuthHead
-                    title=title
-                    sub=ViewFn::from(move || sub)
-                />
-                <div class="secd-auth-form">
+            <AuthShell full_width=true home_href="/" links=Vec::new()>
+                <AuthHead title=title sub=ViewFn::from(move || sub) />
+                <form
+                    class="secd-auth-form"
+                    on:submit=move |ev| {
+                        ev.prevent_default();
+                        on_continue.run(());
+                    }
+                >
+                    {remembered_as.map(|addr| {
+                        let shown = addr.clone();
+                        view! {
+                            <div class="secd-remembered mono" data-remembered=addr>
+                                {shown}
+                            </div>
+                        }
+                    })}
                     {view.show_email.then(|| {
-                        let prefill = prefill.clone();
                         view! {
                             <LabeledInput
                                 id="email"
@@ -248,7 +295,8 @@ pub fn GatePage(view: GateView) -> impl IntoView {
                                 autocomplete=ac
                                 required=true
                                 mono=true
-                                value=prefill
+                                value=email
+                                on:input=move |ev| email.set(event_target_value(&ev))
                             />
                         }
                     })}
@@ -260,46 +308,66 @@ pub fn GatePage(view: GateView) -> impl IntoView {
                                 r#type="password"
                                 autocomplete="current-password"
                                 required=true
+                                value=password
+                                on:input=move |ev| password.set(event_target_value(&ev))
                             />
                         }
                     })}
                     {view.show_passkey.then(|| {
                         view! {
-                            <span class="asy-btn--primary" data-action="passkey">
-                                <Button variant=ButtonVariant::Primary size=ButtonSize::Lg class="secd-btn-block">
-                                    "Use a passkey"
-                                </Button>
-                            </span>
+                            <Button
+                                variant=ButtonVariant::Primary
+                                size=ButtonSize::Lg
+                                class="secd-btn-block"
+                                disabled=pending
+                                on:click=move |_| {
+                                    on_passkey.run(());
+                                }
+                            >
+                                "Use a passkey"
+                            </Button>
                         }
                     })}
                     {(view.show_email || view.show_password).then(|| {
                         view! {
-                            <span class="asy-btn--primary" data-action="continue">
-                                <Button variant=ButtonVariant::Primary size=ButtonSize::Lg class="secd-btn-block">
-                                    "Continue"
-                                </Button>
-                            </span>
+                            <Button
+                                variant=ButtonVariant::Primary
+                                size=ButtonSize::Lg
+                                class="secd-btn-block"
+                                disabled=pending
+                                attr:r#type="submit"
+                            >
+                                "Continue"
+                            </Button>
                         }
                     })}
                     {view.show_use_password_instead.then(|| {
                         view! {
-                            <span data-action="use-password">
-                                <Button variant=ButtonVariant::Ghost class="secd-btn-block">
-                                    "Use a password instead"
-                                </Button>
-                            </span>
+                            <Button
+                                variant=ButtonVariant::Ghost
+                                class="secd-btn-block"
+                                on:click=move |_| {
+                                    on_use_password.run(());
+                                }
+                            >
+                                "Use a password instead"
+                            </Button>
                         }
                     })}
                     {view.show_use_different_account.then(|| {
                         view! {
-                            <span data-action="different">
-                                <Button variant=ButtonVariant::Ghost class="secd-btn-block">
-                                    "Use a different account"
-                                </Button>
-                            </span>
+                            <Button
+                                variant=ButtonVariant::Ghost
+                                class="secd-btn-block"
+                                on:click=move |_| {
+                                    on_different.run(());
+                                }
+                            >
+                                "Use a different account"
+                            </Button>
                         }
                     })}
-                </div>
+                </form>
             </AuthShell>
         </div>
     }

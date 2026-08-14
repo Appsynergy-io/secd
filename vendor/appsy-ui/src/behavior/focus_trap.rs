@@ -131,6 +131,20 @@ impl Drop for FocusTrapGuard {
     }
 }
 
+/// Style a focus-guard span via CSSOM. Same computed inline style as Radix's
+/// literal `style` attribute, but property writes are exempt from a
+/// `style-src` policy that blocks attributes (no `'unsafe-hashes'`).
+pub(crate) fn style_guard(span: &web_sys::Element) {
+    use wasm_bindgen::JsCast;
+    if let Some(el) = span.dyn_ref::<web_sys::HtmlElement>() {
+        let style = el.style();
+        let _ = style.set_property("outline", "none");
+        let _ = style.set_property("opacity", "0");
+        let _ = style.set_property("position", "fixed");
+        let _ = style.set_property("pointer-events", "none");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

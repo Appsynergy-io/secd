@@ -38,22 +38,6 @@ const DURATION_MS: f64 = 4000.0;
 #[cfg_attr(not(any(feature = "csr", feature = "hydrate")), allow(dead_code))]
 const UNMOUNT_DELAY_MS: u64 = 200;
 const GAP_PX: f64 = 14.0;
-
-/// The `<ol>`'s width/gap/offset custom properties. Sonner expands a scalar
-/// offset to all four sides; so does this. Defaults ("24px"/"16px")
-/// reproduce the reference's inline style byte-for-byte.
-fn offset_vars(offset: &str, mobile_offset: &str) -> String {
-    format!(
-        "--width: 356px; --gap: {GAP_PX}px; --offset-top: {o}; \
-         --offset-right: {o}; --offset-bottom: {o}; \
-         --offset-left: {o}; --mobile-offset-top: {m}; \
-         --mobile-offset-right: {m}; \
-         --mobile-offset-bottom: {m}; \
-         --mobile-offset-left: {m};",
-        o = offset,
-        m = mobile_offset,
-    )
-}
 const VISIBLE_TOASTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,19 +144,24 @@ pub fn Toaster(
                     data-sonner-theme="dark"
                     data-y-position="top"
                     data-x-position="right"
-                    style={
-                        let (offset, mobile_offset) = (offset.clone(), mobile_offset.clone());
-                        move || {
-                            let front = toasts
-                                .with(|list| list.first().map(|e| e.height.get()))
-                                .unwrap_or(0.0);
-                            format!(
-                                "--front-toast-height: {front}px; \
-                                 {}",
-                                offset_vars(&offset, &mobile_offset),
-                            )
-                        }
-                    }
+                    // CSSOM bindings, not a style attribute: the console ships a
+                    // style-src without 'unsafe-hashes', which blocks attributes.
+                    style=("--front-toast-height", move || {
+                        let front = toasts
+                            .with(|list| list.first().map(|e| e.height.get()))
+                            .unwrap_or(0.0);
+                        format!("{front}px")
+                    })
+                    style=("--width", "356px")
+                    style=("--gap", format!("{GAP_PX}px"))
+                    style=("--offset-top", offset.clone())
+                    style=("--offset-right", offset.clone())
+                    style=("--offset-bottom", offset.clone())
+                    style=("--offset-left", offset.clone())
+                    style=("--mobile-offset-top", mobile_offset.clone())
+                    style=("--mobile-offset-right", mobile_offset.clone())
+                    style=("--mobile-offset-bottom", mobile_offset.clone())
+                    style=("--mobile-offset-left", mobile_offset.clone())
                     on:pointerenter=move |_| expanded.set(true)
                     on:pointerleave=move |_| expanded.set(false)
                 >
@@ -199,23 +188,10 @@ fn toast_li(
     let index = Memo::new(move |_| {
         toasts.with(|list| list.iter().position(|e| e.id == id).unwrap_or(0))
     });
-    let style = move || {
-        let (offset, z_index) = toasts.with(|list| {
-            let i = index.get();
-            let offset: f64 =
-                list.iter().take(i).map(|e| e.height.get() + GAP_PX).sum();
-            (offset, list.len() - i)
-        });
-        format!(
-            "--index: {i}; --toasts-before: {i}; --z-index: {z_index}; \
-             --offset: {offset}px; --initial-height: {height}px; \
-             background: var(--color-surface); border-color: var(--color-border); \
-             color: var(--color-text); font-family: var(--font-sans); \
-             font-size: 13px; border-radius: var(--radius-md);",
-            i = index.get(),
-            height = entry.height.get(),
-        )
-    };
+    // The reference lands these as one inline style attribute; the console's
+    // style-src forbids attributes, so state rides CSSOM custom properties and
+    // the constant declarations live in the `.asy-toast` stylesheet rule.
+    let height = entry.height;
     let icon = match entry.kind {
         ToastKind::Normal => None,
         ToastKind::Success => Some(SUCCESS_PATH),
@@ -249,7 +225,21 @@ fn toast_li(
             data-type=kind_attr
             data-swipe-out="false"
             data-expanded=move || flag(expanded.get())
-            style=style
+            style=("--index", move || index.get().to_string())
+            style=("--toasts-before", move || index.get().to_string())
+            style=("--z-index", move || {
+                toasts.with(|list| (list.len() - index.get()).to_string())
+            })
+            style=("--offset", move || {
+                let px: f64 = toasts.with(|list| {
+                    list.iter()
+                        .take(index.get())
+                        .map(|e| e.height.get() + GAP_PX)
+                        .sum()
+                });
+                format!("{px}px")
+            })
+            style=("--initial-height", move || format!("{}px", height.get()))
         >
             {icon.map(|path| {
                 view! {
@@ -440,7 +430,7 @@ box-sizing:border-box;outline:0;overflow-wrap:anywhere;padding:16px;\
 background:var(--color-surface);border:1px solid var(--color-border);\
 color:var(--color-text);border-radius:var(--radius-md);\
 box-shadow:0 4px 12px rgba(0,0,0,.1);width:var(--width);font-size:13px;\
-display:flex;align-items:center;gap:6px}}\
+font-family:var(--font-sans);display:flex;align-items:center;gap:6px}}\
 .{TOAST}>*{{transition:opacity .4s}}\
 .{TOAST}[data-y-position=top]{{top:0;--y:translateY(-100%);--lift:1;\
 --lift-amount:calc(1 * var(--gap))}}\

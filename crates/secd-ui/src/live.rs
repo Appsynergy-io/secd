@@ -96,6 +96,42 @@ pub fn App() -> impl IntoView {
         let _ =
             window.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
         on_resize.forget();
+
+        // Same-origin anchors navigate in place (the shell renders plain
+        // hrefs); modified clicks and external hrefs keep browser behavior.
+        let document = window.document().expect("invariant: document");
+        let on_click = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
+            move |ev: web_sys::MouseEvent| {
+                if ev.default_prevented()
+                    || ev.button() != 0
+                    || ev.ctrl_key()
+                    || ev.meta_key()
+                    || ev.shift_key()
+                    || ev.alt_key()
+                {
+                    return;
+                }
+                let Some(t) = ev.target() else { return };
+                let Ok(el) = t.dyn_into::<web_sys::Element>() else {
+                    return;
+                };
+                let Ok(Some(a)) = el.closest("a[href]") else {
+                    return;
+                };
+                let Some(href) = a.get_attribute("href") else {
+                    return;
+                };
+                if !href.starts_with('/') {
+                    return;
+                }
+                ev.prevent_default();
+                client::push_path(&href);
+                path.set(href);
+            },
+        );
+        let _ =
+            document.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+        on_click.forget();
     }
 
     spawn_local({
@@ -138,7 +174,7 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <Toaster />
+        <Toaster offset="96px" mobile_offset="80px" />
         {move || {
             if session.get().is_some() {
                 view! {
@@ -377,34 +413,23 @@ fn LiveGate(
         {move || {
             let g = view_now();
             view! {
-                <div on:input=move |ev| {
-                    let Some(t) = ev.target() else { return };
-                    let Ok(el) = t.dyn_into::<web_sys::HtmlInputElement>() else { return };
-                    match el.id().as_str() {
-                        "email" => email.set(el.value()),
-                        "password" => password.set(el.value()),
-                        _ => {}
-                    }
-                } on:click=move |ev| {
-                    let Some(t) = ev.target() else { return };
-                    let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
-                    let Ok(Some(act)) = el.closest("[data-action]") else { return };
-                    let Some(name) = act.get_attribute("data-action") else { return };
-                    match name.as_str() {
-                        "continue" => on_continue(()),
-                        "passkey" => on_passkey(()),
-                        "use-password" => reveal_pw.set(true),
-                        "different" => {
-                            different.set(true);
-                            method.set(None);
-                        }
-                        _ => {}
-                    }
-                }>
+                <div>
                     <Show when=move || error.get().is_some()>
                         <Banner tone=BannerTone::Danger title=move || error.get().unwrap_or_default() />
                     </Show>
-                    <GatePage view=g />
+                    <GatePage
+                        view=g
+                        email=email
+                        password=password
+                        pending=pending
+                        on_continue=Callback::new(move |_| on_continue(()))
+                        on_passkey=Callback::new(move |_| on_passkey(()))
+                        on_use_password=Callback::new(move |_| reveal_pw.set(true))
+                        on_different=Callback::new(move |_| {
+                            different.set(true);
+                            method.set(None);
+                        })
+                    />
                 </div>
             }
         }}
@@ -425,11 +450,12 @@ fn LiveShell(
 ) -> impl IntoView {
     let s = session.get_untracked().expect("invariant: session");
     let email = RwSignal::new(s.email.clone());
+    let reg_filter = RwSignal::new(String::new());
     let config = DashShellConfig {
         show_platform: false,
         org_name: Some("secd".into()),
         user_name: Some(email.get_untracked()),
-        user_email: Some(email.get_untracked()),
+        user_email: None,
         is_platform_admin: false,
         customer_items: nav_items(),
         platform_items: vec![],
@@ -438,6 +464,7 @@ fn LiveShell(
         platform_href: None,
         notifications_href: "/account".into(),
         help_href: "/register".into(),
+        search_text: Some("Search secrets\u{2026}".into()),
         unread: 0,
         orgs: vec![OrgMembership {
             org_id: "secd".into(),
@@ -512,42 +539,33 @@ fn LiveShell(
             {move || {
                 match screen_from_path(&path.get()) {
                     Screen::Activity => view! { <ActivityPage view=activity.get() /> }.into_any(),
-                    Screen::Account => view! {
-                        <div on:click=move |ev| {
-                            let Some(t) = ev.target() else { return };
-                            let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
-                            let Ok(Some(act)) = el.closest("[data-action]") else { return };
-                            let Some(name) = act.get_attribute("data-action") else { return };
-                            match name.as_str() {
-                                "revoke" => {
-                                    if let Some(id) = act.get_attribute("data-session-id") {
-                                        spawn_local(async move {
-                                            let url = api::session_revoke_path(&id);
-                                            let _ = client::req("DELETE", &url, None).await;
-                                            path.set("/account".into());
-                                        });
-                                    }
-                                }
-                                "remove" => {
-                                    if let Some(id) = act.get_attribute("data-passkey-id") {
-                                        spawn_local(async move {
-                                            let url = api::passkey_delete_path(&id);
-                                            let _ = client::req("DELETE", &url, None).await;
-                                        });
-                                    }
-                                }
-                                "add-passkey" => {
-                                    let addr = email.get_untracked();
+                    Screen::Account => {
+                        let addr = email.get_untracked();
+                        view! {
+                            <AccountPage
+                                view=account.get()
+                                on_revoke=Callback::new(move |id: String| {
+                                    spawn_local(async move {
+                                        let url = api::session_revoke_path(&id);
+                                        let _ = client::req("DELETE", &url, None).await;
+                                        path.set("/account".into());
+                                    });
+                                })
+                                on_remove=Callback::new(move |id: String| {
+                                    spawn_local(async move {
+                                        let url = api::passkey_delete_path(&id);
+                                        let _ = client::req("DELETE", &url, None).await;
+                                    });
+                                })
+                                on_add_passkey=Callback::new(move |_| {
+                                    let addr = addr.clone();
                                     spawn_local(async move {
                                         let _ = client::passkey_create(&addr).await;
                                     });
-                                }
-                                _ => {}
-                            }
-                        }>
-                            <AccountPage view=account.get() />
-                        </div>
-                    }.into_any(),
+                                })
+                            />
+                        }.into_any()
+                    }
                     Screen::Device => {
                         let g = resolve_gate(&GateQuery {
                             session: session.get(),
@@ -558,73 +576,64 @@ fn LiveShell(
                             ..GateQuery::default()
                         });
                         view! {
-                            <div on:input=move |ev| {
-                                let Some(t) = ev.target() else { return };
-                                let Ok(el) = t.dyn_into::<web_sys::HtmlInputElement>() else { return };
-                                if el.id() == "user_code" {
-                                    user_code.set(el.value());
-                                }
-                            } on:click=move |ev| {
-                                let Some(t) = ev.target() else { return };
-                                let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
-                                let Ok(Some(act)) = el.closest("[data-action]") else { return };
-                                if act.get_attribute("data-action").as_deref() != Some("approve") {
-                                    return;
-                                }
-                                let code = user_code.get();
-                                spawn_local(async move {
-                                    let body = json!({
-                                        "user_code": code,
-                                        "sealed_dek": { "alg": "x25519-xchacha20poly1305" }
-                                    });
-                                    match client::req("POST", api::device_approve_url(), Some(&body)).await {
-                                        Ok(res) if res.status == 200 => {
-                                            client::push_path("/register");
-                                            path.set("/register".into());
+                            <crate::gate::DevicePage
+                                view=g
+                                user_code=user_code
+                                on_approve=Callback::new(move |_| {
+                                    let code = user_code.get_untracked();
+                                    spawn_local(async move {
+                                        let body = json!({
+                                            "user_code": code,
+                                            "sealed_dek": { "alg": "x25519-xchacha20poly1305" }
+                                        });
+                                        match client::req("POST", api::device_approve_url(), Some(&body)).await {
+                                            Ok(res) if res.status == 200 => {
+                                                client::push_path("/register");
+                                                path.set("/register".into());
+                                            }
+                                            Ok(res) => error.set(Some(
+                                                api::error_message(&res.data).unwrap_or_else(|| FAIL_SENTENCE.into()),
+                                            )),
+                                            Err(e) => error.set(Some(e)),
                                         }
-                                        Ok(res) => error.set(Some(
-                                            api::error_message(&res.data).unwrap_or_else(|| FAIL_SENTENCE.into()),
-                                        )),
-                                        Err(e) => error.set(Some(e)),
-                                    }
-                                });
-                            }>
-                                <crate::gate::DevicePage view=g />
-                            </div>
+                                    });
+                                })
+                            />
                         }.into_any()
                     }
                     _ => {
                         let mut v = register.get();
                         v.width_px = width.get();
                         view! {
-                            <div on:click=move |ev| {
-                                let Some(t) = ev.target() else { return };
-                                let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
-                                let Ok(Some(act)) = el.closest("[data-action]") else { return };
-                                let Some(name) = act.get_attribute("data-action") else { return };
-                                match name.as_str() {
-                                    "select" => {
-                                        if let Some(n) = act.get_attribute("data-name") {
-                                            register.update(|r| r.selected = Some(n));
-                                        }
-                                    }
-                                    "add" => register.update(|r| r.wizard_open = true),
-                                    "wizard-cancel" | "close-sheet" => {
-                                        register.update(|r| {
+                            <RegisterPage
+                                view=v
+                                filter=reg_filter
+                                on_select=Callback::new(move |n: String| {
+                                    register.update(|r| r.selected = Some(n));
+                                })
+                                on_add=Callback::new(move |_| {
+                                    register.update(|r| r.wizard_open = true);
+                                })
+                                on_close=Callback::new(move |_| {
+                                    client::after_delay_ms(0, move || {
+                                        let _ = register.try_update(|r| {
                                             r.wizard_open = false;
                                             r.selected = None;
                                         });
-                                    }
-                                    "copy" => {
-                                        spawn_local(async move {
-                                            client::copy_text("").await;
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                            }>
-                                <RegisterPage view=v />
-                            </div>
+                                    });
+                                })
+                                on_copy=Callback::new(move |_key: String| {
+                                    spawn_local(async move {
+                                        client::copy_text("").await;
+                                    });
+                                })
+                                on_save=Callback::new(move |_pv: (String, String)| {
+                                    toast("Saving from the console is not wired yet".to_owned());
+                                    client::after_delay_ms(0, move || {
+                                        let _ = register.try_update(|r| r.wizard_open = false);
+                                    });
+                                })
+                            />
                         }.into_any()
                     }
                 }

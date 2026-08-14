@@ -608,10 +608,7 @@ fn open_effects(
                 let _ = span.set_attribute("tabindex", "0");
                 let _ = span.set_attribute("aria-hidden", "true");
                 let _ = span.set_attribute("data-aria-hidden", "true");
-                let _ = span.set_attribute(
-                    "style",
-                    "outline: none; opacity: 0; position: fixed; pointer-events: none;",
-                );
+                crate::behavior::focus_trap::style_guard(&span);
                 // Either guard bounces into the scope: the last-focused
                 // item if any, else the first (Radix FocusScope memory).
                 // Chrome resumes Tab navigation from the blurred element,

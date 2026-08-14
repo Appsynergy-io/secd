@@ -83,6 +83,10 @@ pub fn Topbar(
     /// Opens the global ⌘K command palette (wired by the shell).
     #[prop(optional)]
     on_open_search: Option<Callback<()>>,
+    /// Search-button caption; the VPN product copy when omitted (additive
+    /// 2026-08-14, so a product that is not tunnels can name its own nouns).
+    #[prop(optional, into, default = "Search devices, tunnels, IPs…".into())]
+    search_text: String,
     /// Opens the mobile nav drawer (below md; wired by the shell).
     #[prop(optional)]
     on_open_nav: Option<Callback<()>>,
@@ -167,7 +171,7 @@ pub fn Topbar(
                 class=TOP_SEARCH
             >
                 <Icon d=RI_SEARCH_LINE class=TOP_SEARCH_ICON />
-                <span class=TOP_SEARCH_TEXT>"Search devices, tunnels, IPs…"</span>
+                <span class=TOP_SEARCH_TEXT>{search_text}</span>
                 <span class=format!("mono {TOP_KBD}")>"⌘K"</span>
             </button>
             <button
