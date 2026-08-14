@@ -16,7 +16,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 const HSTS: &str = "max-age=63072000";
-const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-VCA5FWv67zBQ1agTFoY5yuzLK4fOzardMcu8eLe7v+Y='; style-src 'self' 'sha256-M+wQTpKr2Qv1Qq65t+I7p9tcRVTOn8M/Gb6NbLEVX+A=' 'sha256-FF702t/jpTpUmfy//x1+ycA4QsSjKyAmMhYWUWR5zOo='; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
+const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-BNvK97dfoiB5WN/zZRF5YN83VZ4bVP1SYnNJ+7pQOWk='; style-src 'self' 'sha256-M+wQTpKr2Qv1Qq65t+I7p9tcRVTOn8M/Gb6NbLEVX+A=' 'sha256-FF702t/jpTpUmfy//x1+ycA4QsSjKyAmMhYWUWR5zOo='; font-src 'self' data:; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
 const PERM: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=()";
 
 const SEC: &[&str] = &[
