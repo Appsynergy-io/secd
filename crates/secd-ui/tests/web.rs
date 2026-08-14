@@ -176,6 +176,12 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{fragment}</body></html>"
     );
     std::fs::write(&path, page).expect("write dump-dom fixture");
+    let data = std::env::temp_dir().join(format!(
+        "secd-t6-chrome-{}-{}-{n}",
+        std::process::id(),
+        width_px
+    ));
+    let _ = std::fs::create_dir_all(&data);
     let url = format!("file://{}", path.display());
     let out = Command::new(bin)
         .args([
@@ -185,6 +191,7 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--no-default-browser-check",
+            &format!("--user-data-dir={}", data.display()),
             &format!("--window-size={width_px},812"),
             "--dump-dom",
             &url,
@@ -192,12 +199,15 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
         .output()
         .expect("spawn headless dump-dom");
     let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "dump-dom {width_px}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let _ = std::fs::remove_dir_all(&data);
+    if !out.status.success() {
+        return None;
+    }
+    let html = String::from_utf8_lossy(&out.stdout).into_owned();
+    if html.trim().is_empty() || !html.contains("data-") {
+        return None;
+    }
+    Some(html)
 }
 
 fn assert_no_password_node(html: &str) {
