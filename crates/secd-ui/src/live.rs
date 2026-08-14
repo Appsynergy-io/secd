@@ -195,6 +195,14 @@ fn LiveGate(
         resolve_gate(&GateQuery {
             session: None,
             remember: remember.get(),
+            email: {
+                let e = email.get_untracked();
+                if e.is_empty() {
+                    None
+                } else {
+                    Some(e)
+                }
+            },
             method: method.get(),
             use_different_account: different.get(),
             reveal_password: reveal_pw.get(),
@@ -369,7 +377,15 @@ fn LiveGate(
         {move || {
             let g = view_now();
             view! {
-                <div on:click=move |ev| {
+                <div on:input=move |ev| {
+                    let Some(t) = ev.target() else { return };
+                    let Ok(el) = t.dyn_into::<web_sys::HtmlInputElement>() else { return };
+                    match el.id().as_str() {
+                        "email" => email.set(el.value()),
+                        "password" => password.set(el.value()),
+                        _ => {}
+                    }
+                } on:click=move |ev| {
                     let Some(t) = ev.target() else { return };
                     let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
                     let Ok(Some(act)) = el.closest("[data-action]") else { return };
@@ -536,13 +552,19 @@ fn LiveShell(
                         let g = resolve_gate(&GateQuery {
                             session: session.get(),
                             user_code: {
-                                let c = user_code.get();
+                                let c = user_code.get_untracked();
                                 if c.is_empty() { None } else { Some(c) }
                             },
                             ..GateQuery::default()
                         });
                         view! {
-                            <div on:click=move |ev| {
+                            <div on:input=move |ev| {
+                                let Some(t) = ev.target() else { return };
+                                let Ok(el) = t.dyn_into::<web_sys::HtmlInputElement>() else { return };
+                                if el.id() == "user_code" {
+                                    user_code.set(el.value());
+                                }
+                            } on:click=move |ev| {
                                 let Some(t) = ev.target() else { return };
                                 let Ok(el) = t.dyn_into::<web_sys::Element>() else { return };
                                 let Ok(Some(act)) = el.closest("[data-action]") else { return };

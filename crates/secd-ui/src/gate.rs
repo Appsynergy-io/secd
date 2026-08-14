@@ -39,6 +39,7 @@ pub struct SessionInfo {
 pub struct GateQuery {
     pub session: Option<SessionInfo>,
     pub remember: Option<Remembered>,
+    pub email: Option<String>,
     pub now: Option<OffsetDateTime>,
     pub method: Option<AuthMethod>,
     pub use_different_account: bool,
@@ -131,7 +132,10 @@ pub fn resolve_gate(q: &GateQuery) -> GateView {
         show_passkey: false,
         show_approve: false,
         email_autocomplete: Some(EMAIL_AUTOCOMPLETE),
-        email_prefill: q.remember.as_ref().map(|r| r.email.clone()),
+        email_prefill: q
+            .email
+            .clone()
+            .or_else(|| q.remember.as_ref().map(|r| r.email.clone())),
         show_use_different_account: false,
         show_use_password_instead: false,
         user_code: q.user_code.clone(),
@@ -152,7 +156,10 @@ fn identity_gate(method: AuthMethod, q: &GateQuery) -> GateView {
         show_passkey,
         show_approve: false,
         email_autocomplete: Some(EMAIL_AUTOCOMPLETE),
-        email_prefill: q.remember.as_ref().map(|r| r.email.clone()),
+        email_prefill: q
+            .email
+            .clone()
+            .or_else(|| q.remember.as_ref().map(|r| r.email.clone())),
         show_use_different_account: q.remember.is_some(),
         show_use_password_instead: show_use_password,
         user_code: q.user_code.clone(),

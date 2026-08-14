@@ -485,6 +485,9 @@ pending = false
 [tests.T_WEB_COPY_DEFAULT]
 pending = false
 
+[tests.T_WEB_TYPED_EMAIL_KEPT]
+pending = false
+
 [tests.T_WEB_ACCOUNT_SESSIONS]
 pending = false
 

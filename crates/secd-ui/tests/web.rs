@@ -493,3 +493,27 @@ fn T_WEB_ACCOUNT_REMOVE_LAST_DISABLED() {
         );
     }
 }
+
+#[test]
+fn T_WEB_TYPED_EMAIL_KEPT() {
+    let view = resolve(GateQuery {
+        email: Some(EMAIL.into()),
+        method: Some(AuthMethod::Register),
+        ..GateQuery::default()
+    });
+    assert_eq!(
+        view.email_prefill.as_deref(),
+        Some(EMAIL),
+        "typed email must survive the method re-render as the prefill"
+    );
+    let html = render_gate(&view);
+    assert!(
+        attr(&html, "value", EMAIL),
+        "register gate renders the typed email: {html}"
+    );
+    let cold = resolve(GateQuery {
+        email: Some(EMAIL.into()),
+        ..GateQuery::default()
+    });
+    assert_eq!(cold.email_prefill.as_deref(), Some(EMAIL));
+}
