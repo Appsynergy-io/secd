@@ -14,7 +14,7 @@ pub const FAIL_SENTENCE: &str = "That email and credential do not match.";
 pub const RATE_SENTENCE: &str = "Too many attempts. Wait a minute.";
 
 const HSTS: &str = "max-age=63072000";
-const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
+const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'sha256-M+wQTpKr2Qv1Qq65t+I7p9tcRVTOn8M/Gb6NbLEVX+A=' 'sha256-FF702t/jpTpUmfy//x1+ycA4QsSjKyAmMhYWUWR5zOo='; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
 const PERMISSIONS: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=(), interest-cohort=()";
 
 const AUTH_BODY: usize = 64 * 1024;
@@ -98,6 +98,10 @@ fn apply_security_headers(path: &str, res: &mut Response) {
     insert_name(headers, "x-robots-tag", "noindex, nofollow");
     let content_type = if path.starts_with("/api/") {
         "application/json; charset=UTF-8"
+    } else if path == "/secd-ui.js" {
+        "text/javascript; charset=UTF-8"
+    } else if path == "/secd-ui.wasm" {
+        "application/wasm"
     } else {
         "text/html; charset=UTF-8"
     };

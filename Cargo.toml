@@ -1,10 +1,10 @@
 [workspace]
-members = ["crates/secd-core", "crates/secd-web", "tools/import-legacy"]
+members = ["crates/secd-core", "crates/secd-web", "crates/secd-ui", "tools/import-legacy"]
 resolver = "2"
 
 [package]
 name = "secd"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 publish = false
 description = "LAN secrets store"

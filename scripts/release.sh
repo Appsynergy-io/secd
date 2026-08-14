@@ -377,6 +377,7 @@ case "$target" in
         echo "release: crates/secd-web missing" >&2
         exit 1
       fi
+      "$root/scripts/build-ui.sh"
       cargo build --release --target "$target" -p secd-web
     fi
     ;;
