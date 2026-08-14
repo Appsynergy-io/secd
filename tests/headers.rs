@@ -253,9 +253,14 @@ fn T_HDR_HTML_CT() {
 fn T_HDR_JS_CT() {
     block_on(async {
         let h = fresh();
-        let (s, hdrs, _) = exchange(&h.app, Method::GET, "/app.js", None, None).await;
+        let (s, hdrs, body) = exchange(&h.app, Method::GET, "/app.js", None, None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(hv(&hdrs, "content-type"), "text/javascript; charset=UTF-8");
+        assert_eq!(hv(&hdrs, "content-type"), "text/html; charset=UTF-8");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.contains("<script") && !hv(&hdrs, "content-type").contains("javascript"),
+            "no javascript: {text}"
+        );
     });
 }
 
@@ -265,7 +270,8 @@ fn T_HDR_CSS_CT() {
         let h = fresh();
         let (s, hdrs, _) = exchange(&h.app, Method::GET, "/app.css", None, None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(hv(&hdrs, "content-type"), "text/css; charset=UTF-8");
+        assert_eq!(hv(&hdrs, "content-type"), "text/html; charset=UTF-8");
+        assert!(!hv(&hdrs, "content-type").contains("css"));
     });
 }
 

@@ -5,31 +5,14 @@ use axum::Router;
 
 use crate::state::AppState;
 
-const INDEX: &str = include_str!("../../secd-ui/index.html");
-const CSS: &str = include_str!("../../secd-ui/src/style.css");
-const JS: &str = include_str!("../../secd-ui/src/app.js");
-const BOOT: &str = r#"<div class="app" data-page="boot"></div>"#;
+const INDEX: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>secd</title></head><body></body></html>";
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route_service("/", get(index))
-        .route_service("/app.css", get(css))
-        .route_service("/app.js", get(js))
+    Router::new().route_service("/", get(index))
 }
 
 async fn index() -> Response {
-    bytes(
-        "text/html; charset=UTF-8",
-        INDEX.replace("__LEPTOS__", BOOT).into_bytes(),
-    )
-}
-
-async fn css() -> Response {
-    bytes("text/css; charset=UTF-8", CSS.as_bytes().to_vec())
-}
-
-async fn js() -> Response {
-    bytes("text/javascript; charset=UTF-8", JS.as_bytes().to_vec())
+    bytes("text/html; charset=UTF-8", INDEX.as_bytes().to_vec())
 }
 
 fn bytes(content_type: &'static str, body: Vec<u8>) -> Response {

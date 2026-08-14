@@ -98,10 +98,6 @@ fn apply_security_headers(path: &str, res: &mut Response) {
     insert_name(headers, "x-robots-tag", "noindex, nofollow");
     let content_type = if path.starts_with("/api/") {
         "application/json; charset=UTF-8"
-    } else if path == "/app.js" {
-        "text/javascript; charset=UTF-8"
-    } else if path == "/app.css" {
-        "text/css; charset=UTF-8"
     } else {
         "text/html; charset=UTF-8"
     };

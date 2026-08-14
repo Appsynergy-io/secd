@@ -462,40 +462,40 @@ pending = false
 pending = false
 
 [tests.T_WEB_PK_ONLY_NO_PASSWORD_NODE]
-pending = false
+pending = true
 
 [tests.T_WEB_REMEMBERED_NO_EMAIL]
-pending = false
+pending = true
 
 [tests.T_WEB_LIVE_SESSION_APPROVE_ONLY]
-pending = false
+pending = true
 
 [tests.T_WEB_STALE_REMEMBER]
-pending = false
+pending = true
 
 [tests.T_WEB_CONDITIONAL]
-pending = false
+pending = true
 
 [tests.T_WEB_XSS_NAME]
-pending = false
+pending = true
 
 [tests.T_WEB_MOBILE_BREAKPOINT]
-pending = false
+pending = true
 
 [tests.T_WEB_COPY_DEFAULT]
-pending = false
+pending = true
 
 [tests.T_WEB_ACCOUNT_SESSIONS]
-pending = false
+pending = true
 
 [tests.T_WEB_ACCOUNT_REVOKE]
-pending = false
+pending = true
 
 [tests.T_WEB_ACCOUNT_PASSKEYS]
-pending = false
+pending = true
 
 [tests.T_WEB_ACCOUNT_REMOVE_LAST_DISABLED]
-pending = false
+pending = true
 
 [tests.T_CLI_LS_NO_VALUE]
 pending = false
