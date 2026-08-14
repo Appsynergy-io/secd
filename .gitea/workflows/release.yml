@@ -3,8 +3,11 @@ on:
   push:
     branches: [main]
 
+# One run per release: linux and darwin build in parallel on their own
+# runners; publish waits for both and writes latest.json exactly once.
+# The PR ci run is the test gate; release.sh smoke tests still run here.
 jobs:
-  release:
+  linux:
     runs-on: arch-host
     env:
       CARGO_HOME: /cache/cargo
@@ -12,7 +15,7 @@ jobs:
       SECD_CACHE_CAP_GB: "20"
     steps:
       - uses: actions/checkout@v4
-      - name: release
+      - name: build, sign, push image
         env:
           COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
@@ -21,4 +24,51 @@ jobs:
         run: |
           scripts/ci-cache.sh
           scripts/release.sh
-          scripts/publish-release.sh
+          scripts/publish-release.sh --no-latest
+
+  darwin:
+    runs-on: osxcross-host
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /data/build/target/secd
+      SECD_CACHE_CAP_GB: "20"
+    steps:
+      - uses: actions/checkout@v4
+      - name: build and sign darwin aarch64
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          SECD_RELEASE_TOKEN: ${{ secrets.SECD_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          scripts/ci-cache.sh
+          scripts/release.sh --target aarch64-apple-darwin
+          scripts/publish-release.sh --no-latest
+      - uses: actions/upload-artifact@v3
+        with:
+          name: latest-darwin
+          path: target/release-dist/latest.json
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, darwin]
+    runs-on: arch-host
+    env:
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /data/build/target/secd
+      SECD_CACHE_CAP_GB: "20"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v3
+        with:
+          name: latest-darwin
+          path: target/release-dist-darwin
+      - name: merge and publish latest.json
+        env:
+          SECD_RELEASE_TOKEN: ${{ secrets.SECD_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/ci-cache.sh
+          mkdir -p target/release-dist
+          scripts/publish-release.sh --latest-only --merge-published \
+            target/release-dist-darwin/latest.json
