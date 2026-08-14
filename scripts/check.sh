@@ -7,7 +7,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 "$root/scripts/build-ui.sh"
 
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
 cargo test --workspace
 cargo test --workspace --release
 

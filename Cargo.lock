@@ -112,7 +112,6 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "appsy-ui"
 version = "0.1.0"
-source = "git+https://git.appsynergy.io/imabee/appsy-ui?rev=e3ab596b5e07345c31a7ff2ee8be38579143824d#e3ab596b5e07345c31a7ff2ee8be38579143824d"
 dependencies = [
  "js-sys",
  "leptos",

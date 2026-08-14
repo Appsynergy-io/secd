@@ -4,7 +4,15 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
-PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+PATH="$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
+
+if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+  rustup target add wasm32-unknown-unknown
+fi
+if ! command -v wasm-bindgen >/dev/null 2>&1; then
+  cargo install wasm-bindgen-cli --version 0.2.126 --locked
+fi
 
 cargo build --release --target wasm32-unknown-unknown \
   --manifest-path "$root/crates/secd-ui/Cargo.toml" \

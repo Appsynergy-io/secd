@@ -21,7 +21,7 @@ ssr = ["leptos/ssr", "appsy-ui/ssr"]
 csr = ["leptos/csr", "appsy-ui/csr"]
 
 [dependencies]
-appsy-ui = { git = "https://git.appsynergy.io/imabee/appsy-ui", rev = "e3ab596b5e07345c31a7ff2ee8be38579143824d", default-features = false, features = [
+appsy-ui = { path = "../../vendor/appsy-ui", default-features = false, features = [
   "overlays",
   "toast",
   "command",
