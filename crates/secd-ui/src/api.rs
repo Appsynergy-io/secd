@@ -50,6 +50,14 @@ pub fn vault_url() -> &'static str {
     "/api/v1/vault"
 }
 
+pub fn vault_versions_url() -> &'static str {
+    "/api/v1/vault/versions"
+}
+
+pub fn vault_rollback_url() -> &'static str {
+    "/api/v1/vault/rollback"
+}
+
 pub fn providers_url() -> &'static str {
     "/api/v1/providers"
 }

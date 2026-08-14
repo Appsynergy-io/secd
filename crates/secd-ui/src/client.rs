@@ -21,16 +21,40 @@ fn window() -> Window {
 }
 
 pub async fn req(method: &str, url: &str, body: Option<&Value>) -> Result<Http, String> {
+    req_inner(method, url, body, None).await
+}
+
+/// Same request with the entry name in `x-secd-name` (names contain `/`, so
+/// they stay out of the path and query).
+pub async fn req_named(method: &str, url: &str, name: &str) -> Result<Http, String> {
+    req_inner(method, url, None, Some(name)).await
+}
+
+async fn req_inner(
+    method: &str,
+    url: &str,
+    body: Option<&Value>,
+    name: Option<&str>,
+) -> Result<Http, String> {
     let opts = RequestInit::new();
     opts.set_method(method);
     opts.set_mode(RequestMode::SameOrigin);
     opts.set_credentials(RequestCredentials::SameOrigin);
-    if let Some(v) = body {
+    if body.is_some() || name.is_some() {
         let headers = web_sys::Headers::new().map_err(|_| FAIL_SENTENCE.to_string())?;
-        headers
-            .set("Content-Type", "application/json")
-            .map_err(|_| FAIL_SENTENCE.to_string())?;
+        if body.is_some() {
+            headers
+                .set("Content-Type", "application/json")
+                .map_err(|_| FAIL_SENTENCE.to_string())?;
+        }
+        if let Some(n) = name {
+            headers
+                .set("x-secd-name", n)
+                .map_err(|_| FAIL_SENTENCE.to_string())?;
+        }
         opts.set_headers(&headers);
+    }
+    if let Some(v) = body {
         opts.set_body(&JsValue::from_str(&v.to_string()));
     }
     let request =

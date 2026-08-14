@@ -13,8 +13,8 @@ pub const APP_CSS: &str = "\
 border:1px solid var(--color-border-soft);border-radius:var(--radius-md);\
 padding:8px 12px}\
 .secd-overlay{position:fixed;inset:0;z-index:60;display:flex;\
-align-items:flex-start;justify-content:center;padding:10vh 16px 16px;\
-background:rgba(0,0,0,.55)}\
+align-items:flex-start;justify-content:center;padding:6vh 16px 16px;\
+background:rgba(0,0,0,.55);overflow-y:auto}\
 .secd-modal{width:100%;max-width:440px}\
 @media (max-width:900px){.secd-grid-2{grid-template-columns:minmax(0,1fr)}}\
 ";

@@ -586,3 +586,56 @@ fn T_WEB_WRAP_ROUNDTRIP() {
     let opened = open(shared.as_bytes(), "dek", &blob).expect("unseal");
     assert_eq!(opened, dek.to_vec());
 }
+
+#[test]
+fn T_WEB_ADD_PROVIDER_FIELDS() {
+    use secd_ui::providers::{build_payload, provider_by_name};
+    let vault = provider_by_name("vault").expect("vault schema");
+    assert_eq!(vault.fields.len(), 12);
+    let values: Vec<(String, String)> = vault
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.key.to_owned(), format!("v{i}")))
+        .collect();
+    let payload = build_payload("vault", &values).expect("payload");
+    let obj = payload.as_object().expect("object");
+    assert_eq!(obj.len(), 12);
+    for i in 1..=5 {
+        assert!(obj.contains_key(&format!("share_{i}")), "share_{i} kept");
+    }
+    // Optional empties are dropped; required fields stay enforced.
+    let minimal: Vec<(String, String)> = [
+        ("addr", "https://vault.lan"),
+        ("role_id", "r"),
+        ("secret_id", "s"),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+    .collect();
+    let payload = build_payload("vault", &minimal).expect("required-only payload");
+    assert_eq!(payload.as_object().expect("object").len(), 3);
+    let missing: Vec<(String, String)> = vec![("addr".into(), "https://vault.lan".into())];
+    assert!(
+        build_payload("vault", &missing).is_none(),
+        "missing required"
+    );
+    assert!(
+        build_payload("vault", &[("addr".into(), "  ".into())]).is_none(),
+        "whitespace is not a value"
+    );
+    assert!(build_payload("nope", &values).is_none(), "unknown provider");
+    // Cloudflare multi-key: both required fields land in one entry.
+    let cf = build_payload(
+        "cloudflare",
+        &[
+            ("account_id".into(), "acct".into()),
+            ("api_token".into(), "tok".into()),
+        ],
+    )
+    .expect("cloudflare payload");
+    assert_eq!(
+        cf,
+        serde_json::json!({"account_id": "acct", "api_token": "tok"})
+    );
+}

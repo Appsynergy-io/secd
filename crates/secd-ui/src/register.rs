@@ -4,7 +4,7 @@ use appsy_ui::prelude::*;
 use leptos::prelude::*;
 
 use crate::layout::{layout_mode, LayoutMode};
-use crate::providers::PROVIDERS;
+use crate::providers::{provider_by_name, PROVIDERS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldAction {
@@ -27,6 +27,29 @@ pub struct FieldView {
 pub struct SecretItem {
     pub name: String,
     pub fields: Vec<FieldView>,
+}
+
+/// Wizard submission: provider name, secret name, raw field values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddRequest {
+    pub provider: String,
+    pub name: String,
+    pub values: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionInfo {
+    pub version: i64,
+    pub created: String,
+}
+
+/// "2026-08-14T12:34:56Z" → "2026-08-14 12:34".
+pub fn version_stamp(created: &str) -> String {
+    let mut s: String = created.chars().take(16).collect();
+    if let Some(i) = s.find('T') {
+        s.replace_range(i..=i, " ");
+    }
+    s
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -74,9 +97,54 @@ pub fn FieldRow(
 }
 
 #[component]
+pub fn VersionList(
+    versions: Vec<VersionInfo>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_rollback: Callback<i64>,
+) -> impl IntoView {
+    let latest = versions.iter().map(|v| v.version).max().unwrap_or(0);
+    (versions.len() > 1).then(|| {
+        view! {
+            <div class="secd-stack" data-list="versions">
+                <Label>"Versions"</Label>
+                {versions
+                    .into_iter()
+                    .rev()
+                    .map(|v| {
+                        let seq = v.version;
+                        let stamp = version_stamp(&v.created);
+                        let label = if seq == latest {
+                            format!("v{seq} · current")
+                        } else {
+                            format!("v{seq}")
+                        };
+                        view! {
+                            <div data-version=seq.to_string()>
+                                <KeyVal label=label value=move || stamp.clone() mono=true />
+                                {(seq != latest).then(|| view! {
+                                    <Button
+                                        variant=ButtonVariant::Ghost
+                                        size=ButtonSize::Sm
+                                        attr:data-action="rollback"
+                                        on:click=move |_| on_rollback.run(seq)
+                                    >
+                                        "Roll back"
+                                    </Button>
+                                })}
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+        }
+    })
+}
+
+#[component]
 pub fn Inspector(
     item: Option<SecretItem>,
     #[prop(optional, default = Callback::new(|_| {}))] on_copy: Callback<String>,
+    #[prop(optional, default = Vec::new())] versions: Vec<VersionInfo>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_rollback: Callback<i64>,
 ) -> impl IntoView {
     let title = match &item {
         None => "Secret".to_owned(),
@@ -103,6 +171,7 @@ pub fn Inspector(
                                 .into_iter()
                                 .map(|f| view! { <FieldRow field=f on_copy=on_copy /> })
                                 .collect_view()}
+                            <VersionList versions=versions on_rollback=on_rollback />
                         }.into_any(),
                     }}
                 </CardContent>
@@ -116,6 +185,8 @@ pub fn Sheet(
     item: SecretItem,
     #[prop(optional, default = Callback::new(|_| {}))] on_close: Callback<()>,
     #[prop(optional, default = Callback::new(|_| {}))] on_copy: Callback<String>,
+    #[prop(optional, default = Vec::new())] versions: Vec<VersionInfo>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_rollback: Callback<i64>,
 ) -> impl IntoView {
     view! {
         <div class="secd-overlay" data-sheet="open" data-pane="sheet">
@@ -130,6 +201,7 @@ pub fn Sheet(
                             .into_iter()
                             .map(|f| view! { <FieldRow field=f on_copy=on_copy /> })
                             .collect_view()}
+                        <VersionList versions=versions on_rollback=on_rollback />
                         <Button
                             variant=ButtonVariant::Ghost
                             on:click=move |_| {
@@ -147,25 +219,31 @@ pub fn Sheet(
 
 #[component]
 pub fn AddWizard(
-    #[prop(optional, default = Callback::new(|_| {}))] on_save: Callback<(String, String)>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_save: Callback<AddRequest>,
     #[prop(optional, default = Callback::new(|_| {}))] on_cancel: Callback<()>,
 ) -> impl IntoView {
     let provider = RwSignal::new(PROVIDERS[0].name.to_owned());
     let name = RwSignal::new(String::new());
+    let values = RwSignal::new(Vec::<(String, String)>::new());
+    let form_error = RwSignal::new(None::<&'static str>);
     view! {
         <div class="secd-overlay" data-wizard="open">
             <div class="secd-modal">
                 <Card>
                     <CardHeader>
                         <CardTitle>"Add a secret"</CardTitle>
-                        <CardDescription>"Name a secret and pick a provider."</CardDescription>
+                        <CardDescription>"Name a secret and fill the provider fields."</CardDescription>
                     </CardHeader>
                     <CardContent class="secd-stack">
                         <div>
                             <Label>"Provider"</Label>
                             <Select
                                 value=Signal::derive(move || provider.get())
-                                on_value_change=Callback::new(move |v: String| provider.set(v))
+                                on_value_change=Callback::new(move |v: String| {
+                                    provider.set(v);
+                                    values.set(Vec::new());
+                                    form_error.set(None);
+                                })
                             >
                                 <SelectTrigger>
                                     <SelectValue placeholder="Provider" />
@@ -191,11 +269,72 @@ pub fn AddWizard(
                             value=name
                             on:input=move |ev| name.set(event_target_value(&ev))
                         />
+                        {move || {
+                            let p = provider_by_name(&provider.get()).unwrap_or(&PROVIDERS[0]);
+                            p.fields
+                                .iter()
+                                .map(|f| {
+                                    let key = f.key;
+                                    let label = if f.optional {
+                                        format!("{key} (optional)")
+                                    } else {
+                                        key.to_owned()
+                                    };
+                                    let kind = if f.secret { "password" } else { "text" };
+                                    let current = Signal::derive(move || {
+                                        values
+                                            .get()
+                                            .iter()
+                                            .find(|(k, _)| k == key)
+                                            .map(|(_, v)| v.clone())
+                                            .unwrap_or_default()
+                                    });
+                                    view! {
+                                        <div data-wizard-field=key>
+                                            <Label>{label}</Label>
+                                            <Input
+                                                r#type=kind
+                                                class="mono"
+                                                value=current
+                                                attr:autocomplete="off"
+                                                on:input=move |ev| {
+                                                    let v = event_target_value(&ev);
+                                                    values.update(|vals| {
+                                                        match vals.iter_mut().find(|(k, _)| k == key) {
+                                                            Some(e) => e.1 = v,
+                                                            None => vals.push((key.to_owned(), v)),
+                                                        }
+                                                    });
+                                                }
+                                            />
+                                        </div>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                        {move || form_error.get().map(|msg| view! {
+                            <Banner tone=BannerTone::Danger title=move || msg />
+                        })}
                         <div class="secd-row">
                             <Button
                                 variant=ButtonVariant::Primary
                                 on:click=move |_| {
-                                    on_save.run((provider.get(), name.get()));
+                                    let p = provider.get_untracked();
+                                    let n = name.get_untracked().trim().to_owned();
+                                    let vals = values.get_untracked();
+                                    if n.is_empty() {
+                                        form_error.set(Some("Name the secret first."));
+                                        return;
+                                    }
+                                    if crate::providers::build_payload(&p, &vals).is_none() {
+                                        form_error.set(Some("Fill every required field."));
+                                        return;
+                                    }
+                                    on_save.run(AddRequest {
+                                        provider: p,
+                                        name: n,
+                                        values: vals,
+                                    });
                                 }
                             >
                                 "Save"
@@ -226,7 +365,9 @@ pub fn RegisterPage(
     #[prop(optional, default = Callback::new(|_| {}))] on_add: Callback<()>,
     #[prop(optional, default = Callback::new(|_| {}))] on_close: Callback<()>,
     #[prop(optional, default = Callback::new(|_| {}))] on_copy: Callback<String>,
-    #[prop(optional, default = Callback::new(|_| {}))] on_save: Callback<(String, String)>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_save: Callback<AddRequest>,
+    #[prop(optional, default = Vec::new())] versions: Vec<VersionInfo>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_rollback: Callback<i64>,
 ) -> impl IntoView {
     let layout = view.layout();
     let filter = filter.unwrap_or_else(|| RwSignal::new(String::new()));
@@ -305,13 +446,28 @@ pub fn RegisterPage(
                         </CardContent>
                     </Card>
                 </div>
-                {show_inspector.then(|| view! { <Inspector item=selected.clone() on_copy=on_copy /> })}
+                {show_inspector.then(|| view! {
+                    <Inspector
+                        item=selected.clone()
+                        on_copy=on_copy
+                        versions=versions.clone()
+                        on_rollback=on_rollback
+                    />
+                })}
             </div>
             {show_sheet.then(|| {
                 let item = selected
                     .clone()
                     .expect("invariant: sheet only when a secret is selected");
-                view! { <Sheet item=item on_close=on_close on_copy=on_copy /> }
+                view! {
+                    <Sheet
+                        item=item
+                        on_close=on_close
+                        on_copy=on_copy
+                        versions=versions.clone()
+                        on_rollback=on_rollback
+                    />
+                }
             })}
             {view.wizard_open.then(|| view! { <AddWizard on_save=on_save on_cancel=on_close /> })}
         </section>

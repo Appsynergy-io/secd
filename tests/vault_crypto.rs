@@ -759,3 +759,190 @@ fn T_AUDIT_UNAUTH() {
         assert_eq!(s, StatusCode::UNAUTHORIZED);
     });
 }
+
+async fn get_versions(app: &Router, name: &str, cookie: Option<&str>) -> (StatusCode, Value) {
+    let mut b = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/vault/versions")
+        .header("x-secd-name", name);
+    if let Some(c) = cookie {
+        b = b.header(header::COOKIE, format!("__Host-secd={c}"));
+    }
+    let req = b.body(Body::empty()).expect("request");
+    let res = app.clone().oneshot(req).await.expect("oneshot");
+    let status = res.status();
+    let bytes = to_bytes(res.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn put_entry(app: &Router, cookie: &str, name: &str, ct: &str) {
+    let body = json!({"entries":[{"name": name, "ciphertext": ct, "meta": {"provider": "npm", "fields": ["token"]}}]});
+    let (s, _) = put_json(app, "/api/v1/vault", &body, Some(cookie), None).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[test]
+fn T_VAULT_VERSIONS_APPEND() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let dek = [0x66u8; 32];
+        let ct1 = hex::encode(seal(&dek, "kv/ver", b"one").expect("seal"));
+        let ct2 = hex::encode(seal(&dek, "kv/ver", b"two").expect("seal"));
+        put_entry(&h.app, &cookie, "kv/ver", &ct1).await;
+        let (s, v) = get_versions(&h.app, "kv/ver", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK);
+        let rows = v["versions"].as_array().expect("versions");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["version"], json!(1));
+        assert!(!rows[0]["created"].as_str().expect("created").is_empty());
+        put_entry(&h.app, &cookie, "kv/ver", &ct2).await;
+        let (s, v) = get_versions(&h.app, "kv/ver", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_no_secret_keys(&v);
+        assert!(
+            !json_has_key(&v, "ciphertext"),
+            "versions must not carry ciphertext"
+        );
+        let rows = v["versions"].as_array().expect("versions");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["version"], json!(2));
+        let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["entries"][0]["version"], json!(2));
+    });
+}
+
+#[test]
+fn T_VAULT_PUT_UNCHANGED() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let dek = [0x67u8; 32];
+        let ct = hex::encode(seal(&dek, "kv/same", b"one").expect("seal"));
+        put_entry(&h.app, &cookie, "kv/same", &ct).await;
+        put_entry(&h.app, &cookie, "kv/same", &ct).await;
+        let (s, v) = get_versions(&h.app, "kv/same", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["versions"].as_array().expect("versions").len(), 1);
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(v["entries"][0]["version"], json!(1));
+    });
+}
+
+#[test]
+fn T_VAULT_ROLLBACK() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let dek = [0x68u8; 32];
+        let ct1 = hex::encode(seal(&dek, "kv/roll", b"one").expect("seal"));
+        let ct2 = hex::encode(seal(&dek, "kv/roll", b"two").expect("seal"));
+        put_entry(&h.app, &cookie, "kv/roll", &ct1).await;
+        put_entry(&h.app, &cookie, "kv/roll", &ct2).await;
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/vault/rollback",
+            &json!({"name": "kv/roll", "version": 1}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        let got = v["entries"][0]["ciphertext"].as_str().expect("ct");
+        assert_eq!(got, ct1, "rollback must restore v1 bytes");
+        let opened = open(&dek, "kv/roll", &hex::decode(got).expect("hex")).expect("open");
+        assert!(opened.as_bytes() == b"one");
+        assert_eq!(v["entries"][0]["version"], json!(3));
+        let (_, v) = get_versions(&h.app, "kv/roll", Some(&cookie)).await;
+        assert_eq!(v["versions"].as_array().expect("versions").len(), 3);
+        let (_, v) = get_json(&h.app, "/api/v1/audit", Some(&cookie), None).await;
+        let hit = v["events"].as_array().expect("events").iter().any(|ev| {
+            ev["action"].as_str() == Some("vault.rollback")
+                && ev["names"]
+                    .as_array()
+                    .is_some_and(|n| n.contains(&json!("kv/roll")))
+        });
+        assert!(hit, "audit must record vault.rollback with the name");
+        // A deleted entry can be restored from its history.
+        let (s, _) = put_json(
+            &h.app,
+            "/api/v1/vault",
+            &json!({"entries": []}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/vault/rollback",
+            &json!({"name": "kv/roll", "version": 1}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        let got = v["entries"][0]["ciphertext"].as_str().expect("ct");
+        let opened = open(&dek, "kv/roll", &hex::decode(got).expect("hex")).expect("open");
+        assert!(opened.as_bytes() == b"one");
+    });
+}
+
+#[test]
+fn T_VAULT_ROLLBACK_BAD() {
+    block_on(async {
+        let h = fresh();
+        let (s, v) = get_versions(&h.app, "kv/x", None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/vault/rollback",
+            &json!({"name": "kv/x", "version": 1}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let cookie = login(&h).await;
+        let dek = [0x69u8; 32];
+        let ct = hex::encode(seal(&dek, "kv/x", b"one").expect("seal"));
+        put_entry(&h.app, &cookie, "kv/x", &ct).await;
+        let cases = [
+            (
+                json!({"name": "kv/none", "version": 1}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                json!({"name": "kv/x", "version": 99}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                json!({"name": "kv/x", "version": 0}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (json!({"name": "kv/x"}), StatusCode::BAD_REQUEST),
+            (
+                json!({"name": "kv/x", "version": 1, "extra": 1}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (body, want) in cases {
+            let (s, _, v) =
+                post_json(&h.app, "/api/v1/vault/rollback", &body, Some(&cookie), None).await;
+            assert_eq!(s, want, "{body} -> {v}");
+        }
+        let (s, v) = get_versions(&h.app, "kv/none", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v, json!({"versions": []}));
+        let (s, _) = get_versions(&h.app, "", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    });
+}

@@ -34,6 +34,8 @@ routes = [
   "POST /api/v1/device/revoke",
   "GET /api/v1/vault",
   "PUT /api/v1/vault",
+  "GET /api/v1/vault/versions",
+  "POST /api/v1/vault/rollback",
   "GET /api/v1/providers",
   "PUT /api/v1/providers",
   "DELETE /api/v1/providers/:name",
@@ -417,6 +419,21 @@ pending = false
 pending = false
 
 [tests.T_VAULT_NO_DECRYPT_WITHOUT_KEK]
+pending = false
+
+[tests.T_VAULT_VERSIONS_APPEND]
+pending = false
+
+[tests.T_VAULT_PUT_UNCHANGED]
+pending = false
+
+[tests.T_VAULT_ROLLBACK]
+pending = false
+
+[tests.T_VAULT_ROLLBACK_BAD]
+pending = false
+
+[tests.T_WEB_ADD_PROVIDER_FIELDS]
 pending = false
 
 [tests.T_PROV_GET_BUILTIN]

@@ -14,7 +14,7 @@ use crate::app::{screen_from_path, Screen};
 use crate::client;
 use crate::crypto::{email_ok, password_ok};
 use crate::gate::{resolve_gate, AuthMethod, GatePage, GateQuery, SessionInfo};
-use crate::register::{FieldView, RegisterPage, RegisterView, SecretItem};
+use crate::register::{AddRequest, FieldView, RegisterPage, RegisterView, SecretItem, VersionInfo};
 use crate::tokens::FAIL_SENTENCE;
 
 fn nav_items() -> Vec<SideNavItem> {
@@ -498,6 +498,7 @@ fn LiveShell(
     let s = session.get_untracked().expect("invariant: session");
     let email = RwSignal::new(s.email.clone());
     let reg_filter = RwSignal::new(String::new());
+    let versions: RwSignal<Vec<VersionInfo>> = RwSignal::new(Vec::new());
     let config = DashShellConfig {
         show_platform: false,
         org_name: Some("secd".into()),
@@ -679,14 +680,25 @@ fn LiveShell(
                             <RegisterPage
                                 view=v
                                 filter=reg_filter
+                                versions=versions.get()
                                 on_select=Callback::new(move |n: String| {
-                                    register.update(|r| r.selected = Some(n));
+                                    versions.set(Vec::new());
+                                    register.update(|r| r.selected = Some(n.clone()));
+                                    spawn_local(async move {
+                                        let url = api::vault_versions_url();
+                                        if let Ok(res) = client::req_named("GET", url, &n).await {
+                                            if res.status == 200 {
+                                                versions.set(versions_from(&res.data));
+                                            }
+                                        }
+                                    });
                                 })
                                 on_add=Callback::new(move |_| {
                                     register.update(|r| r.wizard_open = true);
                                 })
                                 on_close=Callback::new(move |_| {
                                     client::after_delay_ms(0, move || {
+                                        versions.set(Vec::new());
                                         let _ = register.try_update(|r| {
                                             r.wizard_open = false;
                                             r.selected = None;
@@ -698,10 +710,49 @@ fn LiveShell(
                                         client::copy_text("").await;
                                     });
                                 })
-                                on_save=Callback::new(move |_pv: (String, String)| {
-                                    toast("Saving from the console is not wired yet".to_owned());
-                                    client::after_delay_ms(0, move || {
-                                        let _ = register.try_update(|r| r.wizard_open = false);
+                                on_save=Callback::new(move |req: AddRequest| {
+                                    let Some(d) = dek.get_untracked() else {
+                                        error.set(Some(crate::tokens::NO_DEK_SENTENCE.into()));
+                                        return;
+                                    };
+                                    spawn_local(async move {
+                                        match save_secret(&d, &req).await {
+                                            Ok(()) => {
+                                                error.set(None);
+                                                toast(format!("Saved {}", req.name));
+                                                refresh_register(register, width.get_untracked())
+                                                    .await;
+                                            }
+                                            Err(e) => error.set(Some(e)),
+                                        }
+                                    });
+                                })
+                                on_rollback=Callback::new(move |seq: i64| {
+                                    let Some(name) = register.get_untracked().selected else {
+                                        return;
+                                    };
+                                    spawn_local(async move {
+                                        let body = json!({ "name": name, "version": seq });
+                                        let url = api::vault_rollback_url();
+                                        match client::req("POST", url, Some(&body)).await {
+                                            Ok(res) if res.status == 200 => {
+                                                error.set(None);
+                                                toast(format!("Rolled {name} back to v{seq}"));
+                                                let vurl = api::vault_versions_url();
+                                                if let Ok(res) =
+                                                    client::req_named("GET", vurl, &name).await
+                                                {
+                                                    if res.status == 200 {
+                                                        versions.set(versions_from(&res.data));
+                                                    }
+                                                }
+                                            }
+                                            Ok(res) => error.set(Some(
+                                                api::error_message(&res.data)
+                                                    .unwrap_or_else(|| FAIL_SENTENCE.into()),
+                                            )),
+                                            Err(e) => error.set(Some(e)),
+                                        }
                                     });
                                 })
                             />
@@ -711,6 +762,116 @@ fn LiveShell(
             }}
         </ConfiguredDashShell>
     }
+}
+
+/// Seals the wizard payload under the DEK and PUTs the spliced snapshot.
+async fn save_secret(dek: &[u8], req: &AddRequest) -> Result<(), String> {
+    let Some(payload) = crate::providers::build_payload(&req.provider, &req.values) else {
+        return Err(FAIL_SENTENCE.into());
+    };
+    let keys: Vec<String> = payload
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    let sealed = crate::crypto::seal(dek, &req.name, payload.to_string().as_bytes())
+        .map(|b| crate::crypto::to_hex(&b))
+        .map_err(|_| FAIL_SENTENCE.to_string())?;
+    let current = client::req("GET", api::vault_url(), None).await?;
+    if current.status != 200 {
+        return Err(FAIL_SENTENCE.into());
+    }
+    let mut out: Vec<Value> = current
+        .data
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let name = e.get("name")?.as_str()?.to_owned();
+            if name == req.name {
+                return None;
+            }
+            Some(json!({
+                "name": name,
+                "ciphertext": e.get("ciphertext").cloned()?,
+                "meta": e.get("meta").cloned().unwrap_or_else(|| json!({})),
+            }))
+        })
+        .collect();
+    out.push(json!({
+        "name": req.name,
+        "ciphertext": sealed,
+        "meta": { "provider": req.provider, "fields": keys },
+    }));
+    let res = client::req("PUT", api::vault_url(), Some(&json!({ "entries": out }))).await?;
+    if res.status != 200 {
+        return Err(api::error_message(&res.data).unwrap_or_else(|| FAIL_SENTENCE.into()));
+    }
+    Ok(())
+}
+
+async fn refresh_register(register: RwSignal<RegisterView>, width_px: u32) {
+    if let Ok(res) = client::req("GET", api::vault_url(), None).await {
+        if res.status == 200 {
+            register.set(vault_to_view(&res.data, width_px));
+        }
+    }
+}
+
+fn versions_from(data: &Value) -> Vec<VersionInfo> {
+    data.get("versions")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(VersionInfo {
+                        version: v.get("version")?.as_i64()?,
+                        created: v.get("created")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn entry_fields(e: &Value, name: &str) -> Vec<FieldView> {
+    let meta = e.get("meta");
+    let provider = meta
+        .and_then(|m| m.get("provider"))
+        .and_then(Value::as_str)
+        .and_then(crate::providers::provider_by_name);
+    let keys: Vec<String> = meta
+        .and_then(|m| m.get("fields"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys.is_empty() {
+        let key = name.rsplit('/').next().unwrap_or(name).to_string();
+        return vec![FieldView {
+            key,
+            secret: true,
+            value: String::new(),
+        }];
+    }
+    keys.into_iter()
+        .map(|key| {
+            let secret = provider
+                .and_then(|p| p.fields.iter().find(|f| f.key == key))
+                .map(|f| f.secret)
+                .unwrap_or(true);
+            FieldView {
+                key,
+                secret,
+                value: String::new(),
+            }
+        })
+        .collect()
 }
 
 fn vault_to_view(data: &Value, width_px: u32) -> RegisterView {
@@ -726,26 +887,11 @@ fn vault_to_view(data: &Value, width_px: u32) -> RegisterView {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if name.is_empty() {
+        if name.is_empty() || items.iter().any(|i| i.name == name) {
             continue;
         }
-        let key = name.rsplit('/').next().unwrap_or(&name).to_string();
-        if let Some(existing) = items.iter_mut().find(|i| i.name == name) {
-            existing.fields.push(FieldView {
-                key,
-                secret: true,
-                value: String::new(),
-            });
-        } else {
-            items.push(SecretItem {
-                name,
-                fields: vec![FieldView {
-                    key,
-                    secret: true,
-                    value: String::new(),
-                }],
-            });
-        }
+        let fields = entry_fields(&e, &name);
+        items.push(SecretItem { name, fields });
     }
     RegisterView {
         width_px,

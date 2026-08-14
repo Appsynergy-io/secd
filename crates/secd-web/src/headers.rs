@@ -14,7 +14,7 @@ pub const FAIL_SENTENCE: &str = "That email and credential do not match.";
 pub const RATE_SENTENCE: &str = "Too many attempts. Wait a minute.";
 
 const HSTS: &str = "max-age=63072000";
-const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-BNvK97dfoiB5WN/zZRF5YN83VZ4bVP1SYnNJ+7pQOWk='; style-src 'self' 'sha256-Zt0GvCiuTuKfb8onn0gRkfdttdIaLVp/y71isjQND6o=' 'sha256-9pWvn7H8Wwz2VLxpHXCrliZT9e8OEPQc4veUouptHH0='; font-src 'self' data:; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
+const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-BNvK97dfoiB5WN/zZRF5YN83VZ4bVP1SYnNJ+7pQOWk='; style-src 'self' 'sha256-Zt0GvCiuTuKfb8onn0gRkfdttdIaLVp/y71isjQND6o=' 'sha256-qpmQISDq1j6svEmvD/Prj059Gn2skArZPQjIjFHKdrY='; font-src 'self' data:; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
 const PERMISSIONS: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=()";
 
 const AUTH_BODY: usize = 64 * 1024;

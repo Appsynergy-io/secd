@@ -201,3 +201,26 @@ pub const PROVIDERS: &[ProviderSchema] = &[
 pub fn provider_by_name(name: &str) -> Option<&'static ProviderSchema> {
     PROVIDERS.iter().find(|p| p.name == name)
 }
+
+/// Entry plaintext for `provider` from wizard input: schema-ordered object of
+/// non-empty fields. None when the provider is unknown or a required field is
+/// empty.
+pub fn build_payload(provider: &str, values: &[(String, String)]) -> Option<serde_json::Value> {
+    let schema = provider_by_name(provider)?;
+    let mut obj = serde_json::Map::new();
+    for f in schema.fields {
+        let v = values
+            .iter()
+            .find(|(k, _)| k == f.key)
+            .map(|(_, v)| v.trim())
+            .unwrap_or("");
+        if v.is_empty() {
+            if f.optional {
+                continue;
+            }
+            return None;
+        }
+        obj.insert(f.key.to_owned(), serde_json::Value::String(v.to_owned()));
+    }
+    Some(serde_json::Value::Object(obj))
+}

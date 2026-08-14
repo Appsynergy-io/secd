@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use secd_core::{check_name, CustomProvider, Field};
@@ -308,6 +308,14 @@ CREATE TABLE IF NOT EXISTS entries (
   ciphertext TEXT NOT NULL,
   meta TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS versions (
+  name TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  ciphertext TEXT NOT NULL,
+  meta TEXT NOT NULL,
+  created TEXT NOT NULL,
+  PRIMARY KEY (name, seq)
+);
 CREATE TABLE IF NOT EXISTS wraps (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   factor TEXT NOT NULL,
@@ -344,6 +352,14 @@ pub struct VaultEntry {
     pub name: String,
     pub ciphertext: Value,
     pub meta: Value,
+    /// Current version number; 1 for entries that predate any change.
+    pub version: i64,
+}
+
+pub struct VersionRow {
+    pub seq: i64,
+    pub created: String,
+    pub meta: Value,
 }
 
 #[derive(Clone)]
@@ -369,7 +385,11 @@ impl VaultStore {
 
     pub fn entries(&self) -> anyhow::Result<Vec<VaultEntry>> {
         self.db.with(|conn| {
-            let stmt = conn.prepare("SELECT name, ciphertext, meta FROM entries ORDER BY name")?;
+            let stmt = conn.prepare(
+                "SELECT e.name, e.ciphertext, e.meta, \
+                 COALESCE((SELECT MAX(v.seq) FROM versions v WHERE v.name = e.name), 1) \
+                 FROM entries e ORDER BY e.name",
+            )?;
             let mut out = Vec::new();
             loop {
                 match stmt.step()? {
@@ -378,12 +398,17 @@ impl VaultStore {
                         let name = stmt.text(0).unwrap_or_default();
                         let ct_raw = stmt.text(1).unwrap_or_else(|| "null".into());
                         let meta_raw = stmt.text(2).unwrap_or_else(|| "{}".into());
+                        let version = stmt
+                            .text(3)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(1);
                         let ciphertext = serde_json::from_str(&ct_raw).unwrap_or(Value::Null);
                         let meta = serde_json::from_str(&meta_raw).unwrap_or_else(|_| json!({}));
                         out.push(VaultEntry {
                             name,
                             ciphertext,
                             meta,
+                            version,
                         });
                     }
                 }
@@ -393,20 +418,55 @@ impl VaultStore {
     }
 
     pub fn replace_entries(&self, entries: &[VaultEntry]) -> anyhow::Result<()> {
+        let created = crate::auth::now_rfc3339();
         self.db.with(|conn| {
             conn.exec("BEGIN IMMEDIATE")?;
             let tx = (|| {
+                // Names whose ciphertext changes (or appears) in this snapshot
+                // get a new version row; unchanged names keep their history.
+                let mut before: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
+                loop {
+                    match sel.step()? {
+                        Step::Done => break,
+                        Step::Row => {
+                            before.insert(
+                                sel.text(0).unwrap_or_default(),
+                                sel.text(1).unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
                 conn.exec("DELETE FROM entries")?;
                 let stmt =
                     conn.prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)")?;
+                let ver = conn.prepare(
+                    "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
+                     (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
+                )?;
                 for e in entries {
+                    let ct = e.ciphertext.to_string();
+                    let meta = e.meta.to_string();
                     stmt.reset()?;
                     stmt.bind_text(1, &e.name)?;
-                    stmt.bind_text(2, &e.ciphertext.to_string())?;
-                    stmt.bind_text(3, &e.meta.to_string())?;
+                    stmt.bind_text(2, &ct)?;
+                    stmt.bind_text(3, &meta)?;
                     match stmt.step()? {
                         Step::Done => {}
                         Step::Row => return Err(anyhow!("insert returned a row")),
+                    }
+                    if before.get(&e.name).map(String::as_str) != Some(ct.as_str()) {
+                        ver.reset()?;
+                        ver.bind_text(1, &e.name)?;
+                        ver.bind_text(2, &e.name)?;
+                        ver.bind_text(3, &ct)?;
+                        ver.bind_text(4, &meta)?;
+                        ver.bind_text(5, &created)?;
+                        match ver.step()? {
+                            Step::Done => {}
+                            Step::Row => return Err(anyhow!("insert returned a row")),
+                        }
                     }
                 }
                 Ok(())
@@ -422,6 +482,89 @@ impl VaultStore {
         self.db.tighten();
         self.sync_wraps();
         Ok(())
+    }
+
+    pub fn versions_of(&self, name: &str) -> anyhow::Result<Vec<VersionRow>> {
+        self.db.with(|conn| {
+            let stmt = conn
+                .prepare("SELECT seq, created, meta FROM versions WHERE name = ? ORDER BY seq")?;
+            stmt.bind_text(1, name)?;
+            let mut out = Vec::new();
+            loop {
+                match stmt.step()? {
+                    Step::Done => break,
+                    Step::Row => {
+                        let seq = stmt
+                            .text(0)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        let created = stmt.text(1).unwrap_or_default();
+                        let meta_raw = stmt.text(2).unwrap_or_else(|| "{}".into());
+                        let meta = serde_json::from_str(&meta_raw).unwrap_or_else(|_| json!({}));
+                        out.push(VersionRow { seq, created, meta });
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Restores version `seq` of `name` as the current entry and appends the
+    /// restored ciphertext as a new version. Returns false when no such
+    /// version exists.
+    pub fn rollback(&self, name: &str, seq: i64) -> anyhow::Result<bool> {
+        let created = crate::auth::now_rfc3339();
+        let hit = self.db.with(|conn| {
+            conn.exec("BEGIN IMMEDIATE")?;
+            let tx = (|| {
+                let sel = conn
+                    .prepare("SELECT ciphertext, meta FROM versions WHERE name = ? AND seq = ?")?;
+                sel.bind_text(1, name)?;
+                sel.bind_text(2, &seq.to_string())?;
+                let (ct, meta) = match sel.step()? {
+                    Step::Done => return Ok(false),
+                    Step::Row => (
+                        sel.text(0).unwrap_or_default(),
+                        sel.text(1).unwrap_or_else(|| "{}".into()),
+                    ),
+                };
+                let up = conn.prepare(
+                    "INSERT OR REPLACE INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)",
+                )?;
+                up.bind_text(1, name)?;
+                up.bind_text(2, &ct)?;
+                up.bind_text(3, &meta)?;
+                match up.step()? {
+                    Step::Done => {}
+                    Step::Row => return Err(anyhow!("insert returned a row")),
+                }
+                let ver = conn.prepare(
+                    "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
+                     (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
+                )?;
+                ver.bind_text(1, name)?;
+                ver.bind_text(2, name)?;
+                ver.bind_text(3, &ct)?;
+                ver.bind_text(4, &meta)?;
+                ver.bind_text(5, &created)?;
+                match ver.step()? {
+                    Step::Done => Ok(true),
+                    Step::Row => Err(anyhow!("insert returned a row")),
+                }
+            })();
+            match tx {
+                Ok(hit) => {
+                    conn.exec("COMMIT")?;
+                    Ok(hit)
+                }
+                Err(e) => {
+                    let _ = conn.exec("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })?;
+        self.db.tighten();
+        Ok(hit)
     }
 
     pub fn list_custom_providers(&self) -> anyhow::Result<Vec<CustomProvider>> {
@@ -698,7 +841,10 @@ pub(crate) fn zero_hash() -> String {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v1/vault", get(get_vault).put(put_vault))
+    Router::new()
+        .route("/api/v1/vault", get(get_vault).put(put_vault))
+        .route("/api/v1/vault/versions", get(get_versions))
+        .route("/api/v1/vault/rollback", post(post_rollback))
 }
 
 async fn get_vault(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -715,6 +861,7 @@ async fn get_vault(State(state): State<AppState>, headers: HeaderMap) -> Respons
                         "name": e.name,
                         "ciphertext": e.ciphertext,
                         "meta": e.meta,
+                        "version": e.version,
                     })
                 })
                 .collect();
@@ -780,6 +927,7 @@ async fn put_vault(
             name: name.to_string(),
             ciphertext,
             meta,
+            version: 0,
         });
     }
     if state.vault.replace_entries(&entries).is_err() {
@@ -790,4 +938,74 @@ async fn put_vault(
         .audit
         .record_names("vault.put", Some(&session.id), &name_refs);
     json_value(StatusCode::OK, json!({ "ok": true }))
+}
+
+async fn get_versions(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if state.sessions.vault_from_headers(&headers).is_none() {
+        return fail_auth();
+    }
+    let name = headers
+        .get("x-secd-name")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if check_name(name).is_err() {
+        return json_status(StatusCode::BAD_REQUEST, "name");
+    }
+    match state.vault.versions_of(name) {
+        Ok(rows) => {
+            let versions: Vec<Value> = rows
+                .iter()
+                .map(|v| {
+                    json!({
+                        "version": v.seq,
+                        "created": v.created,
+                        "meta": v.meta,
+                    })
+                })
+                .collect();
+            json_value(StatusCode::OK, json!({ "versions": versions }))
+        }
+        Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+    }
+}
+
+async fn post_rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(session) = state.sessions.vault_from_headers(&headers) else {
+        return fail_auth();
+    };
+    let Some(obj) = body.as_object() else {
+        return json_status(StatusCode::BAD_REQUEST, "body");
+    };
+    if obj
+        .keys()
+        .any(|k| !matches!(k.as_str(), "name" | "version"))
+    {
+        return json_status(StatusCode::BAD_REQUEST, "body");
+    }
+    let Some(name) = obj.get("name").and_then(Value::as_str) else {
+        return json_status(StatusCode::BAD_REQUEST, "name");
+    };
+    if check_name(name).is_err() {
+        return json_status(StatusCode::BAD_REQUEST, "name");
+    }
+    let Some(version) = obj.get("version").and_then(Value::as_i64) else {
+        return json_status(StatusCode::BAD_REQUEST, "version");
+    };
+    if version < 1 {
+        return json_status(StatusCode::BAD_REQUEST, "version");
+    }
+    match state.vault.rollback(name, version) {
+        Ok(true) => {
+            state
+                .audit
+                .record_names("vault.rollback", Some(&session.id), &[name]);
+            json_value(StatusCode::OK, json!({ "ok": true }))
+        }
+        Ok(false) => json_status(StatusCode::NOT_FOUND, "version"),
+        Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+    }
 }
