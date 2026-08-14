@@ -2,7 +2,7 @@
 
 LAN-only secrets store. Humans see values in the TUI and web console; agents never see a value. There is no `secd get`.
 
-Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.3.
+Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.6.
 
 ## Commands
 
