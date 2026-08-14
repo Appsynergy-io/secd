@@ -12,6 +12,10 @@ const WASM: &[u8] = include_bytes!("../../secd-ui/dist/secd-ui.wasm");
 pub fn router() -> Router<AppState> {
     Router::new()
         .route_service("/", get(index))
+        .route_service("/device", get(index))
+        .route_service("/register", get(index))
+        .route_service("/activity", get(index))
+        .route_service("/account", get(index))
         .route_service("/secd-ui.js", get(js))
         .route_service("/secd-ui.wasm", get(wasm))
 }

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use secd_core::{unwrap_passkey, Factor, Wrap};
-use secd_web::auth::{password_wrap, User};
+use secd_core::{unwrap_passkey, wrap_passkey, wrap_password, Factor, Wrap};
+use secd_web::auth::{to_stored, User};
 use secd_web::AppState;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -186,7 +186,8 @@ fn dummy_passkey(cred: &[u8]) -> secd_web::auth::StoredPasskey {
 }
 
 fn put_user(state: &AppState, email: &str, password: Option<&str>, creds: &[&[u8]]) {
-    let password = password.map(|p| password_wrap(p).0);
+    let password =
+        password.map(|p| to_stored(&wrap_password(&[0x44; 32], p.as_bytes()).expect("wrap")));
     let passkeys = creds.iter().copied().map(dummy_passkey).collect();
     let user = User {
         id: serde_json::from_value(json!("00000000-0000-4000-8000-000000000001")).expect("uuid"),
@@ -357,11 +358,21 @@ impl Soft {
 
 const PRF: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
+fn pw_wrap_json(password: &str) -> Value {
+    let w = wrap_password(&[0x44; 32], password.as_bytes()).expect("wrap");
+    json!({"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob})
+}
+
+fn pk_wrap_json(cred_id_hex: &str) -> Value {
+    let w = wrap_passkey(&[0x44; 32], &[0x22; 32], cred_id_hex).expect("wrap");
+    json!({"factor": "passkey", "cred_id": w.cred_id.expect("cred_id"), "blob": w.blob})
+}
+
 async fn register_password(h: &H, email: &str, password: &str) -> String {
     let (s, hdrs, _) = post_json(
         &h.app,
         "/api/auth/password/register",
-        &json!({"email": email, "password": password}),
+        &json!({"email": email, "password": password, "wrap": pw_wrap_json(password)}),
         None,
     )
     .await;
@@ -597,7 +608,7 @@ fn T_AUTH_PK_REG_BAD_HANDLE() {
         let (s, _, v) = post_json(
             &h.app,
             "/api/auth/passkey/register/finish",
-            &json!({"handle": "deadbeef", "credential": {}, "prf": PRF}),
+            &json!({"handle": "deadbeef", "credential": {}, "wrap": pk_wrap_json("aabb")}),
             None,
         )
         .await;
@@ -623,7 +634,7 @@ fn T_AUTH_PK_REG_EXPIRED() {
         let (s, _, v) = post_json(
             &h.app,
             "/api/auth/passkey/register/finish",
-            &json!({"handle": handle, "credential": {}, "prf": PRF}),
+            &json!({"handle": handle, "credential": {}, "wrap": pk_wrap_json("aabb")}),
             None,
         )
         .await;
@@ -645,7 +656,7 @@ fn T_AUTH_PK_REG_REPLAY() {
         .await;
         assert_eq!(s, StatusCode::OK);
         let handle = start["handle"].as_str().expect("handle");
-        let body = json!({"handle": handle, "credential": {}, "prf": PRF});
+        let body = json!({"handle": handle, "credential": {}, "wrap": pk_wrap_json("aabb")});
         let _ = post_json(&h.app, "/api/auth/passkey/register/finish", &body, None).await;
         let (s, _, v) = post_json(&h.app, "/api/auth/passkey/register/finish", &body, None).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -673,7 +684,7 @@ fn T_AUTH_PK_REG_CROSS() {
                 "handle": handle,
                 "email": "other@x.y",
                 "credential": {},
-                "prf": PRF
+                "wrap": pk_wrap_json("aabb")
             }),
             None,
         )
@@ -747,7 +758,7 @@ fn T_AUTH_PK_LOGIN_NO_PRF() {
             None,
         )
         .await;
-        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
         assert!(cookie_token(&hdrs).is_none());
         let v: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
         assert!(v.get("wraps").is_none());
@@ -770,10 +781,18 @@ fn T_AUTH_PK_LOGIN_WRAPS_ARE_CIPHER() {
         let handle = start["handle"].as_str().expect("handle");
         let chal = start["publicKey"]["challenge"].as_str().expect("chal");
         let cred = tok.register(chal);
+        let cred_id_hex = hex::encode(&tok.cred_id);
+        let dek = [0x6b_u8; 32];
+        let wrap = wrap_passkey(&dek, &[0x22; 32], &cred_id_hex).expect("wrap");
+        let wrap_json = json!({
+            "factor": "passkey",
+            "cred_id": wrap.cred_id.expect("cred_id"),
+            "blob": wrap.blob,
+        });
         let (s, hdrs, _) = post_json(
             &h.app,
             "/api/auth/passkey/register/finish",
-            &json!({"handle": handle, "credential": cred, "prf": PRF}),
+            &json!({"handle": handle, "credential": cred, "wrap": wrap_json}),
             None,
         )
         .await;
@@ -794,7 +813,7 @@ fn T_AUTH_PK_LOGIN_WRAPS_ARE_CIPHER() {
         let (s, hdrs, body) = post_json(
             &h.app,
             "/api/auth/passkey/login/finish",
-            &json!({"handle": handle, "credential": cred, "prf": PRF}),
+            &json!({"handle": handle, "credential": cred}),
             None,
         )
         .await;
@@ -814,6 +833,8 @@ fn T_AUTH_PK_LOGIN_WRAPS_ARE_CIPHER() {
                 blob: blob.to_string(),
             };
             assert!(unwrap_passkey(&wrap, &[0u8; 32]).is_err());
+            let opened = unwrap_passkey(&wrap, &[0x22; 32]).expect("right PRF unwraps");
+            assert_eq!(opened.as_bytes(), dek);
         }
     });
 }
@@ -1076,7 +1097,7 @@ fn T_AUTH_COOKIE_FLAGS() {
         let (s, hdrs, _) = post_json(
             &h.app,
             "/api/auth/password/register",
-            &json!({"email": "op@secd.test", "password": PW}),
+            &json!({"email": "op@secd.test", "password": PW, "wrap": pw_wrap_json(PW)}),
             None,
         )
         .await;
@@ -1145,7 +1166,7 @@ fn T_AUTH_FAIL_SENTENCE() {
             (
                 Method::POST,
                 "/api/auth/passkey/register/finish",
-                Some(json!({"handle": "nope", "credential": {}, "prf": PRF})),
+                Some(json!({"handle": "nope", "credential": {}, "wrap": pk_wrap_json("aabb")})),
             ),
         ];
         for (method, path, body) in cases {

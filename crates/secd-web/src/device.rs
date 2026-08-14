@@ -19,7 +19,7 @@ use crate::state::AppState;
 
 const DEVICE_TTL: Duration = Duration::from_secs(10 * 60);
 const INTERVAL: u64 = 5;
-const VERIFICATION_URI: &str = "https://secd.imabee.com";
+const VERIFICATION_URI: &str = "https://secd.imabee.com/device";
 
 struct Device {
     hostname: String,
@@ -171,6 +171,9 @@ async fn approve(
     if d.approved.is_some() {
         return json_status(StatusCode::BAD_REQUEST, "already approved");
     }
+    if !sealed_ok(&body.sealed_dek) {
+        return json_status(StatusCode::BAD_REQUEST, "sealed_dek");
+    }
     let hostname = d.hostname.clone();
     let (_id, token) = state.sessions.create_device(&session.email, &hostname);
     d.approved = Some(Approved {
@@ -178,6 +181,24 @@ async fn approve(
         sealed_dek: body.sealed_dek,
     });
     json_value(StatusCode::OK, json!({ "ok": true }))
+}
+
+/// The CLI unseals with eph_pub (32-byte x25519 pub) and blob
+/// (24-byte nonce + ciphertext + 16-byte tag); anything else fails closed.
+fn sealed_ok(v: &Value) -> bool {
+    let Value::Object(m) = v else { return false };
+    let eph = m.get("eph_pub").and_then(Value::as_str).unwrap_or("");
+    let blob = m.get("blob").and_then(Value::as_str).unwrap_or("");
+    let hex_ok = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    eph.len() == 64
+        && hex_ok(eph)
+        && blob.len() >= (24 + 16) * 2
+        && blob.len().is_multiple_of(2)
+        && hex_ok(blob)
 }
 
 async fn revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {

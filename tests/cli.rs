@@ -234,6 +234,48 @@ fn T_KEYRING_ROUNDTRIP() {
 }
 
 #[test]
+fn T_CLI_FINISH_STORES_DEK() {
+    let home = tmp("finish");
+    let runtime = tmp("finish-run");
+    let device = x25519_dalek::StaticSecret::from([0x51u8; 32]);
+    let device_pub = x25519_dalek::PublicKey::from(&device);
+    let dek = [0x7cu8; 32];
+    // Browser-side seal: DH to the device pub, raw shared secret as the
+    // XChaCha key, AAD "dek".
+    let browser = x25519_dalek::StaticSecret::from([0x62u8; 32]);
+    let browser_pub = x25519_dalek::PublicKey::from(&browser);
+    let shared = browser.diffie_hellman(&device_pub);
+    let blob = secd_core::seal(shared.as_bytes(), "dek", &dek).expect("seal");
+    let sealed = serde_json::json!({
+        "alg": "x25519-xchacha20poly1305",
+        "eph_pub": hex::encode(browser_pub.as_bytes()),
+        "blob": hex::encode(blob),
+    });
+    common::with_secd_env(&home, Some(&runtime), || {
+        let flow = secd::login::DeviceFlow::from_parts(
+            device.clone(),
+            "ABCD-EFGH".into(),
+            5,
+            "https://secd.imabee.com/device".into(),
+            "https://secd.imabee.com/device?code=ABCD-EFGH".into(),
+        );
+        let unlocked =
+            secd::login::finish(flow, "tok-finish-test".into(), sealed.clone()).expect("finish");
+        assert_eq!(sha256(unlocked.dek.as_bytes()), sha256(&dek));
+        let loaded = secd::keyring::load().expect("finish must store the DEK");
+        assert_eq!(sha256(loaded.as_bytes()), sha256(&dek));
+        drop(loaded);
+        let sp = secd::login::session_path();
+        let meta = fs::metadata(&sp).expect("login.session");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let content = fs::read_to_string(&sp).expect("session read");
+        assert!(content.contains("tok-finish-test"));
+        secd::logout::run().expect("logout");
+        assert!(secd::keyring::load().is_none(), "logout deletes the DEK");
+    });
+}
+
+#[test]
 fn T_SESSION_MODE() {
     let home = tmp("session");
     with_secd_home(&home, || {

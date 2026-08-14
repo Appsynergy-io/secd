@@ -10,7 +10,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::account::{AccountPage, AccountView, PasskeyRow, SessionRow};
 use crate::activity::{ActivityPage, ActivityView, AuditRow};
 use crate::api;
-use crate::app::Screen;
+use crate::app::{screen_from_path, Screen};
 use crate::client;
 use crate::crypto::{email_ok, password_ok};
 use crate::gate::{resolve_gate, AuthMethod, GatePage, GateQuery, SessionInfo};
@@ -51,19 +51,15 @@ fn palette() -> PaletteGroup {
     }
 }
 
-fn screen_from_path(path: &str) -> Screen {
-    match path {
-        "/activity" => Screen::Activity,
-        "/account" => Screen::Account,
-        "/device" => Screen::Device,
-        _ => Screen::Register,
-    }
-}
-
 #[component]
 pub fn App() -> impl IntoView {
     let session: RwSignal<Option<SessionInfo>> = RwSignal::new(None);
-    let path = RwSignal::new(client::path());
+    let (user_code, eph) = client::query_user_code();
+    let boot_path = crate::app::initial_path(&client::path(), &user_code);
+    if boot_path != client::path() {
+        client::push_path(&boot_path);
+    }
+    let path = RwSignal::new(boot_path);
     let width = RwSignal::new(client::width_px());
     let method: RwSignal<Option<AuthMethod>> = RwSignal::new(None);
     let different = RwSignal::new(false);
@@ -76,8 +72,9 @@ pub fn App() -> impl IntoView {
     });
     let activity = RwSignal::new(ActivityView::default());
     let account = RwSignal::new(AccountView::default());
-    let (user_code, _eph) = client::query_user_code();
     let user_code = RwSignal::new(user_code);
+    let eph = RwSignal::new(eph);
+    let dek: RwSignal<Option<zeroize::Zeroizing<Vec<u8>>>> = RwSignal::new(None);
     let remember = RwSignal::new(client::load_remember());
 
     {
@@ -183,6 +180,8 @@ pub fn App() -> impl IntoView {
                         path=path
                         width=width
                         user_code=user_code
+                        eph=eph
+                        dek=dek
                         register=register
                         activity=activity
                         account=account
@@ -201,6 +200,7 @@ pub fn App() -> impl IntoView {
                         pending=pending
                         remember=remember
                         user_code=user_code
+                        dek=dek
                     />
                 }.into_any()
             }
@@ -218,6 +218,7 @@ fn LiveGate(
     pending: RwSignal<bool>,
     remember: RwSignal<Option<crate::Remembered>>,
     user_code: RwSignal<String>,
+    dek: RwSignal<Option<zeroize::Zeroizing<Vec<u8>>>>,
 ) -> impl IntoView {
     let email = RwSignal::new(
         remember
@@ -342,13 +343,54 @@ fn LiveGate(
                 error.set(Some("password".into()));
                 return;
             }
-            let url = if method.get_untracked() == Some(AuthMethod::Register) {
+            let is_register = method.get_untracked() == Some(AuthMethod::Register);
+            let url = if is_register {
                 api::password_register_url()
             } else {
                 api::password_login_url()
             };
-            match client::req("POST", url, Some(&json!({ "email": norm, "password": pw }))).await {
-                Ok(res) if res.status == 200 => after_ok(norm, false),
+            let mut new_dek: Option<zeroize::Zeroizing<Vec<u8>>> = None;
+            let body = if is_register {
+                // The browser mints the vault key and wraps it; the server
+                // stores only the wrap.
+                let mut fresh = crate::crypto::mint_dek();
+                match crate::crypto::wrap_password(&fresh, pw.as_bytes()) {
+                    Ok(w) => {
+                        new_dek = Some(zeroize::Zeroizing::new(fresh.to_vec()));
+                        crate::crypto::zeroize_bytes(&mut fresh);
+                        json!({
+                            "email": norm,
+                            "password": pw,
+                            "wrap": crate::crypto::wrap_to_json(&w),
+                        })
+                    }
+                    Err(_) => {
+                        crate::crypto::zeroize_bytes(&mut fresh);
+                        pending.set(false);
+                        error.set(Some(FAIL_SENTENCE.into()));
+                        return;
+                    }
+                }
+            } else {
+                json!({ "email": norm, "password": pw })
+            };
+            match client::req("POST", url, Some(&body)).await {
+                Ok(res) if res.status == 200 => {
+                    if is_register {
+                        dek.set(new_dek);
+                    } else {
+                        let pw = password.get_untracked();
+                        dek.set(
+                            crate::crypto::unwrap_any(
+                                &crate::crypto::wraps_from_json(&res.data),
+                                Some(pw.as_bytes()),
+                                None,
+                            )
+                            .map(zeroize::Zeroizing::new),
+                        );
+                    }
+                    after_ok(norm, false)
+                }
                 Ok(res) => {
                     pending.set(false);
                     password.set(String::new());
@@ -389,13 +431,16 @@ fn LiveGate(
                 }
             }
             let res = if method.get_untracked() == Some(AuthMethod::Register) {
-                client::passkey_create(&addr).await
+                client::passkey_create(&addr, None).await
             } else {
                 client::passkey_get(if addr.is_empty() { None } else { Some(&addr) }, false).await
             };
             match res {
-                Ok(http) if http.status == 200 => after_ok(addr, true),
-                Ok(http) => {
+                Ok((http, got)) if http.status == 200 => {
+                    dek.set(got);
+                    after_ok(addr, true)
+                }
+                Ok((http, _)) => {
                     pending.set(false);
                     error.set(Some(
                         api::error_message(&http.data).unwrap_or_else(|| FAIL_SENTENCE.into()),
@@ -442,6 +487,8 @@ fn LiveShell(
     path: RwSignal<String>,
     width: RwSignal<u32>,
     user_code: RwSignal<String>,
+    eph: RwSignal<String>,
+    dek: RwSignal<Option<zeroize::Zeroizing<Vec<u8>>>>,
     register: RwSignal<RegisterView>,
     activity: RwSignal<ActivityView>,
     account: RwSignal<AccountView>,
@@ -477,6 +524,7 @@ fn LiveShell(
             spawn_local(async move {
                 let _ = client::req("POST", api::logout_url(), Some(&json!({}))).await;
                 client::clear_remember();
+                dek.set(None);
                 session.set(None);
                 client::push_path("/");
                 path.set("/".into());
@@ -559,8 +607,12 @@ fn LiveShell(
                                 })
                                 on_add_passkey=Callback::new(move |_| {
                                     let addr = addr.clone();
+                                    let Some(d) = dek.get_untracked() else {
+                                        error.set(Some(crate::tokens::NO_DEK_SENTENCE.into()));
+                                        return;
+                                    };
                                     spawn_local(async move {
-                                        let _ = client::passkey_create(&addr).await;
+                                        let _ = client::passkey_create(&addr, Some(&d)).await;
                                     });
                                 })
                             />
@@ -581,13 +633,32 @@ fn LiveShell(
                                 user_code=user_code
                                 on_approve=Callback::new(move |_| {
                                     let code = user_code.get_untracked();
+                                    let Some(d) = dek.get_untracked() else {
+                                        error.set(Some(crate::tokens::NO_DEK_SENTENCE.into()));
+                                        return;
+                                    };
+                                    let eph_bytes = match crate::crypto::from_hex(&eph.get_untracked()) {
+                                        Ok(b) if b.len() == 32 => b,
+                                        _ => {
+                                            error.set(Some(crate::tokens::NO_EPH_SENTENCE.into()));
+                                            return;
+                                        }
+                                    };
+                                    let sealed = match crate::crypto::seal_dek_to_eph(&d, &eph_bytes) {
+                                        Ok(s) => s,
+                                        Err(_) => {
+                                            error.set(Some(FAIL_SENTENCE.into()));
+                                            return;
+                                        }
+                                    };
                                     spawn_local(async move {
                                         let body = json!({
                                             "user_code": code,
-                                            "sealed_dek": { "alg": "x25519-xchacha20poly1305" }
+                                            "sealed_dek": sealed,
                                         });
                                         match client::req("POST", api::device_approve_url(), Some(&body)).await {
                                             Ok(res) if res.status == 200 => {
+                                                error.set(None);
                                                 client::push_path("/register");
                                                 path.set("/register".into());
                                             }

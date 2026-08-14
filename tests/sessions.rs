@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use secd_web::auth::{password_wrap, User};
+use secd_web::auth::{to_stored, User};
 use secd_web::AppState;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -125,11 +125,20 @@ fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
 
+fn pw_wrap_json(dek: &[u8; 32]) -> Value {
+    let w = secd_core::wrap_password(dek, PW.as_bytes()).expect("wrap");
+    json!({"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob})
+}
+
+fn sealed_stub() -> Value {
+    json!({"eph_pub": "ab".repeat(32), "blob": "cd".repeat(56)})
+}
+
 async fn login(h: &H, email: &str) -> String {
     let (s, hdrs, _) = post_json(
         &h.app,
         "/api/auth/password/register",
-        &json!({"email": email, "password": PW}),
+        &json!({"email": email, "password": PW, "wrap": pw_wrap_json(&[0x44; 32])}),
         None,
         None,
     )
@@ -152,7 +161,7 @@ async fn approve_device(h: &H, cookie: &str) -> (String, String) {
     let (s, _, _) = post_json(
         &h.app,
         "/api/v1/device/approve",
-        &json!({"user_code": code, "sealed_dek": {"x": 1}}),
+        &json!({"user_code": code, "sealed_dek": sealed_stub()}),
         Some(cookie),
         None,
     )
@@ -355,7 +364,8 @@ fn T_SESS_REVOKE_FOREIGN() {
     block_on(async {
         let h = fresh();
         let cookie_a = login(&h, "a@secd.test").await;
-        let (stored, _) = password_wrap(PW);
+        let stored =
+            to_stored(&secd_core::wrap_password(&[0x45; 32], PW.as_bytes()).expect("wrap"));
         let user_b = User {
             id: serde_json::from_value(json!("00000000-0000-4000-8000-00000000000b"))
                 .expect("uuid"),

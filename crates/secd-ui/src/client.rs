@@ -6,6 +6,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestCredentials, RequestInit, RequestMode, Response, Window};
+use zeroize::Zeroizing;
 
 use crate::api;
 use crate::tokens::{FAIL_SENTENCE, LAST_KEY, PRF_SALT};
@@ -75,26 +76,9 @@ pub fn clear_remember() {
     }
 }
 
-fn query_param(search: &str, key: &str) -> String {
-    let search = search.trim_start_matches('?');
-    for pair in search.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return v.replace('+', " ");
-            }
-        }
-    }
-    String::new()
-}
-
 pub fn query_user_code() -> (String, String) {
     let search = window().location().search().unwrap_or_default();
-    let mut code = query_param(&search, "user_code");
-    if code.is_empty() {
-        code = query_param(&search, "code");
-    }
-    let eph = query_param(&search, "eph_pub");
-    (code, eph)
+    crate::api::device_query(&search)
 }
 
 fn b64url_to_u8(s: &str) -> Vec<u8> {
@@ -257,7 +241,8 @@ fn serialize_cred(cred: &JsValue) -> Result<Value, String> {
     }))
 }
 
-fn prf_hex(cred: &JsValue) -> Option<String> {
+/// The PRF secret is the passkey KEK; it never leaves this process.
+fn prf_bytes(cred: &JsValue) -> Option<Zeroizing<Vec<u8>>> {
     let f = Reflect::get(cred, &JsValue::from_str("getClientExtensionResults")).ok()?;
     let f: js_sys::Function = f.dyn_into().ok()?;
     let ext = f.call0(cred).ok()?;
@@ -270,11 +255,19 @@ fn prf_hex(cred: &JsValue) -> Option<String> {
     }
     let mut bytes = vec![0u8; arr.length() as usize];
     arr.copy_to(&mut bytes);
-    let hex = crate::crypto::to_hex(&bytes[..32]);
-    for i in 0..bytes.len() {
-        bytes[i] = 0;
-    }
-    Some(hex)
+    let out = Zeroizing::new(bytes[..32].to_vec());
+    crate::crypto::zeroize_bytes(&mut bytes);
+    Some(out)
+}
+
+fn cred_id_hex(cred: &JsValue) -> String {
+    let Ok(raw_id) = Reflect::get(cred, &JsValue::from_str("rawId")) else {
+        return String::new();
+    };
+    let raw = Uint8Array::new(&raw_id);
+    let mut bytes = vec![0u8; raw.length() as usize];
+    raw.copy_to(&mut bytes);
+    crate::crypto::to_hex(&bytes)
 }
 
 async fn cred_create(pk: &JsValue) -> Result<web_sys::PublicKeyCredential, String> {
@@ -312,7 +305,13 @@ async fn cred_get(pk: &JsValue, conditional: bool) -> Result<web_sys::PublicKeyC
     got.dyn_into().map_err(|_| FAIL_SENTENCE.to_string())
 }
 
-pub async fn passkey_create(email: &str) -> Result<Http, String> {
+/// Registers a passkey and wraps the DEK to its PRF secret client-side.
+/// `dek` is the in-memory vault key when adding a factor; a fresh mint on
+/// first registration. Returns the DEK on success so the caller holds it.
+pub async fn passkey_create(
+    email: &str,
+    dek: Option<&[u8]>,
+) -> Result<(Http, Option<Zeroizing<Vec<u8>>>), String> {
     let start = req(
         "POST",
         api::passkey_register_start_url(),
@@ -320,66 +319,96 @@ pub async fn passkey_create(email: &str) -> Result<Http, String> {
     )
     .await?;
     if start.status != 200 {
-        return Ok(start);
+        return Ok((start, None));
     }
     let pk = coerce_pk(&start.data)?;
     let cred: JsValue = cred_create(&pk).await?.into();
-    let Some(prf) = prf_hex(&cred) else {
-        return Ok(Http {
-            status: 400,
-            data: json!({ "error": "prf" }),
-        });
+    let Some(prf) = prf_bytes(&cred) else {
+        return Ok((
+            Http {
+                status: 400,
+                data: json!({ "error": "prf" }),
+            },
+            None,
+        ));
     };
+    let dek_bytes: Zeroizing<Vec<u8>> = match dek {
+        Some(d) => Zeroizing::new(d.to_vec()),
+        None => {
+            let mut fresh = crate::crypto::mint_dek();
+            let z = Zeroizing::new(fresh.to_vec());
+            crate::crypto::zeroize_bytes(&mut fresh);
+            z
+        }
+    };
+    let wrap = crate::crypto::wrap_passkey(&dek_bytes, &prf, &cred_id_hex(&cred))
+        .map_err(|_| FAIL_SENTENCE.to_string())?;
     let handle = start
         .data
         .get("handle")
         .and_then(Value::as_str)
         .unwrap_or("");
-    req(
+    let res = req(
         "POST",
         api::passkey_register_finish_url(),
         Some(&json!({
             "handle": handle,
             "credential": serialize_cred(&cred)?,
-            "prf": prf,
+            "wrap": crate::crypto::wrap_to_json(&wrap),
             "email": email,
         })),
     )
-    .await
+    .await?;
+    let dek_out = (res.status == 200).then_some(dek_bytes);
+    Ok((res, dek_out))
 }
 
-pub async fn passkey_get(email: Option<&str>, conditional: bool) -> Result<Http, String> {
+/// Signs in with a passkey and unwraps the DEK from the returned wraps.
+/// A stale account whose wraps predate client-side minting yields no DEK.
+pub async fn passkey_get(
+    email: Option<&str>,
+    conditional: bool,
+) -> Result<(Http, Option<Zeroizing<Vec<u8>>>), String> {
     let body = match email {
         Some(e) if !e.is_empty() => json!({ "email": e }),
         _ => json!({}),
     };
     let start = req("POST", api::passkey_login_start_url(), Some(&body)).await?;
     if start.status != 200 {
-        return Ok(start);
+        return Ok((start, None));
     }
     let pk = coerce_pk(&start.data)?;
     let cred: JsValue = cred_get(&pk, conditional).await?.into();
-    let Some(prf) = prf_hex(&cred) else {
-        return Ok(Http {
-            status: 400,
-            data: json!({ "error": "prf" }),
-        });
+    let Some(prf) = prf_bytes(&cred) else {
+        return Ok((
+            Http {
+                status: 400,
+                data: json!({ "error": "prf" }),
+            },
+            None,
+        ));
     };
     let handle = start
         .data
         .get("handle")
         .and_then(Value::as_str)
         .unwrap_or("");
-    req(
+    let res = req(
         "POST",
         api::passkey_login_finish_url(),
         Some(&json!({
             "handle": handle,
             "credential": serialize_cred(&cred)?,
-            "prf": prf,
         })),
     )
-    .await
+    .await?;
+    let dek = if res.status == 200 {
+        crate::crypto::unwrap_any(&crate::crypto::wraps_from_json(&res.data), None, Some(&prf))
+            .map(Zeroizing::new)
+    } else {
+        None
+    };
+    Ok((res, dek))
 }
 
 pub async fn copy_text(text: &str) {

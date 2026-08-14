@@ -1,4 +1,6 @@
 //! Client AEAD and wraps. Same locked params as secd-core. JS cannot zeroize; we overwrite.
+//! The DEK lives only in a Zeroizing signal for the tab's lifetime — never in
+//! storage — so a reload drops it until the next sign-in.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::rand_core::RngCore;
@@ -176,6 +178,30 @@ pub fn wrap_from_json(v: &Value) -> Option<Wrap> {
         salt: v.get("salt").and_then(|x| x.as_str()).map(str::to_string),
         blob: v.get("blob")?.as_str()?.to_string(),
     })
+}
+
+pub fn wrap_to_json(w: &Wrap) -> Value {
+    let mut m = serde_json::Map::new();
+    let factor = match w.factor {
+        Factor::Passkey => "passkey",
+        Factor::Password => "password",
+    };
+    m.insert("factor".into(), json!(factor));
+    if let Some(c) = &w.cred_id {
+        m.insert("cred_id".into(), json!(c));
+    }
+    if let Some(s) = &w.salt {
+        m.insert("salt".into(), json!(s));
+    }
+    m.insert("blob".into(), json!(w.blob));
+    Value::Object(m)
+}
+
+pub fn wraps_from_json(v: &Value) -> Vec<Wrap> {
+    v.get("wraps")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(wrap_from_json).collect())
+        .unwrap_or_default()
 }
 
 pub fn unwrap_any(wraps: &[Wrap], password: Option<&[u8]>, prf: Option<&[u8]>) -> Option<Vec<u8>> {

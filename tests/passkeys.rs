@@ -8,13 +8,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use secd_web::auth::{password_wrap, User};
+use secd_web::auth::{to_stored, User};
 use secd_web::AppState;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 const PW: &str = "twelve-chars!";
 const PRF: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+fn pw_wrap_json() -> Value {
+    let w = secd_core::wrap_password(&[0x44; 32], PW.as_bytes()).expect("wrap");
+    json!({"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob})
+}
+
+fn pk_wrap_json(cred_id_hex: &str) -> Value {
+    let w = secd_core::wrap_passkey(&[0x44; 32], &[0x22; 32], cred_id_hex).expect("wrap");
+    json!({"factor": "passkey", "cred_id": w.cred_id.expect("cred_id"), "blob": w.blob})
+}
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -176,7 +186,8 @@ fn dummy_passkey(cred: &[u8]) -> secd_web::auth::StoredPasskey {
 }
 
 fn put_user(state: &AppState, email: &str, password: Option<&str>, creds: &[&[u8]]) -> String {
-    let password = password.map(|p| password_wrap(p).0);
+    let password = password
+        .map(|p| to_stored(&secd_core::wrap_password(&[0x44; 32], p.as_bytes()).expect("wrap")));
     let passkeys = creds.iter().copied().map(dummy_passkey).collect();
     let user = User {
         id: serde_json::from_value(json!("00000000-0000-4000-8000-000000000001")).expect("uuid"),
@@ -336,7 +347,7 @@ fn T_PK_ADD_WHILE_IN() {
         let (s, hdrs, _) = post_json(
             &h.app,
             "/api/auth/password/register",
-            &json!({"email": "op@secd.test", "password": PW}),
+            &json!({"email": "op@secd.test", "password": PW, "wrap": pw_wrap_json()}),
             None,
         )
         .await;
@@ -355,10 +366,11 @@ fn T_PK_ADD_WHILE_IN() {
         let chal = start["publicKey"]["challenge"].as_str().expect("chal");
         let tok = Soft::new();
         let cred = tok.register(chal);
+        let wrap = pk_wrap_json(&hex::encode(&tok.cred_id));
         let (s, _, v) = post_json(
             &h.app,
             "/api/auth/passkey/register/finish",
-            &json!({"handle": handle, "credential": cred, "prf": PRF}),
+            &json!({"handle": handle, "credential": cred, "wrap": wrap}),
             Some(&cookie),
         )
         .await;
@@ -538,7 +550,8 @@ fn T_PK_DEL_FOREIGN() {
     block_on(async {
         let h = fresh();
         let cookie_a = put_user(&h.state, "a@secd.test", Some(PW), &[b"aa"]);
-        let stored = password_wrap(PW).0;
+        let stored =
+            to_stored(&secd_core::wrap_password(&[0x44; 32], PW.as_bytes()).expect("wrap"));
         let user_b = User {
             id: serde_json::from_value(json!("00000000-0000-4000-8000-00000000000b"))
                 .expect("uuid"),

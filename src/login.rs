@@ -40,6 +40,25 @@ pub struct DeviceFlow {
     pub open_url: String,
 }
 
+impl DeviceFlow {
+    #[doc(hidden)]
+    pub fn from_parts(
+        secret: StaticSecret,
+        user_code: String,
+        interval: u64,
+        verification_uri: String,
+        open_url: String,
+    ) -> Self {
+        Self {
+            secret,
+            user_code,
+            interval,
+            verification_uri,
+            open_url,
+        }
+    }
+}
+
 pub enum Poll {
     Pending,
     Expired,
@@ -160,6 +179,7 @@ pub fn poll_once(flow: &DeviceFlow) -> anyhow::Result<Poll> {
 pub fn finish(flow: DeviceFlow, token: String, sealed: Value) -> anyhow::Result<Unlocked> {
     let dek = unseal(&flow.secret, &sealed)?;
     drop(flow);
+    crate::keyring::store(dek.as_bytes())?;
     save_session(&token)?;
     Ok(Unlocked { token, dek })
 }

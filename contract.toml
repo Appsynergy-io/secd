@@ -317,6 +317,12 @@ pending = false
 [tests.T_DEV_REVOKE]
 pending = false
 
+[tests.T_DEV_SEAL_E2E]
+pending = false
+
+[tests.T_DEV_APPROVE_BAD_SEALED]
+pending = false
+
 [tests.T_DEV_REVOKE_BAD]
 pending = false
 
@@ -488,6 +494,12 @@ pending = false
 [tests.T_WEB_TYPED_EMAIL_KEPT]
 pending = false
 
+[tests.T_WEB_DEVICE_QUERY_BOOT]
+pending = false
+
+[tests.T_WEB_WRAP_ROUNDTRIP]
+pending = false
+
 [tests.T_WEB_ACCOUNT_SESSIONS]
 pending = false
 
@@ -540,6 +552,9 @@ pending = false
 pending = false
 
 [tests.T_KEYRING_ROUNDTRIP]
+pending = false
+
+[tests.T_CLI_FINISH_STORES_DEK]
 pending = false
 
 [tests.T_SESSION_MODE]

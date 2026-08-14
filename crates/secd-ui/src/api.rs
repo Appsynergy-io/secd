@@ -91,3 +91,28 @@ fn utf8_percent_encode(s: &str) -> String {
 pub fn error_message(v: &Value) -> Option<String> {
     v.get("error").and_then(|e| e.as_str()).map(str::to_string)
 }
+
+pub fn query_param(search: &str, key: &str) -> String {
+    let search = search.trim_start_matches('?');
+    for pair in search.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return v.replace('+', " ");
+            }
+        }
+    }
+    String::new()
+}
+
+/// The CLI opens `/device?code=…&eph=…`; older links used `user_code`/`eph_pub`.
+pub fn device_query(search: &str) -> (String, String) {
+    let mut code = query_param(search, "user_code");
+    if code.is_empty() {
+        code = query_param(search, "code");
+    }
+    let mut eph = query_param(search, "eph");
+    if eph.is_empty() {
+        eph = query_param(search, "eph_pub");
+    }
+    (code, eph)
+}

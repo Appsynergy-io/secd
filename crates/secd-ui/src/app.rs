@@ -41,6 +41,26 @@ impl Screen {
     }
 }
 
+pub fn screen_from_path(path: &str) -> Screen {
+    match path {
+        "/activity" => Screen::Activity,
+        "/account" => Screen::Account,
+        "/device" => Screen::Device,
+        "/register" => Screen::Register,
+        _ => Screen::Register,
+    }
+}
+
+/// A CLI approval link carries a user code; it lands on the device screen
+/// no matter which path it used.
+pub fn initial_path(path: &str, user_code: &str) -> String {
+    if user_code.is_empty() {
+        path.to_string()
+    } else {
+        "/device".to_string()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ConsoleState {
     pub screen: Screen,

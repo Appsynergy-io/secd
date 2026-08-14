@@ -517,3 +517,72 @@ fn T_WEB_TYPED_EMAIL_KEPT() {
     });
     assert_eq!(cold.email_prefill.as_deref(), Some(EMAIL));
 }
+
+#[test]
+fn T_WEB_DEVICE_QUERY_BOOT() {
+    use secd_ui::api::device_query;
+    use secd_ui::app::{initial_path, screen_from_path};
+    use secd_ui::Screen;
+
+    let eph = "11".repeat(32);
+    let (code, got_eph) = device_query(&format!("?code=ABCD-EFGH&eph={eph}"));
+    assert_eq!(code, "ABCD-EFGH");
+    assert_eq!(got_eph, eph);
+    let (code, got_eph) = device_query(&format!("?user_code=WXYZ-1234&eph_pub={eph}"));
+    assert_eq!(code, "WXYZ-1234");
+    assert_eq!(got_eph, eph);
+    let (code, got_eph) = device_query("");
+    assert!(code.is_empty() && got_eph.is_empty());
+
+    assert_eq!(initial_path("/", "ABCD-EFGH"), "/device");
+    assert_eq!(initial_path("/account", "ABCD-EFGH"), "/device");
+    assert_eq!(initial_path("/account", ""), "/account");
+    assert_eq!(screen_from_path("/device"), Screen::Device);
+    assert_eq!(screen_from_path("/activity"), Screen::Activity);
+    assert_eq!(screen_from_path("/"), Screen::Register);
+}
+
+#[test]
+fn T_WEB_WRAP_ROUNDTRIP() {
+    use secd_ui::crypto::{
+        from_hex, mint_dek, open, seal_dek_to_eph, unwrap_any, wrap_from_json, wrap_passkey,
+        wrap_password, wrap_to_json, wraps_from_json,
+    };
+
+    let dek = mint_dek();
+    let prf = [0x22u8; 32];
+    let pw = b"twelve-chars!";
+    let w_pw = wrap_password(&dek, pw).expect("password wrap");
+    let w_pk = wrap_passkey(&dek, &prf, "aabb").expect("passkey wrap");
+    let wraps_json = serde_json::json!({
+        "wraps": [wrap_to_json(&w_pw), wrap_to_json(&w_pk)]
+    });
+    let wraps = wraps_from_json(&wraps_json);
+    assert_eq!(wraps.len(), 2);
+    assert_eq!(
+        unwrap_any(&wraps, Some(pw), None).expect("password unwrap"),
+        dek.to_vec()
+    );
+    assert_eq!(
+        unwrap_any(&wraps, None, Some(&prf)).expect("prf unwrap"),
+        dek.to_vec()
+    );
+    assert!(unwrap_any(&wraps, Some(b"wrong-password!!"), None).is_none());
+    assert!(unwrap_any(&wraps, None, Some(&[0u8; 32])).is_none());
+    let round = wrap_from_json(&wrap_to_json(&w_pw)).expect("json round-trip");
+    assert_eq!(round.blob, w_pw.blob);
+
+    // Browser seal opens under the CLI's exact recipe: DH shared secret as
+    // the key, AAD "dek", blob = nonce||ct.
+    let device = x25519_dalek::StaticSecret::from([0x51u8; 32]);
+    let device_pub = x25519_dalek::PublicKey::from(&device);
+    let sealed = seal_dek_to_eph(&dek, device_pub.as_bytes()).expect("seal");
+    let eph: [u8; 32] = from_hex(sealed["eph_pub"].as_str().expect("eph_pub"))
+        .expect("hex")
+        .try_into()
+        .expect("32");
+    let blob = from_hex(sealed["blob"].as_str().expect("blob")).expect("hex");
+    let shared = device.diffie_hellman(&x25519_dalek::PublicKey::from(eph));
+    let opened = open(shared.as_bytes(), "dek", &blob).expect("unseal");
+    assert_eq!(opened, dek.to_vec());
+}

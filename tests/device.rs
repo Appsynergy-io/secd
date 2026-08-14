@@ -122,17 +122,40 @@ fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
 
+fn pw_wrap_json(dek: &[u8; 32]) -> Value {
+    let w = secd_core::wrap_password(dek, PW.as_bytes()).expect("wrap");
+    json!({"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob})
+}
+
 async fn login(h: &H) -> String {
     let (s, hdrs, _) = post_json(
         &h.app,
         "/api/auth/password/register",
-        &json!({"email": "op@secd.test", "password": PW}),
+        &json!({"email": "op@secd.test", "password": PW, "wrap": pw_wrap_json(&[0x44; 32])}),
         None,
         None,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
     cookie_token(&hdrs).expect("cookie")
+}
+
+/// Browser-side seal: X25519 to the device pub, raw shared secret as the
+/// XChaCha key, AAD "dek" — the exact shape `secd login` unseals.
+fn seal_to(eph_hex: &str, dek: &[u8; 32]) -> Value {
+    let their: [u8; 32] = hex::decode(eph_hex)
+        .expect("hex")
+        .try_into()
+        .expect("32 bytes");
+    let secret = x25519_dalek::StaticSecret::random();
+    let public = x25519_dalek::PublicKey::from(&secret);
+    let shared = secret.diffie_hellman(&x25519_dalek::PublicKey::from(their));
+    let blob = secd_core::seal(shared.as_bytes(), "dek", dek).expect("seal");
+    json!({
+        "alg": "x25519-xchacha20poly1305",
+        "eph_pub": hex::encode(public.as_bytes()),
+        "blob": hex::encode(blob),
+    })
 }
 
 async fn start_ok(h: &H) -> Value {
@@ -152,17 +175,15 @@ async fn start_ok(h: &H) -> Value {
     v
 }
 
-fn open_sealed(sealed: &Value, secret: &[u8; 32]) -> Option<[u8; 32]> {
-    let ct = sealed.get("ct")?.as_str()?;
-    let bytes = hex::decode(ct).ok()?;
-    if bytes.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = bytes[i] ^ secret[i];
-    }
-    Some(out)
+fn open_sealed(sealed: &Value, secret: &x25519_dalek::StaticSecret) -> Option<[u8; 32]> {
+    let eph: [u8; 32] = hex::decode(sealed.get("eph_pub")?.as_str()?)
+        .ok()?
+        .try_into()
+        .ok()?;
+    let blob = hex::decode(sealed.get("blob")?.as_str()?).ok()?;
+    let shared = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph));
+    let pt = secd_core::open(shared.as_bytes(), "dek", &blob).ok()?;
+    pt.as_bytes().try_into().ok()
 }
 
 fn contains_bytes(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
@@ -198,6 +219,7 @@ fn T_DEV_START_OK() {
         assert!(v.get("interval").and_then(Value::as_u64).is_some());
         let uri = v["verification_uri"].as_str().expect("uri");
         assert!(uri.contains("secd.imabee.com"), "{uri}");
+        assert!(uri.contains("/device"), "{uri}");
     });
 }
 
@@ -264,13 +286,9 @@ fn T_DEV_POLL_OK() {
         let start = start_ok(&h).await;
         let code = start["user_code"].as_str().expect("code");
         let dek = [0x5eu8; 32];
-        let sk_a = [0x11u8; 32];
-        let sk_b = [0x22u8; 32];
-        let mut ct = [0u8; 32];
-        for i in 0..32 {
-            ct[i] = dek[i] ^ sk_a[i];
-        }
-        let sealed = json!({"alg": "x25519-test", "ct": hex::encode(ct)});
+        let device = x25519_dalek::StaticSecret::random();
+        let device_pub = hex::encode(x25519_dalek::PublicKey::from(&device).as_bytes());
+        let sealed = seal_to(&device_pub, &dek);
         let (s, _, _) = post_json(
             &h.app,
             "/api/v1/device/approve",
@@ -292,14 +310,8 @@ fn T_DEV_POLL_OK() {
         assert_eq!(v["status"], "ok");
         assert!(v["token"].as_str().is_some_and(|t| !t.is_empty()));
         assert!(v.get("sealed_dek").is_some());
-        assert!(
-            open_sealed(&v["sealed_dek"], &sk_b).is_none() || {
-                let opened = open_sealed(&v["sealed_dek"], &sk_b).expect("opened");
-                opened != dek
-            }
-        );
-        let opened_wrong = open_sealed(&v["sealed_dek"], &sk_b);
-        match opened_wrong {
+        let wrong = x25519_dalek::StaticSecret::random();
+        match open_sealed(&v["sealed_dek"], &wrong) {
             None => {}
             Some(pt) => assert_ne!(pt, dek),
         }
@@ -373,7 +385,7 @@ fn T_DEV_APPROVE_DOUBLE() {
         let cookie = login(&h).await;
         let start = start_ok(&h).await;
         let code = start["user_code"].as_str().expect("code");
-        let body = json!({"user_code": code, "sealed_dek": {"x": 1}});
+        let body = json!({"user_code": code, "sealed_dek": seal_to(EPH, &[0x21; 32])});
         let (s, _, _) =
             post_json(&h.app, "/api/v1/device/approve", &body, Some(&cookie), None).await;
         assert_eq!(s, StatusCode::OK);
@@ -395,7 +407,7 @@ fn T_DEV_SERVER_NO_DEK() {
             0xbb, 0xcc, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
             0x0d, 0x0e, 0x0f, 0x10,
         ];
-        let sealed = json!({"box": "opaque", "n": 1});
+        let sealed = seal_to(EPH, &dek);
         let (s, _, _) = post_json(
             &h.app,
             "/api/v1/device/approve",
@@ -425,7 +437,7 @@ fn T_DEV_REVOKE() {
         let (s, _, _) = post_json(
             &h.app,
             "/api/v1/device/approve",
-            &json!({"user_code": code, "sealed_dek": {"x": 1}}),
+            &json!({"user_code": code, "sealed_dek": seal_to(EPH, &[0x22; 32])}),
             Some(&cookie),
             None,
         )
@@ -460,6 +472,98 @@ fn T_DEV_REVOKE() {
         )
         .await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
+    });
+}
+
+#[test]
+fn T_DEV_SEAL_E2E() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        // CLI side: fresh ephemeral key pair, code from /device/start.
+        let device = x25519_dalek::StaticSecret::random();
+        let device_pub = hex::encode(x25519_dalek::PublicKey::from(&device).as_bytes());
+        let (s, _, start) = post_json(
+            &h.app,
+            "/api/v1/device/start",
+            &json!({"eph_pub": device_pub, "device_id": "dev-e2e", "hostname": "e2ehost"}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let code = start["user_code"].as_str().expect("code");
+        // Browser side: seal the vault DEK to the device pub from the URL.
+        let dek = [0x7au8; 32];
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/device/approve",
+            &json!({"user_code": code, "sealed_dek": seal_to(&device_pub, &dek)}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // CLI side: poll and unseal with the ephemeral secret.
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/poll",
+            &json!({"user_code": code}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["status"], "ok");
+        let sealed = &v["sealed_dek"];
+        let eph = sealed["eph_pub"].as_str().expect("eph_pub");
+        assert_eq!(eph.len(), 64, "{eph}");
+        let blob = sealed["blob"].as_str().expect("blob");
+        assert!(blob.len() >= 80, "{blob}");
+        let opened = open_sealed(sealed, &device).expect("unseal");
+        assert_eq!(opened, dek);
+    });
+}
+
+#[test]
+fn T_DEV_APPROVE_BAD_SEALED() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let start = start_ok(&h).await;
+        let code = start["user_code"].as_str().expect("code").to_string();
+        let good = seal_to(EPH, &[0x33; 32]);
+        let eph_hex = good["eph_pub"].as_str().expect("eph").to_string();
+        let blob_hex = good["blob"].as_str().expect("blob").to_string();
+        let bad: Vec<Value> = vec![
+            json!({"x": 1}),
+            json!({"eph_pub": eph_hex}),
+            json!({"eph_pub": eph_hex.to_uppercase(), "blob": blob_hex}),
+            json!({"eph_pub": &eph_hex[..63], "blob": blob_hex}),
+            json!({"eph_pub": eph_hex, "blob": "zz".repeat(40)}),
+            json!({"eph_pub": eph_hex, "blob": "ab".repeat(39)}),
+        ];
+        for sealed in bad {
+            let (s, _, v) = post_json(
+                &h.app,
+                "/api/v1/device/approve",
+                &json!({"user_code": code, "sealed_dek": sealed}),
+                Some(&cookie),
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+        }
+        // The code survives every rejected shape and still approves.
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/device/approve",
+            &json!({"user_code": code, "sealed_dek": good}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
     });
 }
 

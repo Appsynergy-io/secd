@@ -413,6 +413,15 @@ fn T_ADV_SSRF_URI() {
     });
 }
 
+fn pw_register_body() -> Value {
+    let w = secd_core::wrap_password(&[0x44; 32], PW.as_bytes()).expect("wrap");
+    json!({
+        "email": "op@secd.test",
+        "password": PW,
+        "wrap": {"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob},
+    })
+}
+
 #[test]
 fn T_ADV_COOKIE_PREFIX() {
     block_on(async {
@@ -420,7 +429,7 @@ fn T_ADV_COOKIE_PREFIX() {
         let (s, hdrs, _) = post_json(
             &h.app,
             "/api/auth/password/register",
-            &json!({"email": "op@secd.test", "password": PW}),
+            &pw_register_body(),
             &[],
         )
         .await;

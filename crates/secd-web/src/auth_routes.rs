@@ -4,6 +4,7 @@ use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::Json;
 use axum::Router;
+use secd_core::unwrap_password;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -11,9 +12,9 @@ use webauthn_rs::prelude::DiscoverableKey;
 use zeroize::Zeroize;
 
 use crate::auth::{
-    normalize_email, now_rfc3339, parse_login_cred, parse_prf, parse_register_cred, passkey_wrap,
-    password_ok, password_wrap, webauthn, wrap_json_list, PendingEntry, PendingErr, PrfErr,
-    StoredPasskey, User,
+    from_stored, normalize_email, now_rfc3339, parse_client_wrap, parse_login_cred,
+    parse_register_cred, password_ok, webauthn, wrap_json_list, PendingEntry, PendingErr,
+    StoredPasskey, User, WrapErr,
 };
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::sessions::{clear_cookie, with_cookie};
@@ -49,6 +50,8 @@ struct PasswordBody {
     email: Option<String>,
     #[serde(default)]
     password: String,
+    #[serde(default)]
+    wrap: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -56,7 +59,7 @@ struct FinishBody {
     handle: String,
     credential: Value,
     #[serde(default)]
-    prf: Option<Value>,
+    wrap: Option<Value>,
     #[serde(default)]
     email: Option<String>,
 }
@@ -131,11 +134,11 @@ async fn pk_reg_start(
 }
 
 async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBody>) -> Response {
-    let prf = match parse_prf(&body.prf) {
-        Ok(p) => p,
-        Err(PrfErr::Missing) | Err(PrfErr::Bad) => {
+    let wrap = match parse_client_wrap(&body.wrap, "passkey") {
+        Ok(w) => w,
+        Err(WrapErr::Missing) | Err(WrapErr::Bad) => {
             let _ = state.pending.take(&body.handle);
-            return json_status(StatusCode::BAD_REQUEST, "prf");
+            return json_status(StatusCode::BAD_REQUEST, "wrap");
         }
     };
     let entry = match state.pending.take(&body.handle) {
@@ -167,7 +170,10 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
         Err(_) => return fail_auth(),
     };
     let cred_id = hex::encode(passkey.cred_id().as_slice());
-    let wrap = passkey_wrap(&prf, &cred_id);
+    // The wrap must name the credential it was derived from.
+    if wrap.cred_id.as_deref() != Some(cred_id.as_str()) {
+        return json_status(StatusCode::BAD_REQUEST, "wrap");
+    }
     let stored = StoredPasskey {
         id: cred_id,
         created: now_rfc3339(),
@@ -266,14 +272,6 @@ fn discoverable_start(wa: &webauthn_rs::prelude::Webauthn) -> Result<(Value, Pen
 }
 
 async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishBody>) -> Response {
-    let prf = match parse_prf(&body.prf) {
-        Ok(p) => p,
-        Err(_) => {
-            let _ = state.pending.take(&body.handle);
-            return json_status(StatusCode::BAD_REQUEST, "prf");
-        }
-    };
-    let _ = prf;
     let entry = match state.pending.take(&body.handle) {
         Ok(e) => e,
         Err(_) => return fail_auth(),
@@ -334,14 +332,36 @@ async fn pw_register(
         body.password.zeroize();
         return json_status(StatusCode::BAD_REQUEST, "password");
     }
+    // Authorization decides first; the wrap is validated only on the
+    // authorized paths so probes cannot tell wrap handling apart. A bad or
+    // missing wrap zeroizes the password and yields None -> 400 "wrap".
+    let parse_wrap = |body: &mut PasswordBody| -> Option<crate::auth::StoredWrap> {
+        let wrap = match parse_client_wrap(&body.wrap, "password") {
+            Ok(w) => w,
+            Err(WrapErr::Missing) | Err(WrapErr::Bad) => {
+                body.password.zeroize();
+                return None;
+            }
+        };
+        // The wrap must open under this password, or login could never
+        // unwrap it.
+        if unwrap_password(&from_stored(&wrap), body.password.as_bytes()).is_err() {
+            body.password.zeroize();
+            return None;
+        }
+        Some(wrap)
+    };
     let session = state.sessions.console_from_headers(&headers);
     if state.users.is_empty() {
-        let (stored, wraps) = password_wrap(&body.password);
+        let Some(wrap) = parse_wrap(&mut body) else {
+            return json_status(StatusCode::BAD_REQUEST, "wrap");
+        };
         body.password.zeroize();
+        let wraps = wrap_json_list(&[from_stored(&wrap)]);
         let user = User {
             id: Uuid::new_v4(),
             email: email.clone(),
-            password: Some(stored),
+            password: Some(wrap),
             passkeys: vec![],
         };
         if state.users.put(user).is_err() {
@@ -349,7 +369,7 @@ async fn pw_register(
         }
         let (_id, token) = state.sessions.create_console(&email);
         return with_cookie(
-            json_value(StatusCode::OK, json!({ "wraps": wrap_json_list(&wraps) })),
+            json_value(StatusCode::OK, json!({ "wraps": wraps })),
             &token,
         );
     }
@@ -366,9 +386,11 @@ async fn pw_register(
             body.password.zeroize();
             return fail_auth();
         }
-        let (stored, _wraps) = password_wrap(&body.password);
+        let Some(wrap) = parse_wrap(&mut body) else {
+            return json_status(StatusCode::BAD_REQUEST, "wrap");
+        };
         body.password.zeroize();
-        user.password = Some(stored);
+        user.password = Some(wrap);
         if state.users.put(user.clone()).is_err() {
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
         }

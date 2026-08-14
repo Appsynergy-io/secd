@@ -163,11 +163,16 @@ fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
 
+fn pw_wrap_json() -> Value {
+    let w = wrap_password(&[0x44; 32], PW.as_bytes()).expect("wrap");
+    json!({"factor": "password", "salt": w.salt.expect("salt"), "blob": w.blob})
+}
+
 async fn login(h: &H) -> String {
     let (s, hdrs, _) = post_json(
         &h.app,
         "/api/auth/password/register",
-        &json!({"email": "op@secd.test", "password": PW}),
+        &json!({"email": "op@secd.test", "password": PW, "wrap": pw_wrap_json()}),
         None,
         None,
     )
@@ -190,7 +195,7 @@ async fn approve_device(h: &H, cookie: &str) -> String {
     let (s, _, _) = post_json(
         &h.app,
         "/api/v1/device/approve",
-        &json!({"user_code": code, "sealed_dek": {"x": 1}}),
+        &json!({"user_code": code, "sealed_dek": json!({"eph_pub": "ab".repeat(32), "blob": "cd".repeat(56)})}),
         Some(cookie),
         None,
     )
@@ -500,10 +505,15 @@ fn T_VAULT_NO_DECRYPT_WITHOUT_KEK() {
         let local_wrap = wrap_password(&dek, PW.as_bytes()).expect("wrap");
         let blob = seal(&dek, "kv/fixture", FIXTURE).expect("seal");
         let ct = hex::encode(&blob);
+        let reg_wrap = json!({
+            "factor": "password",
+            "salt": local_wrap.salt.clone().expect("salt"),
+            "blob": local_wrap.blob.clone(),
+        });
         let (s, hdrs, body) = post_json(
             &h.app,
             "/api/auth/password/register",
-            &json!({"email": "op@secd.test", "password": PW}),
+            &json!({"email": "op@secd.test", "password": PW, "wrap": reg_wrap}),
             None,
             None,
         )

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
 use rand::RngCore;
-use secd_core::{unwrap_password, wrap_passkey, wrap_password, Factor, Wrap};
+use secd_core::{unwrap_password, wrap_password, Factor, Wrap};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -18,7 +18,6 @@ use webauthn_rs::prelude::{
     DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration,
     PublicKeyCredential, RegisterPublicKeyCredential, Webauthn, WebauthnBuilder,
 };
-use zeroize::Zeroize;
 
 use crate::state::{ORIGIN, RP_ID};
 
@@ -339,38 +338,68 @@ pub fn password_ok(password: &str) -> bool {
     (PW_MIN..=PW_MAX).contains(&n)
 }
 
-pub fn parse_prf(v: &Option<Value>) -> Result<Vec<u8>, PrfErr> {
-    match v {
-        None | Some(Value::Null) => Err(PrfErr::Missing),
-        Some(Value::String(s)) if s.is_empty() => Err(PrfErr::Missing),
-        Some(Value::String(s)) => {
-            let bytes = decode_bytes(s).ok_or(PrfErr::Bad)?;
-            if bytes.len() < 32 {
-                return Err(PrfErr::Bad);
+/// The browser mints the DEK and wraps it; the server only stores the
+/// ciphertext. blob = 24-byte nonce + 32-byte DEK + 16-byte tag, hex.
+pub fn parse_client_wrap(v: &Option<Value>, expect: &str) -> Result<StoredWrap, WrapErr> {
+    let obj = match v {
+        None | Some(Value::Null) => return Err(WrapErr::Missing),
+        Some(Value::Object(m)) => m,
+        Some(_) => return Err(WrapErr::Bad),
+    };
+    let factor = obj.get("factor").and_then(Value::as_str).unwrap_or("");
+    if factor != expect {
+        return Err(WrapErr::Bad);
+    }
+    let blob = obj.get("blob").and_then(Value::as_str).unwrap_or("");
+    if blob.len() != (24 + 32 + 16) * 2 || !lower_hex(blob) {
+        return Err(WrapErr::Bad);
+    }
+    let salt = obj.get("salt").and_then(Value::as_str);
+    let cred_id = obj.get("cred_id").and_then(Value::as_str);
+    match expect {
+        "password" => {
+            let Some(salt) = salt else {
+                return Err(WrapErr::Bad);
+            };
+            if salt.len() != 32 || !lower_hex(salt) || cred_id.is_some() {
+                return Err(WrapErr::Bad);
             }
-            Ok(bytes)
+            Ok(StoredWrap {
+                factor: "password".into(),
+                cred_id: None,
+                salt: Some(salt.to_string()),
+                blob: blob.to_string(),
+            })
         }
-        Some(Value::Array(arr)) => {
-            let mut bytes = Vec::with_capacity(arr.len());
-            for n in arr {
-                let Some(b) = n.as_u64() else {
-                    return Err(PrfErr::Bad);
-                };
-                if b > 255 {
-                    return Err(PrfErr::Bad);
-                }
-                bytes.push(b as u8);
+        "passkey" => {
+            let Some(cred_id) = cred_id else {
+                return Err(WrapErr::Bad);
+            };
+            if cred_id.is_empty()
+                || !cred_id.len().is_multiple_of(2)
+                || !lower_hex(cred_id)
+                || salt.is_some()
+            {
+                return Err(WrapErr::Bad);
             }
-            if bytes.len() < 32 {
-                return Err(PrfErr::Bad);
-            }
-            Ok(bytes)
+            Ok(StoredWrap {
+                factor: "passkey".into(),
+                cred_id: Some(cred_id.to_string()),
+                salt: None,
+                blob: blob.to_string(),
+            })
         }
-        _ => Err(PrfErr::Bad),
+        _ => Err(WrapErr::Bad),
     }
 }
 
-pub enum PrfErr {
+fn lower_hex(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub enum WrapErr {
     Missing,
     Bad,
 }
@@ -396,12 +425,6 @@ pub fn decode_bytes(s: &str) -> Option<Vec<u8>> {
         return Some(v);
     }
     None
-}
-
-pub fn mint_dek() -> [u8; 32] {
-    let mut dek = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut dek);
-    dek
 }
 
 pub fn wrap_json_list(wraps: &[Wrap]) -> Value {
@@ -441,21 +464,6 @@ pub fn from_stored(w: &StoredWrap) -> Wrap {
         salt: w.salt.clone(),
         blob: w.blob.clone(),
     }
-}
-
-pub fn password_wrap(password: &str) -> (StoredWrap, Vec<Wrap>) {
-    let mut dek = mint_dek();
-    let w = wrap_password(&dek, password.as_bytes()).expect("invariant: password wrap");
-    dek.zeroize();
-    let stored = to_stored(&w);
-    (stored, vec![w])
-}
-
-pub fn passkey_wrap(prf: &[u8], cred_id: &str) -> StoredWrap {
-    let mut dek = mint_dek();
-    let w = wrap_passkey(&dek, prf, cred_id).expect("invariant: passkey wrap");
-    dek.zeroize();
-    to_stored(&w)
 }
 
 pub fn now_rfc3339() -> String {
