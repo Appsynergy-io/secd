@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: secd
+resources:
+  - deployment.yaml
+images:
+  - name: ghcr.io/appsynergy-io/secd-web
+    newName: ghcr.io/appsynergy-io/secd-web
+    newTag: "0.1.10"

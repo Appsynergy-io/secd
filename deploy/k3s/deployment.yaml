@@ -1,0 +1,75 @@
+# NAD, PVC, Secret, and NetworkPolicy stay in nuc-k3s.
+# TLS Secret secd-web-tls is AppSynergy Vault pki_int (fullchain + key), not ACME.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secd-web
+  namespace: secd
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: secd-web}
+  template:
+    metadata:
+      labels: {app: secd-web}
+      annotations:
+        k8s.v1.cni.cncf.io/networks: '[{"name":"pub-secd-web","default-route":["192.168.101.254"]}]'
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: secd-web
+          image: ghcr.io/appsynergy-io/secd-web:0.1.10
+          imagePullPolicy: IfNotPresent
+          args:
+            - --hostname
+            - secd.imabee.com
+            - --cert
+            - /tls/tls.crt
+            - --key
+            - /tls/tls.key
+            - --data
+            - /var/lib/secd
+          env:
+            - {name: SECD_HOME, value: /var/lib/secd}
+            - {name: RUST_LOG, value: info}
+          ports:
+            - {name: https, containerPort: 443, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/secd}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe:
+            tcpSocket: {port: 443}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: 443}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: "100m", memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: secd-data}
+        - name: tls
+          secret:
+            secretName: secd-web-tls
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}
