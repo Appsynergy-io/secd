@@ -12,7 +12,13 @@ pub fn store(dek: &[u8]) -> anyhow::Result<()> {
     }
     let _ = delete();
     if backend::store(dek).is_ok() {
-        return Ok(());
+        // add_key can succeed when SEARCH/READ cannot.
+        if let Some(got) = load() {
+            if got.as_bytes() == dek {
+                return Ok(());
+            }
+        }
+        let _ = backend::delete();
     }
     runtime::store(dek)
 }
