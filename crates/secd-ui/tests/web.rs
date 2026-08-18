@@ -164,7 +164,17 @@ fn browser_bin() -> Option<PathBuf> {
     None
 }
 
+fn timeout_bin() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let p = dir.join("timeout");
+        p.is_file().then_some(p)
+    })
+}
+
 fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
+    // GitHub ubuntu chrome --dump-dom never exits; unguarded spawn hung CI 6h.
+    let timeout = timeout_bin()?;
     let bin = browser_bin()?;
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
@@ -183,7 +193,9 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
     ));
     let _ = std::fs::create_dir_all(&data);
     let url = format!("file://{}", path.display());
-    let out = Command::new(bin)
+    let out = Command::new(timeout)
+        .args(["--kill-after=2s", "20s"])
+        .arg(&bin)
         .args([
             "--headless=new",
             "--disable-gpu",
