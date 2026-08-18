@@ -70,16 +70,40 @@ fi
 : "${COSIGN_KEY:?release: COSIGN_KEY is required}"
 : "${COSIGN_PASSWORD:?release: COSIGN_PASSWORD is required}"
 
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    echo "release: sha256sum or shasum is required" >&2
+    exit 1
+  fi
+}
+
 ensure_cosign() {
   if command -v cosign >/dev/null 2>&1; then
     return 0
   fi
-  local url sha tmp
-  url="https://github.com/sigstore/cosign/releases/download/v2.5.0/cosign-linux-amd64"
-  sha="1f6c194dd0891eb345b436bb71ff9f996768355f5e0ce02dde88567029ac2188"
+  local url sha tmp asset
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+      asset="cosign-linux-amd64"
+      sha="1f6c194dd0891eb345b436bb71ff9f996768355f5e0ce02dde88567029ac2188"
+      ;;
+    Darwin:arm64)
+      asset="cosign-darwin-arm64"
+      sha="780da3654d9601367b0d54686ac65cb9716578610cabe292d725c7008de4db85"
+      ;;
+    *)
+      echo "release: no pinned cosign binary for $(uname -s) $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  url="https://github.com/sigstore/cosign/releases/download/v2.5.0/${asset}"
   tmp="$(mktemp)"
   curl -fsSL -o "$tmp" "$url"
-  printf '%s  %s\n' "$sha" "$tmp" | sha256sum -c -
+  printf '%s  %s\n' "$sha" "$tmp" | sha256 -c -
   chmod 0755 "$tmp"
   mv "$tmp" "${TMPDIR:-/tmp}/cosign"
   PATH="${TMPDIR:-/tmp}:${PATH}"
@@ -460,7 +484,7 @@ cosign sign-blob \
 
 (
   cd "$dist"
-  sha256sum "$name" >"SHA256SUMS-${target}"
+  sha256 "$name" >"SHA256SUMS-${target}"
 )
 if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
   cp "${dist}/SHA256SUMS-${target}" "${dist}/SHA256SUMS"
