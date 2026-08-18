@@ -11,6 +11,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -41,6 +42,28 @@ jobs:
         run: |
           scripts/release.sh
           scripts/publish-release.sh --no-latest
+      - name: make secd-web GHCR public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          pkg="secd-web"
+          # First 2xx wins. Package starts private; k3s needs anonymous pull.
+          for spec in \
+            "PATCH /orgs/${owner}/packages/container/${pkg}" \
+            "PUT /orgs/${owner}/packages/container/${pkg}" \
+            "PATCH /user/packages/container/${pkg}"
+          do
+            method="${spec%% *}"
+            path="${spec#* }"
+            if gh api --method "$method" "$path" -f visibility=public; then
+              echo "visibility public via ${method} ${path}"
+              exit 0
+            fi
+          done
+          echo "k3s cannot pull until the package is public: https://github.com/orgs/${owner}/packages/container/package/${pkg}"
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: latest-linux
@@ -49,6 +72,7 @@ jobs:
 
   darwin:
     runs-on: macos-14
+    timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -81,6 +105,7 @@ jobs:
   publish:
     needs: [linux, darwin]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
