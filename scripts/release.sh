@@ -250,6 +250,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import urllib.error
@@ -312,16 +313,44 @@ manifest_bytes = (json.dumps(manifest, separators=(",", ":")) + "\n").encode()
 bearer = None
 
 
-def auth_header():
-    if bearer:
-        return "Bearer " + bearer
+def parse_challenge(www):
+    realm = service = ""
+    for m in re.finditer(r'([A-Za-z]+)="([^"]*)"', www):
+        if m.group(1) == "realm":
+            realm = m.group(2)
+        elif m.group(1) == "service":
+            service = m.group(2)
+    return realm, service
+
+
+def fetch_bearer(www):
+    realm, service = parse_challenge(www)
+    if not realm:
+        raise RuntimeError("registry 401: missing WWW-Authenticate realm")
+    if not service:
+        service = host
+    q = urllib.parse.urlencode(
+        {"service": service, "scope": "repository:" + name + ":pull,push"}
+    )
+    tok_url = realm + ("&" if "?" in realm else "?") + q
     raw = base64.b64encode(f"{user}:{token}".encode()).decode()
-    return "Basic " + raw
+    req = urllib.request.Request(
+        tok_url, method="GET", headers={"Authorization": "Basic " + raw}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"registry token -> HTTP {e.code}") from None
+    got = body.get("token") or body.get("access_token")
+    if not got:
+        raise RuntimeError("registry token: empty response")
+    return got
 
 
 def do(method, url, data=None, headers=None, retry_auth=True):
     global bearer
-    h = {"Authorization": auth_header()}
+    h = {"Authorization": "Bearer " + (bearer or token)}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, method=method, headers=h)
@@ -329,29 +358,8 @@ def do(method, url, data=None, headers=None, retry_auth=True):
         return urllib.request.urlopen(req)
     except urllib.error.HTTPError as e:
         if e.code == 401 and retry_auth and not bearer:
-            www = e.headers.get("WWW-Authenticate", "")
-            realm = service = scope = ""
-            if www.startswith("Bearer "):
-                for part in www[7:].split(","):
-                    part = part.strip()
-                    if "=" not in part:
-                        continue
-                    k, v = part.split("=", 1)
-                    v = v.strip().strip('"')
-                    if k == "realm":
-                        realm = v
-                    elif k == "service":
-                        service = v
-                    elif k == "scope":
-                        scope = v
-            if realm:
-                q = urllib.parse.urlencode({"service": service, "scope": scope})
-                tok_url = realm + ("&" if "?" in realm else "?") + q
-                with do("GET", tok_url, retry_auth=False) as resp:
-                    body = json.loads(resp.read().decode())
-                bearer = body.get("token") or body.get("access_token")
-                if bearer:
-                    return do(method, url, data=data, headers=headers, retry_auth=False)
+            bearer = fetch_bearer(e.headers.get("WWW-Authenticate", ""))
+            return do(method, url, data=data, headers=headers, retry_auth=False)
         raise RuntimeError(f"registry {method} {urlparse_path(url)} -> HTTP {e.code}") from None
 
 
