@@ -19,7 +19,12 @@ use serde_json::Value;
 
 pub const MANIFEST_URL: &str =
     "https://git.appsynergy.io/api/packages/appsynergy/generic/secd/latest/latest.json";
-pub const ALLOWED_HOST: &str = "git.appsynergy.io";
+pub const ALLOWED_HOSTS: &[&str] = &[
+    "github.com",
+    "git.appsynergy.io",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+];
 pub const COSIGN_PUB: &str = include_str!("../keys/cosign.pub");
 
 const BIN_CAP: usize = 64 * 1024 * 1024;
@@ -92,6 +97,12 @@ pub fn target_triple() -> anyhow::Result<&'static str> {
     }
 }
 
+fn host_allowed(host: &str) -> bool {
+    ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
 pub fn url_allowed(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -100,10 +111,58 @@ pub fn url_allowed(url: &str) -> bool {
         return false;
     }
     let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    match hostport.split_once(':') {
-        None => hostport.eq_ignore_ascii_case(ALLOWED_HOST),
-        Some((h, p)) => h.eq_ignore_ascii_case(ALLOWED_HOST) && p == "443",
+    if hostport.is_empty() {
+        return false;
     }
+    match hostport.split_once(':') {
+        None => host_allowed(hostport),
+        Some((h, p)) => host_allowed(h) && p == "443",
+    }
+}
+
+/// Next hop for 301/302/307/308. `None` if `status` is not a redirect.
+pub fn next_redirect(
+    status: u16,
+    location: Option<&str>,
+    current_url: &str,
+) -> anyhow::Result<Option<String>> {
+    if !matches!(status, 301 | 302 | 307 | 308) {
+        return Ok(None);
+    }
+    let loc = location
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("redirect missing location"))?;
+    let next = if loc.starts_with("https://") {
+        loc.to_string()
+    } else if loc.starts_with("http://") || loc.starts_with("//") {
+        anyhow::bail!("refusing host");
+    } else {
+        let origin = https_origin(current_url)?;
+        if loc.starts_with('/') {
+            format!("{origin}{loc}")
+        } else {
+            format!("{origin}/{loc}")
+        }
+    };
+    if !url_allowed(&next) {
+        anyhow::bail!("refusing host");
+    }
+    Ok(Some(next))
+}
+
+fn https_origin(url: &str) -> anyhow::Result<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| anyhow!("refusing host"))?;
+    if rest.contains('@') {
+        anyhow::bail!("refusing host");
+    }
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if hostport.is_empty() {
+        anyhow::bail!("refusing host");
+    }
+    Ok(format!("https://{hostport}"))
 }
 
 pub fn parse_manifest(raw: &[u8], triple: &str) -> anyhow::Result<Release> {
@@ -368,32 +427,49 @@ fn b64(s: &str) -> Option<Vec<u8>> {
 }
 
 fn https_get(url: &str, cap: usize) -> anyhow::Result<Vec<u8>> {
-    if !url_allowed(url) {
-        anyhow::bail!("refusing host");
-    }
-    let (host, path) = split_https(url)?;
+    const MAX_HOPS: u8 = 5;
     let cfg = Arc::new(client_config()?);
-    let name = ServerName::try_from(host.clone()).map_err(|_| anyhow!("server name"))?;
-    let conn = ClientConnection::new(cfg, name).context("tls client")?;
-    let tcp =
-        TcpStream::connect((host.as_str(), 443)).with_context(|| format!("connect {host}"))?;
-    tcp.set_nodelay(true)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let mut tls = StreamOwned::new(conn, tcp);
-    let req =
-        format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n\r\n");
-    tls.write_all(req.as_bytes())?;
-    tls.flush()?;
-    let raw = read_limited(&mut tls, cap.saturating_add(4096))?;
-    let (status, body) = parse_http(&raw)?;
-    if status != 200 {
-        anyhow::bail!("GET {host}{path} HTTP {status}");
+    let mut url = url.to_string();
+    let mut hops = 0u8;
+    loop {
+        if !url_allowed(&url) {
+            anyhow::bail!("refusing host");
+        }
+        let (host, path) = split_https(&url)?;
+        let name = ServerName::try_from(host.clone()).map_err(|_| anyhow!("server name"))?;
+        let conn = ClientConnection::new(Arc::clone(&cfg), name).context("tls client")?;
+        let tcp =
+            TcpStream::connect((host.as_str(), 443)).with_context(|| format!("connect {host}"))?;
+        tcp.set_nodelay(true)?;
+        tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
+        let mut tls = StreamOwned::new(conn, tcp);
+        let req = format!(
+            "GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+        tls.write_all(req.as_bytes())?;
+        tls.flush()?;
+        let raw = read_limited(&mut tls, cap.saturating_add(4096))?;
+        let (status, location, body) = parse_http(&raw)?;
+        match next_redirect(status, location.as_deref(), &url)? {
+            Some(next) => {
+                hops = hops.saturating_add(1);
+                if hops > MAX_HOPS {
+                    anyhow::bail!("too many redirects");
+                }
+                url = next;
+            }
+            None => {
+                if status != 200 {
+                    anyhow::bail!("GET {host}{path} HTTP {status}");
+                }
+                if body.len() > cap {
+                    anyhow::bail!("response too large");
+                }
+                return Ok(body);
+            }
+        }
     }
-    if body.len() > cap {
-        anyhow::bail!("response too large");
-    }
-    Ok(body)
 }
 
 fn split_https(url: &str) -> anyhow::Result<(String, String)> {
@@ -405,7 +481,7 @@ fn split_https(url: &str) -> anyhow::Result<(String, String)> {
     }
     let (hostport, pathq) = rest.split_once('/').unwrap_or((rest, ""));
     let host = hostport.split(':').next().unwrap_or(hostport);
-    if !host.eq_ignore_ascii_case(ALLOWED_HOST) {
+    if !host_allowed(host) {
         anyhow::bail!("refusing host");
     }
     Ok((host.to_string(), format!("/{pathq}")))
@@ -461,7 +537,7 @@ fn read_limited(r: &mut impl Read, cap: usize) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
+fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Option<String>, Vec<u8>)> {
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -478,5 +554,12 @@ fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
         .ok_or_else(|| anyhow!("status"))?
         .parse()
         .context("status parse")?;
-    Ok((status, raw[split..].to_vec()))
+    let location = head.lines().skip(1).find_map(|line| {
+        let line = line.trim_end_matches('\r');
+        let (k, v) = line.split_once(':')?;
+        k.eq_ignore_ascii_case("location")
+            .then(|| v.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    Ok((status, location, raw[split..].to_vec()))
 }

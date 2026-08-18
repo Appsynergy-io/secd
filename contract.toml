@@ -589,6 +589,12 @@ pending = false
 [tests.T_UPD_WRONG_HOST]
 pending = false
 
+[tests.T_UPD_HOST_GITHUB]
+pending = false
+
+[tests.T_UPD_REDIRECT_OFFLIST]
+pending = false
+
 [tests.T_UPD_GOOD]
 pending = false
 
