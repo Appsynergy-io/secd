@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build signed secd for one Rust triple. Linux also builds secd-web and pushes
-# git.appsynergy.io/imabee/secd-web:${ver}. Tag must equal v + Cargo.toml version.
+# ghcr.io/appsynergy-io/secd-web:${ver} (and :sha-${GITHUB_SHA} when set).
+# Tag must equal v + Cargo.toml version.
 set -euo pipefail
 set +o xtrace
 
@@ -110,13 +111,13 @@ prepare_cosign_key() {
   exit 1
 }
 
-pkg_base="${GITEA_PACKAGE_BASE:-https://git.appsynergy.io/api/packages/appsynergy/generic/secd}"
+pkg_base="${SECD_PACKAGE_BASE:-https://github.com/Appsynergy-io/secd/releases/download/v${ver}}"
 pkg_base="${pkg_base%/}"
 
 write_latest_json() {
   local dest="$1" name="$2" digest="$3"
-  local url="${pkg_base}/${ver}/${name}"
-  local sig="${pkg_base}/${ver}/${name}.sig"
+  local url="${pkg_base}/${name}"
+  local sig="${pkg_base}/${name}.sig"
   python3 - "$dest" "$ver" "$target" "$url" "$digest" "$sig" <<'PY'
 import json
 import sys
@@ -181,7 +182,23 @@ smoke_linux() {
 
 push_image() {
   local bin="$1"
-  local img="git.appsynergy.io/imabee/secd-web:${ver}"
+  local img_repo img sha_img="" last
+  if [[ -n "${SECD_IMAGE:-}" ]]; then
+    last="${SECD_IMAGE##*/}"
+    if [[ "$last" == *:* ]]; then
+      img="$SECD_IMAGE"
+      img_repo="${SECD_IMAGE%:*}"
+    else
+      img_repo="$SECD_IMAGE"
+      img="${SECD_IMAGE}:${ver}"
+    fi
+  else
+    img_repo="ghcr.io/appsynergy-io/secd-web"
+    img="${img_repo}:${ver}"
+  fi
+  if [[ -n "${GITHUB_SHA:-}" ]]; then
+    sha_img="${img_repo}:sha-${GITHUB_SHA}"
+  fi
   local ctx
   ctx="$(mktemp -d)"
   cp "$bin" "$ctx/secd-web"
@@ -197,19 +214,36 @@ EOF
   local pushed=0
   if command -v docker >/dev/null 2>&1; then
     docker build -t "$img" "$ctx"
+    if [[ -n "$sha_img" ]]; then
+      docker tag "$img" "$sha_img"
+    fi
     if docker push "$img"; then
-      pushed=1
+      if [[ -z "$sha_img" ]] || docker push "$sha_img"; then
+        pushed=1
+      fi
     fi
   fi
   if [[ "$pushed" -eq 0 ]] && command -v podman >/dev/null 2>&1; then
     podman build -t "$img" "$ctx"
+    if [[ -n "$sha_img" ]]; then
+      podman tag "$img" "$sha_img"
+    fi
     if podman push "$img"; then
-      pushed=1
+      if [[ -z "$sha_img" ]] || podman push "$sha_img"; then
+        pushed=1
+      fi
     fi
   fi
   if [[ "$pushed" -eq 0 ]]; then
-    : "${SECD_RELEASE_TOKEN:?release: SECD_RELEASE_TOKEN is required to push the image}"
-    python3 - "$bin" "$img" <<'PY'
+    if [[ -z "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]]; then
+      echo "release: GITHUB_TOKEN or GH_TOKEN is required to push the image" >&2
+      exit 1
+    fi
+    local extra_tags=()
+    if [[ -n "$sha_img" ]]; then
+      extra_tags+=("${sha_img##*:}")
+    fi
+    python3 - "$bin" "$img" "${extra_tags[@]}" <<'PY'
 import base64
 import gzip
 import hashlib
@@ -223,8 +257,11 @@ import urllib.parse
 import urllib.request
 
 bin_path, image = sys.argv[1], sys.argv[2]
-token = os.environ["SECD_RELEASE_TOKEN"]
-user = os.environ.get("GITEA_USER", "imabee")
+extra_tags = sys.argv[3:]
+token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+if not token:
+    raise SystemExit("release: GITHUB_TOKEN or GH_TOKEN is required to push the image")
+user = os.environ.get("GITHUB_ACTOR") or os.environ.get("GITHUB_USER") or "git"
 
 host, rest = image.split("/", 1)
 name, tag = rest.rsplit(":", 1)
@@ -342,15 +379,16 @@ def put_blob(digest, blob, content_type):
 
 put_blob(layer_digest, gz_bytes, "application/octet-stream")
 put_blob(config_digest, config_bytes, "application/vnd.docker.container.image.v1+json")
-man_url = f"{registry}/v2/{name}/manifests/{urllib.parse.quote(tag, safe='')}"
-with do(
-    "PUT",
-    man_url,
-    data=manifest_bytes,
-    headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
-):
-    pass
-print(f"release: pushed {image}", file=sys.stderr)
+for t in [tag] + extra_tags:
+    man_url = f"{registry}/v2/{name}/manifests/{urllib.parse.quote(t, safe='')}"
+    with do(
+        "PUT",
+        man_url,
+        data=manifest_bytes,
+        headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
+    ):
+        pass
+    print(f"release: pushed {host}/{name}:{t}", file=sys.stderr)
 PY
   fi
   rm -rf "$ctx"
