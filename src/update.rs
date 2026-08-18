@@ -18,7 +18,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde_json::Value;
 
 pub const MANIFEST_URL: &str =
-    "https://git.appsynergy.io/api/packages/appsynergy/generic/secd/latest/latest.json";
+    "https://github.com/Appsynergy-io/secd/releases/latest/download/latest.json";
 pub const ALLOWED_HOSTS: &[&str] = &[
     "github.com",
     "git.appsynergy.io",

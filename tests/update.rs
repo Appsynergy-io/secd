@@ -159,13 +159,18 @@ fn T_UPD_WRONG_HOST() {
         "ab".repeat(32)
     );
     let parsed = secd::update::parse_manifest(manifest.as_bytes(), triple);
-    assert!(parsed.is_err(), "manifest url not git.appsynergy.io");
+    assert!(parsed.is_err(), "off-allowlist manifest url must refuse");
     assert_eq!(fs::read(&dest).expect("read dest"), orig, "argv[0] changed");
     assert!(!staging(&dest).exists(), "staging written");
 }
 
 #[test]
 fn T_UPD_HOST_GITHUB() {
+    assert_eq!(
+        secd::update::MANIFEST_URL,
+        "https://github.com/Appsynergy-io/secd/releases/latest/download/latest.json"
+    );
+    assert!(secd::update::url_allowed(secd::update::MANIFEST_URL));
     assert!(secd::update::url_allowed(
         "https://github.com/Appsynergy-io/secd/releases/latest/download/latest.json"
     ));
