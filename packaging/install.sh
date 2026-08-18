@@ -2,8 +2,8 @@
 # Install secd to ~/.local/bin. Manifest sha256, then write. Fail closed.
 set -eu
 
-HOST="git.appsynergy.io"
-MANIFEST="https://${HOST}/api/packages/appsynergy/generic/secd/latest/latest.json"
+HOST="github.com"
+MANIFEST="https://${HOST}/Appsynergy-io/secd/releases/latest/download/latest.json"
 DEST="${HOME}/.local/bin/secd"
 
 err() { printf 'secd-install: %s\n' "$*" >&2; exit 1; }

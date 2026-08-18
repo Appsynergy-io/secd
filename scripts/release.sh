@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build signed secd for one Rust triple. Linux also builds secd-web and pushes
-# git.appsynergy.io/imabee/secd-web:${ver}. Tag must equal v + Cargo.toml version.
+# ghcr.io/appsynergy-io/secd-web:${ver} (and :sha-${GITHUB_SHA} when set).
+# Tag must equal v + Cargo.toml version.
 set -euo pipefail
 set +o xtrace
 
@@ -69,16 +70,40 @@ fi
 : "${COSIGN_KEY:?release: COSIGN_KEY is required}"
 : "${COSIGN_PASSWORD:?release: COSIGN_PASSWORD is required}"
 
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    echo "release: sha256sum or shasum is required" >&2
+    exit 1
+  fi
+}
+
 ensure_cosign() {
   if command -v cosign >/dev/null 2>&1; then
     return 0
   fi
-  local url sha tmp
-  url="https://github.com/sigstore/cosign/releases/download/v2.5.0/cosign-linux-amd64"
-  sha="1f6c194dd0891eb345b436bb71ff9f996768355f5e0ce02dde88567029ac2188"
+  local url sha tmp asset
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+      asset="cosign-linux-amd64"
+      sha="1f6c194dd0891eb345b436bb71ff9f996768355f5e0ce02dde88567029ac2188"
+      ;;
+    Darwin:arm64)
+      asset="cosign-darwin-arm64"
+      sha="780da3654d9601367b0d54686ac65cb9716578610cabe292d725c7008de4db85"
+      ;;
+    *)
+      echo "release: no pinned cosign binary for $(uname -s) $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  url="https://github.com/sigstore/cosign/releases/download/v2.5.0/${asset}"
   tmp="$(mktemp)"
   curl -fsSL -o "$tmp" "$url"
-  printf '%s  %s\n' "$sha" "$tmp" | sha256sum -c -
+  printf '%s  %s\n' "$sha" "$tmp" | sha256 -c -
   chmod 0755 "$tmp"
   mv "$tmp" "${TMPDIR:-/tmp}/cosign"
   PATH="${TMPDIR:-/tmp}:${PATH}"
@@ -110,13 +135,13 @@ prepare_cosign_key() {
   exit 1
 }
 
-pkg_base="${GITEA_PACKAGE_BASE:-https://git.appsynergy.io/api/packages/appsynergy/generic/secd}"
+pkg_base="${SECD_PACKAGE_BASE:-https://github.com/Appsynergy-io/secd/releases/download/v${ver}}"
 pkg_base="${pkg_base%/}"
 
 write_latest_json() {
   local dest="$1" name="$2" digest="$3"
-  local url="${pkg_base}/${ver}/${name}"
-  local sig="${pkg_base}/${ver}/${name}.sig"
+  local url="${pkg_base}/${name}"
+  local sig="${pkg_base}/${name}.sig"
   python3 - "$dest" "$ver" "$target" "$url" "$digest" "$sig" <<'PY'
 import json
 import sys
@@ -181,7 +206,23 @@ smoke_linux() {
 
 push_image() {
   local bin="$1"
-  local img="git.appsynergy.io/imabee/secd-web:${ver}"
+  local img_repo img sha_img="" last
+  if [[ -n "${SECD_IMAGE:-}" ]]; then
+    last="${SECD_IMAGE##*/}"
+    if [[ "$last" == *:* ]]; then
+      img="$SECD_IMAGE"
+      img_repo="${SECD_IMAGE%:*}"
+    else
+      img_repo="$SECD_IMAGE"
+      img="${SECD_IMAGE}:${ver}"
+    fi
+  else
+    img_repo="ghcr.io/appsynergy-io/secd-web"
+    img="${img_repo}:${ver}"
+  fi
+  if [[ -n "${GITHUB_SHA:-}" ]]; then
+    sha_img="${img_repo}:sha-${GITHUB_SHA}"
+  fi
   local ctx
   ctx="$(mktemp -d)"
   cp "$bin" "$ctx/secd-web"
@@ -197,25 +238,43 @@ EOF
   local pushed=0
   if command -v docker >/dev/null 2>&1; then
     docker build -t "$img" "$ctx"
+    if [[ -n "$sha_img" ]]; then
+      docker tag "$img" "$sha_img"
+    fi
     if docker push "$img"; then
-      pushed=1
+      if [[ -z "$sha_img" ]] || docker push "$sha_img"; then
+        pushed=1
+      fi
     fi
   fi
   if [[ "$pushed" -eq 0 ]] && command -v podman >/dev/null 2>&1; then
     podman build -t "$img" "$ctx"
+    if [[ -n "$sha_img" ]]; then
+      podman tag "$img" "$sha_img"
+    fi
     if podman push "$img"; then
-      pushed=1
+      if [[ -z "$sha_img" ]] || podman push "$sha_img"; then
+        pushed=1
+      fi
     fi
   fi
   if [[ "$pushed" -eq 0 ]]; then
-    : "${SECD_RELEASE_TOKEN:?release: SECD_RELEASE_TOKEN is required to push the image}"
-    python3 - "$bin" "$img" <<'PY'
+    if [[ -z "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]]; then
+      echo "release: GITHUB_TOKEN or GH_TOKEN is required to push the image" >&2
+      exit 1
+    fi
+    local extra_tags=()
+    if [[ -n "$sha_img" ]]; then
+      extra_tags+=("${sha_img##*:}")
+    fi
+    python3 - "$bin" "$img" "${extra_tags[@]}" <<'PY'
 import base64
 import gzip
 import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import urllib.error
@@ -223,8 +282,11 @@ import urllib.parse
 import urllib.request
 
 bin_path, image = sys.argv[1], sys.argv[2]
-token = os.environ["SECD_RELEASE_TOKEN"]
-user = os.environ.get("GITEA_USER", "imabee")
+extra_tags = sys.argv[3:]
+token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+if not token:
+    raise SystemExit("release: GITHUB_TOKEN or GH_TOKEN is required to push the image")
+user = os.environ.get("GITHUB_ACTOR") or os.environ.get("GITHUB_USER") or "git"
 
 host, rest = image.split("/", 1)
 name, tag = rest.rsplit(":", 1)
@@ -275,16 +337,44 @@ manifest_bytes = (json.dumps(manifest, separators=(",", ":")) + "\n").encode()
 bearer = None
 
 
-def auth_header():
-    if bearer:
-        return "Bearer " + bearer
+def parse_challenge(www):
+    realm = service = ""
+    for m in re.finditer(r'([A-Za-z]+)="([^"]*)"', www):
+        if m.group(1) == "realm":
+            realm = m.group(2)
+        elif m.group(1) == "service":
+            service = m.group(2)
+    return realm, service
+
+
+def fetch_bearer(www):
+    realm, service = parse_challenge(www)
+    if not realm:
+        raise RuntimeError("registry 401: missing WWW-Authenticate realm")
+    if not service:
+        service = host
+    q = urllib.parse.urlencode(
+        {"service": service, "scope": "repository:" + name + ":pull,push"}
+    )
+    tok_url = realm + ("&" if "?" in realm else "?") + q
     raw = base64.b64encode(f"{user}:{token}".encode()).decode()
-    return "Basic " + raw
+    req = urllib.request.Request(
+        tok_url, method="GET", headers={"Authorization": "Basic " + raw}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"registry token -> HTTP {e.code}") from None
+    got = body.get("token") or body.get("access_token")
+    if not got:
+        raise RuntimeError("registry token: empty response")
+    return got
 
 
 def do(method, url, data=None, headers=None, retry_auth=True):
     global bearer
-    h = {"Authorization": auth_header()}
+    h = {"Authorization": "Bearer " + (bearer or token)}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, method=method, headers=h)
@@ -292,29 +382,8 @@ def do(method, url, data=None, headers=None, retry_auth=True):
         return urllib.request.urlopen(req)
     except urllib.error.HTTPError as e:
         if e.code == 401 and retry_auth and not bearer:
-            www = e.headers.get("WWW-Authenticate", "")
-            realm = service = scope = ""
-            if www.startswith("Bearer "):
-                for part in www[7:].split(","):
-                    part = part.strip()
-                    if "=" not in part:
-                        continue
-                    k, v = part.split("=", 1)
-                    v = v.strip().strip('"')
-                    if k == "realm":
-                        realm = v
-                    elif k == "service":
-                        service = v
-                    elif k == "scope":
-                        scope = v
-            if realm:
-                q = urllib.parse.urlencode({"service": service, "scope": scope})
-                tok_url = realm + ("&" if "?" in realm else "?") + q
-                with do("GET", tok_url, retry_auth=False) as resp:
-                    body = json.loads(resp.read().decode())
-                bearer = body.get("token") or body.get("access_token")
-                if bearer:
-                    return do(method, url, data=data, headers=headers, retry_auth=False)
+            bearer = fetch_bearer(e.headers.get("WWW-Authenticate", ""))
+            return do(method, url, data=data, headers=headers, retry_auth=False)
         raise RuntimeError(f"registry {method} {urlparse_path(url)} -> HTTP {e.code}") from None
 
 
@@ -342,15 +411,16 @@ def put_blob(digest, blob, content_type):
 
 put_blob(layer_digest, gz_bytes, "application/octet-stream")
 put_blob(config_digest, config_bytes, "application/vnd.docker.container.image.v1+json")
-man_url = f"{registry}/v2/{name}/manifests/{urllib.parse.quote(tag, safe='')}"
-with do(
-    "PUT",
-    man_url,
-    data=manifest_bytes,
-    headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
-):
-    pass
-print(f"release: pushed {image}", file=sys.stderr)
+for t in [tag] + extra_tags:
+    man_url = f"{registry}/v2/{name}/manifests/{urllib.parse.quote(t, safe='')}"
+    with do(
+        "PUT",
+        man_url,
+        data=manifest_bytes,
+        headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
+    ):
+        pass
+    print(f"release: pushed {host}/{name}:{t}", file=sys.stderr)
 PY
   fi
   rm -rf "$ctx"
@@ -414,7 +484,7 @@ cosign sign-blob \
 
 (
   cd "$dist"
-  sha256sum "$name" >"SHA256SUMS-${target}"
+  sha256 "$name" >"SHA256SUMS-${target}"
 )
 if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
   cp "${dist}/SHA256SUMS-${target}" "${dist}/SHA256SUMS"

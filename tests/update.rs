@@ -141,13 +141,17 @@ fn T_UPD_WRONG_HOST() {
     assert!(!staging(&dest).exists(), "staging written");
 
     assert!(!secd::update::url_allowed("https://evil.example/x"));
+    assert!(!secd::update::url_allowed(""));
     assert!(!secd::update::url_allowed("http://git.appsynergy.io/x"));
+    assert!(!secd::update::url_allowed("http://github.com/x"));
     assert!(!secd::update::url_allowed(
         "https://git.appsynergy.io.evil.com/x"
     ));
+    assert!(!secd::update::url_allowed("https://github.com.evil.com/x"));
     assert!(!secd::update::url_allowed(
         "https://user@git.appsynergy.io/x"
     ));
+    assert!(!secd::update::url_allowed("https://user@github.com/x"));
 
     let triple = secd::update::target_triple().expect("triple");
     let manifest = format!(
@@ -155,9 +159,85 @@ fn T_UPD_WRONG_HOST() {
         "ab".repeat(32)
     );
     let parsed = secd::update::parse_manifest(manifest.as_bytes(), triple);
-    assert!(parsed.is_err(), "manifest url not git.appsynergy.io");
+    assert!(parsed.is_err(), "off-allowlist manifest url must refuse");
     assert_eq!(fs::read(&dest).expect("read dest"), orig, "argv[0] changed");
     assert!(!staging(&dest).exists(), "staging written");
+}
+
+#[test]
+fn T_UPD_HOST_GITHUB() {
+    assert_eq!(
+        secd::update::MANIFEST_URL,
+        "https://github.com/Appsynergy-io/secd/releases/latest/download/latest.json"
+    );
+    assert!(secd::update::url_allowed(secd::update::MANIFEST_URL));
+    assert!(secd::update::url_allowed(
+        "https://github.com/Appsynergy-io/secd/releases/latest/download/latest.json"
+    ));
+    assert!(secd::update::url_allowed(
+        "https://github.com/Appsynergy-io/secd/releases/download/v0.1.10/secd-x86_64-unknown-linux-musl"
+    ));
+    assert!(secd::update::url_allowed(
+        "https://release-assets.githubusercontent.com/foo"
+    ));
+    assert!(secd::update::url_allowed(
+        "https://objects.githubusercontent.com/foo"
+    ));
+    assert!(secd::update::url_allowed("https://git.appsynergy.io/x"));
+
+    let triple = secd::update::target_triple().expect("triple");
+    let url = "https://github.com/Appsynergy-io/secd/releases/download/v0.1.10/secd-x86_64-unknown-linux-musl";
+    let sig = "https://github.com/Appsynergy-io/secd/releases/download/v0.1.10/secd-x86_64-unknown-linux-musl.sig";
+    let manifest = format!(
+        r#"{{"version":"0.1.10","targets":{{"{triple}":{{"url":"{url}","sha256":"{}","sig":"{sig}"}}}}}}"#,
+        "ab".repeat(32)
+    );
+    let parsed =
+        secd::update::parse_manifest(manifest.as_bytes(), triple).expect("github.com asset urls");
+    assert_eq!(parsed.url, url);
+    assert_eq!(parsed.sig, sig);
+}
+
+#[test]
+fn T_UPD_REDIRECT_OFFLIST() {
+    let dir = scratch("redir");
+    let dest = dir.0.join("secd");
+    let orig = b"argv0-old";
+    fs::write(&dest, orig).expect("orig dest");
+
+    assert!(
+        secd::update::next_redirect(302, Some("https://evil.example/x"), "https://github.com/x",)
+            .is_err(),
+        "off-list Location must fail"
+    );
+
+    let err = secd::update::apply_from_url(
+        &dest,
+        "https://evil.example/latest.json",
+        false,
+        "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n",
+    );
+    assert!(err.is_err(), "wrong host must refuse");
+    assert_eq!(fs::read(&dest).expect("read dest"), orig, "argv[0] changed");
+    assert!(!staging(&dest).exists(), "staging written");
+
+    assert_eq!(
+        secd::update::next_redirect(
+            302,
+            Some("https://release-assets.githubusercontent.com/path"),
+            "https://github.com/x",
+        )
+        .expect("on-list redirect"),
+        Some("https://release-assets.githubusercontent.com/path".into())
+    );
+    assert!(
+        secd::update::next_redirect(302, None, "https://github.com/x").is_err(),
+        "redirect without Location must fail"
+    );
+    assert_eq!(
+        secd::update::next_redirect(200, None, "https://github.com/x").expect("200"),
+        None
+    );
 }
 
 #[test]
@@ -179,11 +259,9 @@ fn T_UPD_PACMAN() {
         dest.is_file(),
         "/usr/bin/true missing; cannot assert pacman refuse"
     );
-    assert!(
-        secd::update::pacman_owns(dest),
-        "expected pacman to own {}",
-        dest.display()
-    );
+    if !secd::update::pacman_owns(dest) {
+        return; // runner is not Arch / dest not pacman-owned
+    }
     let orig = fs::read(dest).expect("read pacman dest");
     let s = signed(b"unused", b"payload-new-t8");
     let err = secd::update::apply(dest, &s.payload, &s.sha, &s.sig, &s.pub_pem);
