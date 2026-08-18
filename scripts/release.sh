@@ -440,15 +440,18 @@ case "$target" in
       export CC_x86_64_unknown_linux_musl=musl-gcc
     fi
     # scratch has no musl loader; default musl target is dynamically linked.
-    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
-    cargo build --release --target "$target" --bin secd
+    # Do not export RUSTFLAGS: crt-static breaks host proc-macros (wasm-bindgen-cli).
+    musl_flags="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
     if [[ "$do_image" -eq 1 ]]; then
       if [[ ! -d crates/secd-web ]]; then
         echo "release: crates/secd-web missing" >&2
         exit 1
       fi
       "$root/scripts/build-ui.sh"
-      cargo build --release --target "$target" -p secd-web
+    fi
+    RUSTFLAGS="$musl_flags" cargo build --release --target "$target" --bin secd
+    if [[ "$do_image" -eq 1 ]]; then
+      RUSTFLAGS="$musl_flags" cargo build --release --target "$target" -p secd-web
     fi
     ;;
   aarch64-apple-darwin)
