@@ -25,4 +25,10 @@ jobs:
           cache-all-crates: true
           cache-bin: true
       - name: check
-        run: scripts/check.sh
+        run: |
+          if ! command -v keyctl >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y keyutils
+          fi
+          keyctl new_session
+          scripts/check.sh
