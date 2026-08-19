@@ -187,38 +187,24 @@ jobs:
       - uses: ./.github/actions/setup
       - run: scripts/check.sh release-dry
 
-  # Flags advisories introduced by a pull request, at pull-request time. The
-  # weekly audit workflow covers advisories published after a merge.
-  deps:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - id: review
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
-      # This action fails the same way for two very different things: a
-      # dependency the pull request introduced, and a dependency graph that is
-      # switched off for the repository. The second is not something the author
-      # of a pull request can fix, so name the remedy rather than leaving it in
-      # the log. The job still fails either way.
-      - if: failure() && steps.review.outcome == 'failure'
-        run: |
-          echo "::notice::If the log above says dependency review is not supported"
-          echo "::notice::on this repository, the dependency graph is off. Enable it"
-          echo "::notice::with: scripts/repo-settings.sh --apply"
-
+  # There is deliberately no dependency-review job here. It needs the
+  # repository's dependency graph, which is off -- the action fails with
+  # "Dependency review is not supported on this repository" -- and no
+  # contributor can turn that on from a pull request, so it would block every
+  # merge while catching nothing. It would also contradict what this repo
+  # already decided: dependabot.yml and audit.yml both say advisories are
+  # reported weekly as an issue rather than turning a pull request red for a
+  # dependency nobody touched, and scripts/audit.sh reports a strict superset
+  # of what dependency review would flag. Re-add it only together with
+  # `scripts/repo-settings.sh --apply`, which enables the graph.
+  #
   # The only job named in branch protection. Every other job is a `needs` of
   # this one, which is what makes treating "skipped" as acceptable safe: a job
   # skipped because its dependency failed is always accompanied by that
   # dependency reporting "failure" here.
   gate:
     if: always() && github.event_name != 'push'
-    needs: [changes, fast, ui, clippy, test, test-release, compile-fail, release-dry, deps]
+    needs: [changes, fast, ui, clippy, test, test-release, compile-fail, release-dry]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
