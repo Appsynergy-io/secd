@@ -92,6 +92,8 @@ if [[ "$apply" -eq 0 ]]; then
   say ""
   say "  PUT  /repos/${REPO}/private-vulnerability-reporting"
   say ""
+  say "  PUT  /repos/${REPO}/vulnerability-alerts"
+  say ""
   say "  PATCH /repos/${REPO}   {\"allow_auto_merge\": true}"
   say ""
   say "Re-run with --apply to perform them, then --apply --enforce once a pull"
@@ -135,6 +137,18 @@ gh api --method PUT "repos/${REPO}/private-vulnerability-reporting" --silent
 pvr="$(gh api "repos/${REPO}/private-vulnerability-reporting" --jq '.enabled' 2>/dev/null || true)"
 [[ "$pvr" == "true" ]] || secd_die "private vulnerability reporting is ${pvr:-<unknown>}"
 say "repo-settings: private vulnerability reporting enabled"
+
+# The ci `deps` job runs dependency review, which reads the dependency graph.
+# GitHub's own API description for this endpoint: "Enables dependency alerts and
+# the dependency graph for a repository." Without it the job fails with
+# "Dependency review is not supported on this repository" -- a configuration
+# failure that looks exactly like a finding until you read the log. There is no
+# separate endpoint for the graph alone; this is the one that turns it on.
+gh api --method PUT "repos/${REPO}/vulnerability-alerts" --silent
+# GET answers 204 when enabled and 404 when not, with no body to inspect.
+gh api "repos/${REPO}/vulnerability-alerts" --silent >/dev/null 2>&1 \
+  || secd_die "dependency alerts and the dependency graph are still disabled"
+say "repo-settings: dependency alerts and the dependency graph enabled"
 
 # Without this the pipeline cannot merge: auto-merge is what waits for the gate
 # and merges when it goes green, instead of a human coming back to press a

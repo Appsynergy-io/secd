@@ -199,7 +199,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+      - id: review
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+      # This action fails the same way for two very different things: a
+      # dependency the pull request introduced, and a dependency graph that is
+      # switched off for the repository. The second is not something the author
+      # of a pull request can fix, so name the remedy rather than leaving it in
+      # the log. The job still fails either way.
+      - if: failure() && steps.review.outcome == 'failure'
+        run: |
+          echo "::notice::If the log above says dependency review is not supported"
+          echo "::notice::on this repository, the dependency graph is off. Enable it"
+          echo "::notice::with: scripts/repo-settings.sh --apply"
 
   # The only job named in branch protection. Every other job is a `needs` of
   # this one, which is what makes treating "skipped" as acceptable safe: a job

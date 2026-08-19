@@ -46,13 +46,14 @@ export RELEASE_DIST="$dist"
 
 # ---------------------------------------------------------------- key
 
-# release.sh installs a pinned cosign when one is missing; reuse that.
-if ! command -v cosign >/dev/null 2>&1; then
-  PATH="${TMPDIR:-/tmp}:$PATH"
-  export PATH
-fi
+# Fetch the pinned cosign rather than requiring one already on PATH. A lane
+# that only passes on a machine where an earlier run happened to leave a binary
+# behind is not a lane; this one was green on a laptop and red on a cold runner.
+"$root/scripts/ensure-cosign.sh"
+PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+export PATH
 command -v cosign >/dev/null 2>&1 \
-  || secd_die "cosign is required; run scripts/release.sh --sign-only --dry-run once to fetch it"
+  || secd_die "scripts/ensure-cosign.sh ran but cosign is still not on PATH"
 (cd "$work" && cosign generate-key-pair >/dev/null)
 export COSIGN_KEY="$work/cosign.key"
 export SECD_VERIFY_PUB="$work/cosign.pub"
