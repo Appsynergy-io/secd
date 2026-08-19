@@ -217,6 +217,28 @@ smoke_linux() {
   esac
 }
 
+# Panic locations and debug info embed the paths of the machine that built the
+# binary, so the same commit built in two places produced different bytes. The
+# --remap-path-prefix flags below are supposed to prevent that; this is what
+# proves they did. Measured baseline: a binary built without them carries 112
+# absolute registry paths, and 0 with them.
+no_build_paths() {
+  local bin="$1" registry hits
+  registry="${CARGO_HOME:-$HOME/.cargo}/registry"
+  if ! command -v strings >/dev/null 2>&1; then
+    echo "release: strings is required" >&2
+    exit 1
+  fi
+  for needle in "$registry" "$root"; do
+    hits="$(strings "$bin" | grep -c -F "$needle" || true)"
+    if [[ "$hits" -ne 0 ]]; then
+      echo "release: ${bin} embeds ${hits} build-machine paths under ${needle};" >&2
+      echo "release: --remap-path-prefix is not taking effect" >&2
+      exit 1
+    fi
+  done
+}
+
 push_image() {
   local bin="$1"
   local img_repo img last
@@ -305,11 +327,15 @@ if [[ "$do_build" -eq 1 ]]; then
   fi
   if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
     smoke_linux "$out/secd" secd
+    no_build_paths "$out/secd"
     if [[ "$do_image" -eq 1 ]]; then
       smoke_linux "$out/secd-web" secd-web
+      no_build_paths "$out/secd-web"
       cp "$out/secd-web" "${dist}/secd-web"
       chmod 0755 "${dist}/secd-web"
     fi
+  else
+    no_build_paths "$src"
   fi
   cp "$src" "${dist}/${name}"
   chmod 0755 "${dist}/${name}"

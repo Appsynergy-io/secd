@@ -157,3 +157,47 @@ fn T_INSTALL_PUBKEY() {
         "install.sh no longer verifies the signature"
     );
 }
+
+/// The deployment is bound to a digest at apply time, not by a digest committed
+/// into deploy/k3s -- committing it would need a push to a branch that requires
+/// pull requests. So what has to hold is the mechanism: the release publishes the
+/// digest, the apply refuses one that disagrees, and the agent carries no
+/// deployment logic of its own.
+#[test]
+fn T_DEPLOY_DIGEST_BINDING() {
+    let apply = fs::read_to_string(root().join("scripts/k3s-apply.sh")).expect("k3s-apply.sh");
+    assert!(
+        apply.contains("--expect-digest"),
+        "k3s-apply.sh no longer accepts --expect-digest"
+    );
+    assert!(
+        apply.contains("expected ${expect_digest}"),
+        "k3s-apply.sh no longer refuses a digest that disagrees with the release"
+    );
+    assert!(
+        apply.contains("cosign verify"),
+        "k3s-apply.sh no longer verifies the image signature before applying"
+    );
+    assert!(
+        apply.contains("rollout undo"),
+        "k3s-apply.sh no longer rolls back a failed rollout"
+    );
+
+    let release =
+        fs::read_to_string(root().join(".github/workflows/release.yml")).expect("release.yml");
+    assert!(
+        release.contains("image-digest.txt"),
+        "the release no longer publishes the digest the deploy binds to"
+    );
+
+    let agent = fs::read_to_string(root().join("deploy/agent/secd-agent.sh"))
+        .expect("deploy/agent/secd-agent.sh");
+    assert!(
+        agent.contains("--expect-digest"),
+        "the agent applies without binding the digest it fetched"
+    );
+    assert!(
+        !agent.contains("kubectl apply") && !agent.contains("kustomize"),
+        "the agent grew deployment logic of its own; it must defer to k3s-apply.sh"
+    );
+}

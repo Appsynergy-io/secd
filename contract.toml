@@ -87,7 +87,7 @@ files = [
 ]
 
 [pipeline]
-".claude/hooks/guard-bash.py" = "2a3a880b5103006d727d3193b32a84846cd9a05a00b336ad227d5a3bcc19ca08"
+".claude/hooks/guard-bash.py" = "d47cd27129da94b1f7a01e75ded95fa61c88cd6ce961353dc081d00a50e9f13e"
 ".claude/hooks/session-start.sh" = "b9d357645701d5fe767169dd8d9447cc2cfaa0703e551bc9404cdfc14935f69f"
 ".claude/settings.json" = "b18f1ae2d286ba443e52f69e59966555d656351b3e635c358ad64e7fdfb73f8d"
 ".githooks/pre-push" = "a313ff2ba9c5a404868de9a47bf606fcf59b32ffb52e8091d9761fac1b5e8251"
@@ -95,8 +95,11 @@ files = [
 ".github/actions/testdeps/action.yml" = "32a40e40d93425e6247d70d3972c90d2b4198d3935481387f3cf0818c7ae45ef"
 ".github/dependabot.yml" = "02e4645baf4ad14280642f011deb5789e4a7e036547954d8b1fab02eb5d5994e"
 ".github/workflows/audit.yml" = "e9786346ed036abffad6e8d203d16be746af50bed2fab6756f3fbd88a73cd8b1"
-".github/workflows/ci.yml" = "30a1d85c36a46a41ccbd5bc8daa970a596f728bf2f5d678e61409feea259747a"
-".github/workflows/release.yml" = "e00217e956687e5198939cb0664aaa38effd1ae850bc0daaf571313139847916"
+".github/workflows/ci.yml" = "80dc3c06e6d954ddd20cd996504dea6cb96264762e1470e78cb4fc0c91c1eaf1"
+".github/workflows/release.yml" = "96a74ece746c47614bf0bbe4e6e014b8957520acfebf394394c2c3f1cec58e59"
+"deploy/agent/secd-agent.service" = "e463ff10f4745960fb9a123b7e4c8c798af524ba20f2b86ce437630ef0fbaa4c"
+"deploy/agent/secd-agent.sh" = "0e2cd60f2bb04bae332651b7e20403fbd8e54feca8c2af523f1f88e04cf37896"
+"deploy/agent/secd-agent.timer" = "373f51161623e6e79129275ea8b20af3593f01066df2211fef529149855936b5"
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
@@ -112,7 +115,9 @@ files = [
 "scripts/plan-contract.sh" = "70117242ab1531e7451e1acfcd0e583f2824a39dad7fde9b1b1c88feb59bac87"
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
-"scripts/release.sh" = "164e32599ae0006e30b7a90bb1dc40a3b47205228a10a86d4be7a693cb278108"
+"scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
+"scripts/repo-settings.sh" = "5fca09a74f84a164b89bdb3334f334daa3e5ab3d9f80b42ed196336b830659b0"
+"scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
@@ -637,6 +642,12 @@ pending = false
 pending = false
 
 [tests.T_AGENT_GUARD_ALLOWS]
+pending = false
+
+[tests.T_AGENT_GUARD_INVOCATION_FORMS]
+pending = false
+
+[tests.T_DEPLOY_DIGEST_BINDING]
 pending = false
 
 [tests.T_INSTALL_PUBKEY]

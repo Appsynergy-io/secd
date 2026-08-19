@@ -96,7 +96,34 @@ fn T_AGENT_GUARD_ALLOWS() {
         "cargo test --locked --workspace",
         "scripts/check.sh fast",
         "scripts/release.sh --target x86_64-unknown-linux-musl --dry-run",
+        // Reading a guarded script is not running it. Matching the bare name
+        // anywhere refused all of these.
+        "sed -n '1,5p' scripts/release.sh",
+        "grep -n cosign scripts/publish-release.sh",
+        "cat scripts/k3s-apply.sh",
+        "shellcheck -x scripts/release.sh scripts/k3s-apply.sh",
+        "wc -l scripts/publish-release.sh deploy/agent/secd-agent.sh",
+        // Markdown inline code spells script names the same way a backtick
+        // substitution would, and this repo's prose is full of them.
+        "python3 - <<'P'\nt = t.replace('`k3s-apply.sh` refuses', 'x')\nP",
     ] {
         assert!(allowed(command), "the guard refused `{command}`");
+    }
+}
+
+/// The read exemption must not become an escape hatch: the same script names in
+/// command position are still refused, however they are reached.
+#[test]
+fn T_AGENT_GUARD_INVOCATION_FORMS() {
+    for command in [
+        "bash scripts/publish-release.sh",
+        "sh ./scripts/k3s-apply.sh",
+        "./scripts/k3s-apply.sh --expect-digest sha256:0",
+        "make build && scripts/release.sh --target x",
+        "cd /tmp; scripts/release.sh --target x",
+        "echo $(scripts/k3s-apply.sh)",
+        "exec scripts/publish-release.sh --tag v9.9.9",
+    ] {
+        assert!(!allowed(command), "the guard allowed `{command}`");
     }
 }

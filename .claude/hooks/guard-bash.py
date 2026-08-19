@@ -13,6 +13,24 @@ import json
 import re
 import sys
 
+# Match a script only where it is *invoked* -- at the start of the command, after a
+# shell operator, inside $( ) or backticks, or via an interpreter. Matching the bare
+# name anywhere refused `sed -n 1,5p scripts/release.sh`, which is a read, not a run,
+# and a guard that blocks ordinary reading is one someone turns off.
+#
+# The interpreter alternatives are anchored with a lookbehind: a bare `\bsh\s+`
+# also matches the trailing "sh" of "release.sh ", which refused
+# `shellcheck -x scripts/release.sh scripts/k3s-apply.sh`.
+#
+# Backtick command substitution is deliberately not a command position here:
+# markdown inline code spells script names the same way, and this repo's prose
+# is full of `k3s-apply.sh`. $( ) covers substitution without that collision.
+INVOKED = (
+    r"(?:^|[;&|]\s*|\$\(\s*"
+    r"|(?<![\w.-])(?:ba)?sh\s+|(?<![\w.-])exec\s+)"
+    r"[\w./$-]*%s\.sh\b"
+)
+
 RULES = [
     (
         r"\bgit\s+push\b(?=.*(?:\bmain\b|\bHEAD:main\b))",
@@ -33,8 +51,8 @@ RULES = [
     (r"\bgh\s+release\b", "publishing a GitHub release"),
     (r"\b(?:docker|podman)\s+push\b", "pushing a container image"),
     (r"\bcosign\s+sign\b", "signing a release artifact"),
-    (r"publish-release\.sh\b", "publishing a GitHub release"),
-    (r"k3s-apply\.sh\b", "deploying to the cluster"),
+    (INVOKED % "publish-release", "publishing a GitHub release"),
+    (INVOKED % "k3s-apply", "deploying to the cluster"),
 ]
 
 
@@ -54,7 +72,7 @@ def main() -> int:
             print(f"guard-bash: refusing {why}.", file=sys.stderr)
             return 2
 
-    if re.search(r"release\.sh\b", command) and "--dry-run" not in command:
+    if re.search(INVOKED % "release", command) and "--dry-run" not in command:
         print(
             "guard-bash: refusing to run release.sh outside --dry-run. "
             "Use `scripts/release.sh --dry-run` to exercise the release path.",

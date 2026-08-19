@@ -154,6 +154,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Provenance only. Contract rule 10 keeps these off anything that compiles.
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -163,6 +168,7 @@ jobs:
           name: build-x86_64-unknown-linux-musl
           path: target/release-dist
       - name: push and sign the image
+        id: push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
@@ -179,6 +185,12 @@ jobs:
           cosign sign --key env://COSIGN_KEY --yes --tlog-upload=false \
             "ghcr.io/appsynergy-io/secd-web@${digest}"
           printf '%s\n' "$digest" > image-digest.txt
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/appsynergy-io/secd-web
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: image-digest
@@ -192,6 +204,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -204,6 +218,15 @@ jobs:
         with:
           name: image-digest
           path: target/release-dist
+      - name: sbom
+        run: scripts/sbom.sh target/release-dist/secd-sbom.cyclonedx.json
+      # Explicit paths rather than a glob: the two released binaries, and not
+      # their .sig files.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            target/release-dist/secd-x86_64-unknown-linux-musl
+            target/release-dist/secd-aarch64-apple-darwin
       - name: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
