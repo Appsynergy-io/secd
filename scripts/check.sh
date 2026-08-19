@@ -7,6 +7,7 @@
 #   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
 #   scripts/check.sh ui              build crates/secd-ui/dist
 #   scripts/check.sh clippy test     one or more named lanes
+#   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -14,6 +15,10 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 PATH="$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
 export PATH
+
+if [[ "${1:-}" == "pipeline" && "${2:-}" == "--update" ]]; then
+  exec "$root/scripts/plan-contract.sh" --update-pipeline
+fi
 
 SECD_ROOT="$root"
 SECD_TOOL_TAG="check"
@@ -31,6 +36,7 @@ ALL_LANES=(contract shell workflow fmt ui clippy test test-release compile-fail)
 usage() {
   echo "usage: check.sh [lane ...]" >&2
   echo "lanes: ${ALL_LANES[*]} fast all" >&2
+  echo "       pipeline --update  re-pin contract.toml [pipeline]" >&2
   exit 2
 }
 
@@ -47,7 +53,7 @@ lane_shell() {
   fi
   local files=()
   while IFS= read -r f; do files+=("$f"); done < <(
-    git -C "$root" ls-files -- 'scripts/*.sh' 'packaging/*.sh' '.githooks/*'
+    git -C "$root" ls-files -- 'scripts/*.sh' 'packaging/*.sh' '.githooks/*' '.claude/hooks/*.sh'
   )
   [[ ${#files[@]} -gt 0 ]] || return 0
   shellcheck -x "${files[@]}"
@@ -150,7 +156,7 @@ run_lane() {
   local lane="$1"
   echo "check: ${lane}" >&2
   case "$lane" in
-    contract) lane_contract ;;
+    contract | pipeline) lane_contract ;;
     shell) lane_shell ;;
     workflow) lane_workflow ;;
     fmt) lane_fmt ;;

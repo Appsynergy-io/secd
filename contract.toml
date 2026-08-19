@@ -98,7 +98,7 @@ files = [
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "6ec087c23115bd7571e20614e6f1af34ff570d6780bff68866dda05f495afdb6"
+"scripts/check.sh" = "d2bca788561ff2d86ec3d1ba0e606bbd8afa73fe14a1efd8683fea25babcd017"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
 "scripts/install-hooks.sh" = "ffeff11aeb5fe9e79938cd1c52b3765df2036ab1fe8a9526b67790c5acc02f08"
 "scripts/k3s-apply.sh" = "89c6b4acbf3689be3602350ea8b5b400b7ec0cfef3aab47d21554d01561d799e"
@@ -106,7 +106,8 @@ files = [
 "scripts/merge.sh" = "2b1f1ac99933434e2e78227c7930f5857b9ea196150d05044c777e5c9faa3b4d"
 "scripts/plan-contract.sh" = "87a2e4f45bcec59949892ae7f528e77c09b19ac1ed4bd1abc478da116d09081d"
 "scripts/publish-release.sh" = "b0a37caee067aaa9582cfdb48fdca0196cff4d7fb821305a39a35ada62bf6bb7"
-"scripts/release.sh" = "0bec26ace5fcf2b1d6e7decc28db1edcd963b0b8d5ed09c6db22a397df8b8a6f"
+"scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
+"scripts/release.sh" = "3ee0bfe10fcb53232b06542cf4e4d4b313a33529ae593290f47cfb52b2bbc28d"
 "scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
@@ -622,6 +623,15 @@ pending = false
 pending = false
 
 [tests.T_UPD_PACMAN]
+pending = false
+
+[tests.T_MERGE_LATEST_UNION]
+pending = false
+
+[tests.T_MERGE_LATEST_VERSION_MISMATCH]
+pending = false
+
+[tests.T_MERGE_LATEST_MISSING_KEY]
 pending = false
 
 [tests.T_SKILL_IDENTICAL]
