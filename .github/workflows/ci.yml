@@ -14,6 +14,9 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      # A missing browser used to make the headless DOM assertions vanish while
+      # the run still reported ok. Require them.
+      SECD_REQUIRE_BROWSER: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -27,11 +30,25 @@ jobs:
           cache-on-failure: true
           cache-all-crates: true
           cache-bin: true
+      - name: browser
+        run: |
+          set -euo pipefail
+          for b in google-chrome-stable google-chrome chromium chromium-browser; do
+            if command -v "$b" >/dev/null 2>&1; then
+              echo "SECD_BROWSER=$(command -v "$b")" >>"$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+          command -v chromium-browser
       - name: check
         run: |
           if ! command -v keyctl >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y keyutils
           fi
+          # new_session installs a session keyring on THIS shell; the
+          # check must run in the same run: block to inherit it.
           keyctl new_session
           scripts/check.sh

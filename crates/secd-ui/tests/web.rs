@@ -144,6 +144,14 @@ fn passkeys_two() -> Vec<PasskeyRow> {
     ]
 }
 
+fn path_lookup(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let p = dir.join(name);
+        p.is_file().then_some(p)
+    })
+}
+
 fn browser_bin() -> Option<PathBuf> {
     const NAMES: &[&str] = &[
         "thorium-browser",
@@ -155,6 +163,30 @@ fn browser_bin() -> Option<PathBuf> {
         "google-chrome",
         "google-chrome-stable",
     ];
+    for var in ["SECD_BROWSER", "CHROME_PATH"] {
+        if let Some(v) = std::env::var_os(var) {
+            let p = PathBuf::from(v);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    for name in NAMES {
+        if let Some(p) = path_lookup(name) {
+            return Some(p);
+        }
+    }
+    // Playwright layout: agent sandboxes ship chromium here, not in /usr/bin.
+    if let Some(root) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        let p = PathBuf::from(root).join("chromium");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let pw = PathBuf::from("/opt/pw-browsers/chromium");
+    if pw.is_file() {
+        return Some(pw);
+    }
     for name in NAMES {
         let p = PathBuf::from(format!("/usr/bin/{name}"));
         if p.is_file() {
@@ -164,18 +196,35 @@ fn browser_bin() -> Option<PathBuf> {
     None
 }
 
+// macOS coreutils installs GNU timeout as gtimeout; without this the watchdog
+// is missing and every dump_dom call skips on darwin.
 fn timeout_bin() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let p = dir.join("timeout");
-        p.is_file().then_some(p)
-    })
+    path_lookup("timeout").or_else(|| path_lookup("gtimeout"))
+}
+
+// A missing browser used to make every assertion below vanish and the test
+// still report ok. Under SECD_REQUIRE_BROWSER (set in CI) a skip is a failure.
+fn require_browser() -> bool {
+    matches!(std::env::var("SECD_REQUIRE_BROWSER"), Ok(v) if !v.is_empty() && v != "0")
+}
+
+fn skip_dom(reason: &str) -> Option<String> {
+    assert!(
+        !require_browser(),
+        "SECD_REQUIRE_BROWSER is set but the headless DOM check did not run: {reason}"
+    );
+    eprintln!("web: headless DOM check skipped: {reason}");
+    None
 }
 
 fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
     // GitHub ubuntu chrome --dump-dom never exits; unguarded spawn hung CI 6h.
-    let timeout = timeout_bin()?;
-    let bin = browser_bin()?;
+    let Some(timeout) = timeout_bin() else {
+        return skip_dom("no timeout(1) or gtimeout(1) on PATH");
+    };
+    let Some(bin) = browser_bin() else {
+        return skip_dom("no chromium-family browser found");
+    };
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "secd-t6-{}-{}-{n}.html",
@@ -213,11 +262,14 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(&data);
     if !out.status.success() {
-        return None;
+        return skip_dom(&format!("{} exited {}", bin.display(), out.status));
     }
     let html = String::from_utf8_lossy(&out.stdout).into_owned();
-    if html.trim().is_empty() || !html.contains("data-") {
-        return None;
+    if html.trim().is_empty() {
+        return skip_dom("browser produced no output");
+    }
+    if !html.contains("data-") {
+        return skip_dom("browser output carries no data- attributes");
     }
     Some(html)
 }
