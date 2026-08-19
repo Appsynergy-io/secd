@@ -5,7 +5,7 @@
 //! transformation, so it is the cheapest of them to pin down.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,7 +22,7 @@ fn scratch() -> PathBuf {
     dir
 }
 
-fn fragment(dir: &PathBuf, name: &str, body: &str) -> PathBuf {
+fn fragment(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, body).expect("write fragment");
     path

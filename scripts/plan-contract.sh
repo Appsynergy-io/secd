@@ -309,6 +309,73 @@ for rel in found_pipeline:
                 f"signing secret; build.rs from every dependency runs in it"
             )
 
+# 11. the gate CI runs is the gate you can run.
+#
+# The value of splitting check.sh into lanes is that nothing exists in CI that
+# cannot be run first on a laptop or in an agent sandbox. That only holds if
+# the two lists stay in step: a lane CI never runs is unverified in practice,
+# and a lane CI names that check.sh does not know fails only on a runner.
+check_sh = (root / "scripts/check.sh").read_text(encoding="utf-8")
+m = re.search(r"^ALL_LANES=\(([^)]*)\)", check_sh, re.MULTILINE)
+if not m:
+    errors.append("scripts/check.sh has no ALL_LANES")
+else:
+    lanes = set(m.group(1).split())
+    fast = re.search(r"fast\) lanes\+=\(([^)]*)\)", check_sh)
+    fast_lanes = set(fast.group(1).split()) if fast else set()
+    named: set[str] = set()
+    for rel in found_pipeline:
+        if not rel.startswith(".github/workflows/"):
+            continue
+        text = (root / rel).read_text(encoding="utf-8")
+        for call in re.finditer(r"scripts/check\.sh(?P<args>[^\n|&;]*)", text):
+            args = [a for a in call.group("args").split() if not a.startswith("-")]
+            if not args or args[0] == "all":
+                # A bare run covers every lane, but only where it runs. It is
+                # not evidence that the pull-request gate runs them.
+                continue
+            if args[0] == "pipeline":
+                continue
+            if args[0] == "fast":
+                named.update(fast_lanes)
+                continue
+            named.update(args)
+    unknown = sorted(named - lanes)
+    if unknown:
+        errors.append(
+            "workflows call scripts/check.sh with lanes it does not define: "
+            + ", ".join(unknown)
+        )
+    missing = sorted(lanes - named)
+    if missing:
+        errors.append(
+            "no workflow job names these check.sh lanes: " + ", ".join(missing)
+        )
+
+# 12. every checkout drops the token it would otherwise leave behind.
+#
+# The default leaves GITHUB_TOKEN in .git/config for every later step of the
+# job, including cargo, which executes build.rs from every dependency.
+for rel in found_pipeline:
+    if not (rel.endswith(".yml") or rel.endswith(".yaml")):
+        continue
+    if not rel.startswith(".github/"):
+        continue
+    lines = (root / rel).read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        if "uses: actions/checkout@" not in line:
+            continue
+        indent = len(line) - len(line.lstrip())
+        window = []
+        for follow in lines[i + 1:]:
+            if follow.strip() and (len(follow) - len(follow.lstrip())) <= indent:
+                break
+            window.append(follow)
+        if not any("persist-credentials: false" in w for w in window):
+            errors.append(
+                f"{rel}:{i + 1}: actions/checkout without persist-credentials: false"
+            )
+
 if errors:
     sys.stderr.write("plan-contract:\n")
     for e in errors:

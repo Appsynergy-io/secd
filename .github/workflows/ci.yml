@@ -34,7 +34,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          }
       - run: scripts/check.sh fast
 
   # crates/secd-web/build.rs refuses to build without a fresh
@@ -134,6 +139,20 @@ jobs:
       - uses: ./.github/actions/setup
       - run: scripts/check.sh compile-fail
 
+  # The release path, end to end, against a local registry and a stand-in gh.
+  # It publishes nothing and needs no secret.
+  release-dry:
+    if: github.event_name != 'push'
+    needs: [fast]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: scripts/check.sh release-dry
+
   # Flags advisories introduced by a pull request, at pull-request time. The
   # weekly audit workflow covers advisories published after a merge.
   deps:
@@ -154,7 +173,7 @@ jobs:
   # dependency reporting "failure" here.
   gate:
     if: always() && github.event_name != 'push'
-    needs: [fast, ui, clippy, test, test-release, compile-fail, deps]
+    needs: [fast, ui, clippy, test, test-release, compile-fail, release-dry, deps]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -190,7 +209,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          }
       - uses: ./.github/actions/testdeps
       - name: check
         run: |
