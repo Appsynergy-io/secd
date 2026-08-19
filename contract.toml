@@ -116,7 +116,7 @@ files = [
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
 "scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
-"scripts/repo-settings.sh" = "5fca09a74f84a164b89bdb3334f334daa3e5ab3d9f80b42ed196336b830659b0"
+"scripts/repo-settings.sh" = "98c3adc7e9c3ca8264521b8d25c0bec091f384fe3121356bf5b936e87cef4c78"
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
 [tests.T_CONTRACT_COMMANDS]

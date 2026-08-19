@@ -92,6 +92,8 @@ if [[ "$apply" -eq 0 ]]; then
   say ""
   say "  PUT  /repos/${REPO}/private-vulnerability-reporting"
   say ""
+  say "  PATCH /repos/${REPO}   {\"allow_auto_merge\": true}"
+  say ""
   say "Re-run with --apply to perform them, then --apply --enforce once a pull"
   say "request has been seen reporting the 'gate' check."
   say ""
@@ -133,6 +135,14 @@ gh api --method PUT "repos/${REPO}/private-vulnerability-reporting" --silent
 pvr="$(gh api "repos/${REPO}/private-vulnerability-reporting" --jq '.enabled' 2>/dev/null || true)"
 [[ "$pvr" == "true" ]] || secd_die "private vulnerability reporting is ${pvr:-<unknown>}"
 say "repo-settings: private vulnerability reporting enabled"
+
+# Without this the pipeline cannot merge: auto-merge is what waits for the gate
+# and merges when it goes green, instead of a human coming back to press a
+# button. It needs the ruleset above to have something to wait on.
+gh api --method PATCH "repos/${REPO}" -F allow_auto_merge=true --silent
+am="$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null || true)"
+[[ "$am" == "true" ]] || secd_die "auto-merge is ${am:-<unknown>}"
+say "repo-settings: auto-merge enabled"
 
 if [[ "$enforcement" != "active" ]]; then
   say ""
