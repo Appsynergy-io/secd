@@ -72,7 +72,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - `Secret`: no `Display`/`Serialize`/`Deref`; `Debug` redacts bytes; `mlock` + `Zeroize`.
 - Unlock: passkey PRF and/or password (argon2id). Terminal never prompts.
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.
-- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`.
+- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`, which runs the gate; GitHub performs the merge itself once the ruleset's required `gate` status is green. Nothing in this repo calls `gh pr merge`.
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
 - Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
 - No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
