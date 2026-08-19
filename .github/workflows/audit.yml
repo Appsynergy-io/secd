@@ -26,13 +26,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      # scripts/audit.sh installs a pinned, checksummed cargo-audit binary.
+      # This job holds issues: write, so it must not compile anything. It used
+      # to build cargo-audit from source here, which runs build.rs from that
+      # crate's whole dependency tree beside a token that can write to this
+      # repository -- and at whatever version crates.io served that morning.
       - name: cargo-audit
         id: audit
         run: |
           set -uo pipefail
-          command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
-          cargo audit --json > audit.json
-          echo "status=$?" >> "$GITHUB_OUTPUT"
+          scripts/audit.sh --json audit.json
+          echo "status=$?" >>"$GITHUB_OUTPUT"
       - name: open an issue for anything found
         if: steps.audit.outputs.status != '0'
         env:

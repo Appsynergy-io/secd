@@ -40,6 +40,13 @@ export COSIGN_PASSWORD="dry-run"
 export GH_TOKEN="dry-run"
 export GITHUB_TOKEN="dry-run"
 export GITHUB_ACTOR="dry-run"
+# Pin the tag rather than letting release.sh fall back to the ambient ref.
+# On a pull request GITHUB_REF_NAME is "10/merge", so this lane passed on a
+# laptop, where the variable is unset, and failed on every runner. A dry run
+# has to describe the release it is simulating, not the event that started it.
+export RELEASE_TAG="$tag"
+export GITHUB_REF_NAME="$tag"
+export GITHUB_REF="refs/tags/${tag}"
 export SECD_GH="$root/scripts/dev/fake-gh"
 export SECD_GH_DIR="$work/gh"
 export RELEASE_DIST="$dist"

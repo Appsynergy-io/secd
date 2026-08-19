@@ -284,26 +284,47 @@ else:
 # every transitive dependency executed with the signing key and a token that
 # could force-push to main. Jobs are found by their two-space indent, which is
 # reliable because [pipeline] makes every change to these files deliberate.
+# `cargo install` belongs here: .github/workflows/audit.yml used to run
+# `cargo install cargo-audit` in a job holding issues: write, which builds that
+# crate's whole dependency tree -- build.rs included -- beside a token that can
+# write to this repository. The rule existed and did not see it, because it
+# looked for three named scopes and three named cargo subcommands.
 COMPILES = re.compile(
-    r"cargo\s+(?:build|test|clippy)\b"
+    r"cargo\s+(?:build|test|clippy|install|run)\b"
     r"|check\.sh\s+(?:ui|clippy|test|test-release|compile-fail)\b"
     r"|release\.sh[^\n]*--build-only\b"
 )
-POWERFUL = re.compile(r"contents:\s*write|packages:\s*write|secrets\.COSIGN")
+# Any write scope, not an enumeration of the ones seen so far.
+POWERFUL = re.compile(
+    r"^\s*[\w-]+:\s*write\s*$|permissions:\s*write-all|secrets\.COSIGN",
+    re.MULTILINE,
+)
 
 for rel in found_pipeline:
     if not rel.startswith(".github/workflows/"):
         continue
     lines = (root / rel).read_text(encoding="utf-8").splitlines()
+    # Two-space keys appear under `on:` and `concurrency:` as well, so anchor
+    # on the `jobs:` mapping rather than on indentation alone: without this a
+    # workflow_dispatch input counts as a job and swallows every real job after
+    # it into one block.
+    try:
+        first_job = next(i for i, line in enumerate(lines) if line == "jobs:") + 1
+    except StopIteration:
+        continue
     job_starts = [
         (i, re.match(r"^  ([\w.-]+):\s*$", line).group(1))
-        for i, line in enumerate(lines)
+        for i, line in enumerate(lines[first_job:], start=first_job)
         if re.match(r"^  [\w.-]+:\s*$", line)
     ]
+    # A workflow-level permissions block applies to every job in the file, so
+    # a compiling job can hold a write scope it never names itself.
+    head = "\n".join(lines[: first_job - 1])
+    top_is_powerful = bool(POWERFUL.search(head))
     for n, (start, job) in enumerate(job_starts):
         end = job_starts[n + 1][0] if n + 1 < len(job_starts) else len(lines)
         block = "\n".join(lines[start:end])
-        if COMPILES.search(block) and POWERFUL.search(block):
+        if COMPILES.search(block) and (POWERFUL.search(block) or top_is_powerful):
             errors.append(
                 f"{rel}: job `{job}` both compiles and holds a write scope or a "
                 f"signing secret; build.rs from every dependency runs in it"
