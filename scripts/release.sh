@@ -449,13 +449,13 @@ case "$target" in
       fi
       "$root/scripts/build-ui.sh"
     fi
-    RUSTFLAGS="$musl_flags" cargo build --release --target "$target" --bin secd
+    RUSTFLAGS="$musl_flags" cargo build --locked --release --target "$target" --bin secd
     if [[ "$do_image" -eq 1 ]]; then
-      RUSTFLAGS="$musl_flags" cargo build --release --target "$target" -p secd-web
+      RUSTFLAGS="$musl_flags" cargo build --locked --release --target "$target" -p secd-web
     fi
     ;;
   aarch64-apple-darwin)
-    cargo build --release --target "$target" --bin secd
+    cargo build --locked --release --target "$target" --bin secd
     ;;
 esac
 

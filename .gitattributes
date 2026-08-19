@@ -1,0 +1,7 @@
+# Byte-identity invariants depend on stable line endings:
+#   T_CONTRACT_AGENTS_EQ_CLAUDE  AGENTS.md == CLAUDE.md
+#   T_SKILL_IDENTICAL            skills/grok == skills/claude == install.sh heredoc
+* text=auto eol=lf
+
+*.woff2 binary
+*.pem  text eol=lf

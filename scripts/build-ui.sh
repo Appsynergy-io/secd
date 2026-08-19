@@ -14,7 +14,7 @@ if ! command -v wasm-bindgen >/dev/null 2>&1; then
   cargo install wasm-bindgen-cli --version 0.2.126 --locked
 fi
 
-cargo build --release --target wasm32-unknown-unknown \
+cargo build --locked --release --target wasm32-unknown-unknown \
   --manifest-path "$root/crates/secd-ui/Cargo.toml" \
   --no-default-features --features csr --bin secd-ui
 

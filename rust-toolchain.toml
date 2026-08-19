@@ -1,0 +1,9 @@
+# Single source of truth for the toolchain: laptop, agent sandbox and CI all
+# resolve the same rustc from this file. Pinned to the rustc of the last green
+# CI run, deliberately not "stable" — a floating channel turns `clippy
+# -D warnings` into a build that breaks without a commit.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

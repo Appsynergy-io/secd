@@ -2,6 +2,12 @@ name: release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel in flight: a cancelled publish leaves a half-uploaded release.
+  cancel-in-progress: false
 
 # PR ci is the test gate. linux + darwin build in parallel; publish merges latest.json once.
 permissions:
@@ -17,10 +23,14 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          toolchain: stable
-          targets: x86_64-unknown-linux-musl,wasm32-unknown-unknown
+          persist-credentials: false
+      # rust-toolchain.toml pins the channel; only the release-only target
+      # is added here.
+      - name: toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -56,10 +66,12 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          toolchain: stable
-          targets: aarch64-apple-darwin
+          persist-credentials: false
+      - name: toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -86,6 +98,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: latest-linux
