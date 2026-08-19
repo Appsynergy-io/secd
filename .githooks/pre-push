@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Installed by scripts/install-hooks.sh (git config core.hooksPath .githooks).
+#
+# Runs the cheap lanes before anything reaches GitHub, so a formatting slip or
+# a contract violation costs a second locally instead of a CI round trip.
+#
+#   SECD_PREPUSH=fast   contract, shell, workflow, fmt   (default, ~60s)
+#   SECD_PREPUSH=full   the whole gate
+#   SECD_PREPUSH=off    skip
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+# main is protected server-side; refuse locally too so the mistake is cheap.
+while read -r local_ref _ remote_ref _; do
+  [[ -n "${remote_ref:-}" ]] || continue
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    echo "pre-push: refusing to push ${local_ref} to main — open a pull request" >&2
+    exit 1
+  fi
+done
+
+case "${SECD_PREPUSH:-fast}" in
+  off) exit 0 ;;
+  full) exec "$root/scripts/check.sh" ;;
+  *) exec "$root/scripts/check.sh" fast ;;
+esac

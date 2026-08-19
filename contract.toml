@@ -83,8 +83,31 @@ files = [
   "crates/secd-core/src/",
   "crates/secd-web/src/",
   "crates/secd-ui/src/",
+  "tools/import-legacy/src/",
 ]
 
+[pipeline]
+".claude/hooks/guard-bash.py" = "2a3a880b5103006d727d3193b32a84846cd9a05a00b336ad227d5a3bcc19ca08"
+".claude/hooks/session-start.sh" = "b9d357645701d5fe767169dd8d9447cc2cfaa0703e551bc9404cdfc14935f69f"
+".claude/settings.json" = "b18f1ae2d286ba443e52f69e59966555d656351b3e635c358ad64e7fdfb73f8d"
+".githooks/pre-push" = "a313ff2ba9c5a404868de9a47bf606fcf59b32ffb52e8091d9761fac1b5e8251"
+".github/actions/setup/action.yml" = "44713b4d5894a8be9497f16ee0774895f1545035681723920cd9b54382a72c42"
+".github/actions/testdeps/action.yml" = "32a40e40d93425e6247d70d3972c90d2b4198d3935481387f3cf0818c7ae45ef"
+".github/workflows/ci.yml" = "ea89dfef287ebab32713a2f74ef3d3b1fd7175ba79593ba6e85b17b6c00420f8"
+".github/workflows/release.yml" = "ac50ba2ac421276e227254f2dc8920a4527b07995f5e1855767ee219b8dc30af"
+"deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
+"deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
+"scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
+"scripts/check.sh" = "6ec087c23115bd7571e20614e6f1af34ff570d6780bff68866dda05f495afdb6"
+"scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
+"scripts/install-hooks.sh" = "ffeff11aeb5fe9e79938cd1c52b3765df2036ab1fe8a9526b67790c5acc02f08"
+"scripts/k3s-apply.sh" = "89c6b4acbf3689be3602350ea8b5b400b7ec0cfef3aab47d21554d01561d799e"
+"scripts/merge-latest-json.sh" = "6a56449f8494e8f4f2724e6cd93e0d5c9ee96579a698eb08856e769bac472d41"
+"scripts/merge.sh" = "2b1f1ac99933434e2e78227c7930f5857b9ea196150d05044c777e5c9faa3b4d"
+"scripts/plan-contract.sh" = "87a2e4f45bcec59949892ae7f528e77c09b19ac1ed4bd1abc478da116d09081d"
+"scripts/publish-release.sh" = "b0a37caee067aaa9582cfdb48fdca0196cff4d7fb821305a39a35ada62bf6bb7"
+"scripts/release.sh" = "0bec26ace5fcf2b1d6e7decc28db1edcd963b0b8d5ed09c6db22a397df8b8a6f"
+"scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 

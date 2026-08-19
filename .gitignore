@@ -1,3 +1,4 @@
 /target
 **/*.rs.bk
 crates/secd-ui/dist/
+__pycache__/

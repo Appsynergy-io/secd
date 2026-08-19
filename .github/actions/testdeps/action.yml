@@ -1,0 +1,26 @@
+name: testdeps
+description: System dependencies the test lanes need — kernel keyring and a browser.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        command -v keyctl >/dev/null 2>&1 || {
+          sudo apt-get update
+          sudo apt-get install -y keyutils
+        }
+    # SECD_REQUIRE_BROWSER turns a missing browser into a test failure, so
+    # resolve one here rather than discovering it in the assertion.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        for b in google-chrome-stable google-chrome chromium chromium-browser; do
+          if command -v "$b" >/dev/null 2>&1; then
+            echo "SECD_BROWSER=$(command -v "$b")" >>"$GITHUB_ENV"
+            exit 0
+          fi
+        done
+        sudo apt-get update
+        sudo apt-get install -y chromium-browser
+        echo "SECD_BROWSER=$(command -v chromium-browser)" >>"$GITHUB_ENV"

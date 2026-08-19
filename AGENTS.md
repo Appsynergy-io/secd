@@ -9,8 +9,9 @@ Origin: `https://github.com/Appsynergy-io/secd.git`. Image: `ghcr.io/appsynergy-
 ## Commands
 
 ```
-scripts/check.sh
+scripts/check.sh [LANE ...]
 scripts/plan-contract.sh
+scripts/install-hooks.sh
 scripts/merge.sh
 scripts/k3s-apply.sh
 ```
@@ -43,7 +44,11 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `crates/secd-web` | TLS 1.3 API (later) |
 | `crates/secd-ui` | web console (later) |
 | `contract.toml` | commands, routes, providers, test IDs, file allow-list |
-| `scripts/check.sh` | rustfmt, clippy `-D warnings`, test, test --release, compile-fail, plan-contract |
+| `scripts/check.sh` | the gate. Lanes: `contract shell workflow fmt ui clippy test test-release compile-fail`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
+| `scripts/tools.sh` | shared helpers: pinned tool fetch, `Cargo.lock` version lookup |
+| `scripts/build-ui.sh` | wasm + wasm-bindgen + wasm-opt into `crates/secd-ui/dist` |
+| `rust-toolchain.toml` | the toolchain, for laptop, agent sandbox and CI alike |
+| `.githooks/pre-push` | fast lanes before a push; refuses `main` |
 | `scripts/release.sh` | musl/darwin build, cosign sign-blob, GHCR push |
 | `scripts/publish-release.sh` | GitHub Release assets + `latest.json` |
 | `scripts/k3s-apply.sh` | digest-pin GHCR image and apply `deploy/k3s` |
@@ -65,3 +70,6 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - DEK: kernel keyring, else `$XDG_RUNTIME_DIR/secd/` (tmpfs). `store` keeps a kernel write only if `load` reads it back.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
+- Toolchain, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.
+- `crates/secd-ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes cargo itself; run `scripts/check.sh ui` first.
+- A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck and actionlint. CI sets both.

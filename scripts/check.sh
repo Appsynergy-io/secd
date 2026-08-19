@@ -1,29 +1,120 @@
 #!/usr/bin/env bash
+# The gate. CI runs one lane per job; humans and agents run it with no
+# argument, which runs every lane cheapest-first. Whatever CI checks is
+# reachable from here, so nothing needs a push to GitHub to be verified.
+#
+#   scripts/check.sh                 every lane
+#   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
+#   scripts/check.sh ui              build crates/secd-ui/dist
+#   scripts/check.sh clippy test     one or more named lanes
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+PATH="$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
+export PATH
 
-"$root/scripts/build-ui.sh"
+SECD_ROOT="$root"
+SECD_TOOL_TAG="check"
+export SECD_ROOT SECD_TOOL_TAG
+# shellcheck source=scripts/tools.sh
+. "$root/scripts/tools.sh"
 
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
-cargo test --locked --workspace
-cargo test --locked --workspace --release
+ACTIONLINT_PINNED="1.7.7"
 
-# The probe crate lives outside the workspace, so it has no Cargo.lock and
-# cannot take --locked. Pin serde to whatever the workspace resolved instead of
-# restating a version that can silently drift from Cargo.lock.
-serde_ver="$(awk '/^name = "serde"$/ {found = 1; next} found && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' "$root/Cargo.lock")"
-if [[ -z "$serde_ver" ]]; then
-  echo "check: could not read serde version from Cargo.lock" >&2
-  exit 1
-fi
+# Cheapest first: a formatting slip should not cost a full test run. `ui` is a
+# prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
+# refuses to build without a fresh crates/secd-ui/dist.
+ALL_LANES=(contract shell workflow fmt ui clippy test test-release compile-fail)
 
-probe="$(mktemp -d)"
-trap 'rm -rf "$probe"' EXIT
-mkdir -p "$probe/src"
-cat >"$probe/Cargo.toml" <<EOF
+usage() {
+  echo "usage: check.sh [lane ...]" >&2
+  echo "lanes: ${ALL_LANES[*]} fast all" >&2
+  exit 2
+}
+
+# ---------------------------------------------------------------- lanes
+
+lane_contract() {
+  "$root/scripts/plan-contract.sh"
+}
+
+lane_shell() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    secd_missing_linter shellcheck
+    return 0
+  fi
+  local files=()
+  while IFS= read -r f; do files+=("$f"); done < <(
+    git -C "$root" ls-files -- 'scripts/*.sh' 'packaging/*.sh' '.githooks/*'
+  )
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  shellcheck -x "${files[@]}"
+}
+
+ensure_actionlint() {
+  if command -v actionlint >/dev/null 2>&1; then
+    return 0
+  fi
+  local asset sha
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+      asset="actionlint_${ACTIONLINT_PINNED}_linux_amd64"
+      sha="023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+      ;;
+    Darwin:arm64 | Darwin:aarch64)
+      asset="actionlint_${ACTIONLINT_PINNED}_darwin_arm64"
+      sha="2693315b9093aeacb4ebd91a993fea54fc215057bf0da2659056b4bc033873db"
+      ;;
+    *) return 1 ;;
+  esac
+  secd_fetch_tool \
+    "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_PINNED}/${asset}.tar.gz" \
+    "$sha" actionlint actionlint
+}
+
+lane_workflow() {
+  if ! ensure_actionlint; then
+    secd_missing_linter actionlint
+    return 0
+  fi
+  actionlint -color
+}
+
+lane_fmt() {
+  cargo fmt --all -- --check
+}
+
+lane_ui() {
+  "$root/scripts/build-ui.sh"
+}
+
+lane_clippy() {
+  cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+}
+
+lane_test() {
+  cargo test --locked --workspace
+}
+
+lane_test_release() {
+  cargo test --locked --workspace --release
+}
+
+# Secret must not implement Display/Serialize/Deref. The probe lives outside
+# the workspace so it cannot take --locked; its serde pin is read from
+# Cargo.lock rather than restated, which would drift silently.
+lane_compile_fail() {
+  local serde_ver probe status
+  serde_ver="$(secd_lock_version serde)"
+  [[ -n "$serde_ver" ]] || secd_die "could not read the serde version from Cargo.lock"
+
+  probe="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$probe'" RETURN
+  mkdir -p "$probe/src"
+  cat >"$probe/Cargo.toml" <<EOF
 [package]
 name = "secd-compile-fail"
 version = "0.0.0"
@@ -34,21 +125,61 @@ publish = false
 secd-core = { path = "$root/crates/secd-core" }
 serde = "=${serde_ver}"
 EOF
-cp "$root/tests/compile-fail/secret_is_not_printable.rs" "$probe/src/main.rs"
-set +e
-cargo build --manifest-path "$probe/Cargo.toml" --quiet >"$probe/out" 2>&1
-status=$?
-set -e
-if [[ "$status" -eq 0 ]]; then
-  echo "compile-fail: secret_is_not_printable.rs compiled; Secret must not implement Display/Serialize/Deref" >&2
-  exit 1
-fi
-for trait in Display Serialize Deref; do
-  if ! grep -q "$trait" "$probe/out"; then
-    echo "compile-fail: expected $trait error" >&2
-    cat "$probe/out" >&2
-    exit 1
+  cp "$root/tests/compile-fail/secret_is_not_printable.rs" "$probe/src/main.rs"
+  set +e
+  cargo build --manifest-path "$probe/Cargo.toml" --quiet >"$probe/out" 2>&1
+  status=$?
+  set -e
+  if [[ "$status" -eq 0 ]]; then
+    echo "compile-fail: secret_is_not_printable.rs compiled; Secret must not implement Display/Serialize/Deref" >&2
+    return 1
   fi
-done
+  local trait
+  for trait in Display Serialize Deref; do
+    if ! grep -q "$trait" "$probe/out"; then
+      echo "compile-fail: expected $trait error" >&2
+      cat "$probe/out" >&2
+      return 1
+    fi
+  done
+}
 
-"$root/scripts/plan-contract.sh"
+# ---------------------------------------------------------------- dispatch
+
+run_lane() {
+  local lane="$1"
+  echo "check: ${lane}" >&2
+  case "$lane" in
+    contract) lane_contract ;;
+    shell) lane_shell ;;
+    workflow) lane_workflow ;;
+    fmt) lane_fmt ;;
+    ui) lane_ui ;;
+    clippy) lane_clippy ;;
+    test) lane_test ;;
+    test-release) lane_test_release ;;
+    compile-fail) lane_compile_fail ;;
+    *)
+      echo "check: unknown lane ${lane}" >&2
+      usage
+      ;;
+  esac
+}
+
+lanes=()
+if [[ $# -eq 0 ]]; then
+  lanes=("${ALL_LANES[@]}")
+else
+  for arg in "$@"; do
+    case "$arg" in
+      all) lanes+=("${ALL_LANES[@]}") ;;
+      fast) lanes+=(contract shell workflow fmt) ;;
+      -h | --help) usage ;;
+      *) lanes+=("$arg") ;;
+    esac
+  done
+fi
+
+for lane in "${lanes[@]}"; do
+  run_lane "$lane"
+done
