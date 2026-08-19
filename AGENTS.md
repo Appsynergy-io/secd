@@ -10,6 +10,7 @@ Origin: `https://github.com/Appsynergy-io/secd.git`. Image: `ghcr.io/appsynergy-
 
 ```
 scripts/check.sh [LANE ...]
+scripts/check.sh pipeline --update
 scripts/plan-contract.sh
 scripts/install-hooks.sh
 scripts/merge.sh
@@ -49,12 +50,15 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `scripts/build-ui.sh` | wasm + wasm-bindgen + wasm-opt into `crates/secd-ui/dist` |
 | `rust-toolchain.toml` | the toolchain, for laptop, agent sandbox and CI alike |
 | `.githooks/pre-push` | fast lanes before a push; refuses `main` |
-| `scripts/release.sh` | musl/darwin build, cosign sign-blob, GHCR push |
-| `scripts/publish-release.sh` | GitHub Release assets + `latest.json` |
+| `scripts/release.sh` | phases: `--build-only` compiles, `--sign-only` signs, `--push-image` pushes. `--dry-run` swaps destinations, never steps |
+| `scripts/push-image.sh` | deterministic scratch-image push; prints the manifest digest |
+| `scripts/ensure-cosign.sh` | pinned, checksummed cosign on PATH |
+| `scripts/publish-release.sh` | draft → upload → verify → publish, once |
+| `scripts/dev/` | local stand-ins: strict OCI registry, `gh`, and the release dry run |
 | `scripts/k3s-apply.sh` | digest-pin GHCR image and apply `deploy/k3s` |
 | `deploy/k3s` | digest-pinned Deployment |
-| `.github/workflows/ci.yml` | PR: `ubuntu-24.04` + session keyring + `scripts/check.sh` |
-| `.github/workflows/release.yml` | `main`: linux musl + macos-14; GHCR + Releases. No second check. |
+| `.github/workflows/ci.yml` | PR, merge queue and `main`: one lane per job behind the `gate` status; `warm` on `main` writes the shared cache |
+| `.github/workflows/release.yml` | tag `v*`: preflight → build → sign → image → publish |
 | `keys/cosign.pub` | verify key for `secd update` |
 | `skills/` | grok ≡ claude (later) |
 
@@ -66,7 +70,10 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.
 - Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`.
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
-- Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`. Cosign is `sign-blob` on the two CLI binaries; the GHCR image is not signed.
+- Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
+- No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
+- A version is a promise about bytes. Releases are tag-triggered, built once, and published only after the draft's assets verify. Nothing uses `--clobber`.
+- Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
 - DEK: kernel keyring, else `$XDG_RUNTIME_DIR/secd/` (tmpfs). `store` keeps a kernel write only if `load` reads it back.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.

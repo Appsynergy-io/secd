@@ -94,20 +94,23 @@ files = [
 ".github/actions/setup/action.yml" = "44713b4d5894a8be9497f16ee0774895f1545035681723920cd9b54382a72c42"
 ".github/actions/testdeps/action.yml" = "32a40e40d93425e6247d70d3972c90d2b4198d3935481387f3cf0818c7ae45ef"
 ".github/workflows/ci.yml" = "ea89dfef287ebab32713a2f74ef3d3b1fd7175ba79593ba6e85b17b6c00420f8"
-".github/workflows/release.yml" = "ac50ba2ac421276e227254f2dc8920a4527b07995f5e1855767ee219b8dc30af"
+".github/workflows/release.yml" = "e00217e956687e5198939cb0664aaa38effd1ae850bc0daaf571313139847916"
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "d2bca788561ff2d86ec3d1ba0e606bbd8afa73fe14a1efd8683fea25babcd017"
+"scripts/check.sh" = "d9107a505cb4fd5b0be7cd3a53e92cef236a338f1101e2c436f1d71683a2b626"
+"scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
+"scripts/dev/release-dry.sh" = "4056ac4120d4128d8505b6eba828e1134555f242b84e0ba37dc451d14720bc56"
+"scripts/ensure-cosign.sh" = "b353aa76e75f98f793c58e55bc1a9c34ad3c54d4689135ecb5442d78db828a1f"
 "scripts/install-hooks.sh" = "ffeff11aeb5fe9e79938cd1c52b3765df2036ab1fe8a9526b67790c5acc02f08"
 "scripts/k3s-apply.sh" = "89c6b4acbf3689be3602350ea8b5b400b7ec0cfef3aab47d21554d01561d799e"
 "scripts/merge-latest-json.sh" = "6a56449f8494e8f4f2724e6cd93e0d5c9ee96579a698eb08856e769bac472d41"
 "scripts/merge.sh" = "2b1f1ac99933434e2e78227c7930f5857b9ea196150d05044c777e5c9faa3b4d"
-"scripts/plan-contract.sh" = "87a2e4f45bcec59949892ae7f528e77c09b19ac1ed4bd1abc478da116d09081d"
-"scripts/publish-release.sh" = "b0a37caee067aaa9582cfdb48fdca0196cff4d7fb821305a39a35ada62bf6bb7"
+"scripts/plan-contract.sh" = "87435277ba4194b04fca2239c9b03667fee6904ed37c30431b0fc9ed6798c399"
+"scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
-"scripts/release.sh" = "3ee0bfe10fcb53232b06542cf4e4d4b313a33529ae593290f47cfb52b2bbc28d"
+"scripts/release.sh" = "aeab1b6e763ff5c5cefc6e7613c36596f5b770df1e14b16926950e3195e85a43"
 "scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
@@ -623,6 +626,9 @@ pending = false
 pending = false
 
 [tests.T_UPD_PACMAN]
+pending = false
+
+[tests.T_INSTALL_PUBKEY]
 pending = false
 
 [tests.T_MERGE_LATEST_UNION]

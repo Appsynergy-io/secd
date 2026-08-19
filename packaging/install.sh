@@ -1,5 +1,13 @@
 #!/bin/sh
-# Install secd to ~/.local/bin. Manifest sha256, then write. Fail closed.
+# Install secd to ~/.local/bin. Signature, then sha256, then write.
+# Fail closed.
+#
+# The sha256 in the manifest is served by the same host, over the same
+# connection, from the same release as the binary, so on its own it only
+# catches a truncated download. The signature is checked against a key
+# embedded in this script -- fetching cosign.pub from the release you are
+# verifying would be circular. tests/skill_contract.rs keeps the embedded copy
+# equal to keys/cosign.pub.
 set -eu
 
 HOST="github.com"
@@ -11,6 +19,7 @@ err() { printf 'secd-install: %s\n' "$*" >&2; exit 1; }
 [ -n "${HOME:-}" ] || err "HOME unset"
 command -v curl >/dev/null 2>&1 || err "curl is required"
 command -v python3 >/dev/null 2>&1 || err "python3 is required"
+command -v openssl >/dev/null 2>&1 || err "openssl is required to verify the signature"
 
 sha256of() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -55,14 +64,35 @@ if p.scheme != "https" or p.hostname != host:
 if not sha or len(sha) != 64:
     sys.stderr.write("secd-install: bad sha256\n")
     sys.exit(1)
+sig = t.get("sig") or ""
+ps = urllib.parse.urlparse(sig)
+if ps.scheme != "https" or ps.hostname != host:
+    sys.stderr.write("secd-install: refusing signature host\n")
+    sys.exit(1)
 print("URL=%s" % json.dumps(url))
 print("WANT=%s" % json.dumps(sha))
+print("SIG=%s" % json.dumps(sig))
 PY
 )"
 
 curl -fsSL --proto '=https' -o "$TMP/secd" "$URL" || err "download failed"
 GOT="$(sha256of "$TMP/secd")"
 [ "$GOT" = "$WANT" ] || err "sha256 mismatch"
+
+curl -fsSL --proto '=https' -o "$TMP/secd.sig" "$SIG" || err "signature fetch failed"
+cat >"$TMP/cosign.pub" <<'SECDpub_EOF'
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0SgUjsPF3TfzrnI9t2BSglRumLuF
+Zv/S3SpsawazRZ9787ZmGJC898Rnlxodw0o6M8lh0BqFPeb2kLgO7KgJyg==
+-----END PUBLIC KEY-----
+SECDpub_EOF
+# cosign sign-blob --output-signature writes base64; accept raw DER too.
+if ! base64 -d <"$TMP/secd.sig" >"$TMP/secd.sig.bin" 2>/dev/null; then
+  cp "$TMP/secd.sig" "$TMP/secd.sig.bin"
+fi
+openssl dgst -sha256 -verify "$TMP/cosign.pub" \
+  -signature "$TMP/secd.sig.bin" "$TMP/secd" >/dev/null 2>&1 \
+  || err "signature verification failed"
 
 mkdir -p "${HOME}/.local/bin"
 chmod 0755 "$TMP/secd"

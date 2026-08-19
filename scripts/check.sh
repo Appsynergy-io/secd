@@ -31,7 +31,7 @@ ACTIONLINT_PINNED="1.7.7"
 # Cheapest first: a formatting slip should not cost a full test run. `ui` is a
 # prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
 # refuses to build without a fresh crates/secd-ui/dist.
-ALL_LANES=(contract shell workflow fmt ui clippy test test-release compile-fail)
+ALL_LANES=(contract shell workflow fmt ui clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -90,6 +90,13 @@ lane_workflow() {
 
 lane_fmt() {
   cargo fmt --all -- --check
+}
+
+# The release path used to be first executed on main, where a failure is
+# already a published failure. This runs all of it against a local registry and
+# a stand-in gh, for nothing.
+lane_release_dry() {
+  "$root/scripts/dev/release-dry.sh"
 }
 
 lane_ui() {
@@ -165,6 +172,7 @@ run_lane() {
     test) lane_test ;;
     test-release) lane_test_release ;;
     compile-fail) lane_compile_fail ;;
+    release-dry) lane_release_dry ;;
     *)
       echo "check: unknown lane ${lane}" >&2
       usage

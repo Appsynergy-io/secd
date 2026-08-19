@@ -134,3 +134,26 @@ fn T_MERGE_LATEST_MISSING_KEY() {
     );
     fs::remove_dir_all(&dir).ok();
 }
+
+/// install.sh verifies against a key embedded in itself, because fetching
+/// cosign.pub from the release you are verifying is circular. That embedded
+/// copy has to stay equal to the one the release publishes.
+#[test]
+fn T_INSTALL_PUBKEY() {
+    let script = fs::read_to_string(root().join("packaging/install.sh")).expect("install.sh");
+    let embedded = script
+        .split_once("<<'SECDpub_EOF'\n")
+        .and_then(|(_, rest)| rest.split_once("\nSECDpub_EOF"))
+        .map(|(body, _)| format!("{body}\n"))
+        .expect("install.sh has no embedded cosign.pub heredoc");
+    let on_disk = fs::read_to_string(root().join("keys/cosign.pub")).expect("keys/cosign.pub");
+    assert_eq!(
+        embedded, on_disk,
+        "the pubkey embedded in packaging/install.sh differs from keys/cosign.pub"
+    );
+
+    assert!(
+        script.contains("openssl dgst -sha256 -verify"),
+        "install.sh no longer verifies the signature"
+    );
+}

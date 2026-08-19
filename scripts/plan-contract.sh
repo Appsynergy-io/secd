@@ -277,6 +277,38 @@ else:
             f"deploy/k3s/kustomization.yaml pins neither newTag {version} nor a sha256 digest"
         )
 
+# 10. no job that compiles third-party code holds a secret or a write scope.
+#
+# release.yml used to set contents: write and packages: write at workflow level
+# and pass COSIGN_KEY into the job that runs `cargo build` -- so build.rs from
+# every transitive dependency executed with the signing key and a token that
+# could force-push to main. Jobs are found by their two-space indent, which is
+# reliable because [pipeline] makes every change to these files deliberate.
+COMPILES = re.compile(
+    r"cargo\s+(?:build|test|clippy)\b"
+    r"|check\.sh\s+(?:ui|clippy|test|test-release|compile-fail)\b"
+    r"|release\.sh[^\n]*--build-only\b"
+)
+POWERFUL = re.compile(r"contents:\s*write|packages:\s*write|secrets\.COSIGN")
+
+for rel in found_pipeline:
+    if not rel.startswith(".github/workflows/"):
+        continue
+    lines = (root / rel).read_text(encoding="utf-8").splitlines()
+    job_starts = [
+        (i, re.match(r"^  ([\w.-]+):\s*$", line).group(1))
+        for i, line in enumerate(lines)
+        if re.match(r"^  [\w.-]+:\s*$", line)
+    ]
+    for n, (start, job) in enumerate(job_starts):
+        end = job_starts[n + 1][0] if n + 1 < len(job_starts) else len(lines)
+        block = "\n".join(lines[start:end])
+        if COMPILES.search(block) and POWERFUL.search(block):
+            errors.append(
+                f"{rel}: job `{job}` both compiles and holds a write scope or a "
+                f"signing secret; build.rs from every dependency runs in it"
+            )
+
 if errors:
     sys.stderr.write("plan-contract:\n")
     for e in errors:
