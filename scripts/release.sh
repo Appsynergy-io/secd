@@ -243,6 +243,11 @@ push_image() {
 dist="${RELEASE_DIST:-target/release-dist}"
 mkdir -p "$dist"
 
+# Absolute registry and workspace paths end up in panic messages and debug
+# info, so the same commit built on two machines produced different binaries.
+repro_flags="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry=/cargo/registry"
+repro_flags="${repro_flags} --remap-path-prefix=${root}=/src"
+
 # A dry run swaps destinations, never steps: a throwaway key still exercises
 # cosign sign-blob and the base64 signature shape src/update.rs depends on.
 dry_dir=""
@@ -269,7 +274,7 @@ case "$target" in
     fi
     # scratch has no musl loader; default musl target is dynamically linked.
     # Do not export RUSTFLAGS: crt-static breaks host proc-macros (wasm-bindgen-cli).
-    musl_flags="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+    musl_flags="${RUSTFLAGS:+$RUSTFLAGS }${repro_flags} -C target-feature=+crt-static"
     if [[ "$do_image" -eq 1 ]]; then
       if [[ ! -d crates/secd-web ]]; then
         echo "release: crates/secd-web missing" >&2
@@ -283,7 +288,8 @@ case "$target" in
     fi
     ;;
   aarch64-apple-darwin)
-    cargo build --locked --release --target "$target" --bin secd
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${repro_flags}" \
+      cargo build --locked --release --target "$target" --bin secd
     ;;
 esac
 fi

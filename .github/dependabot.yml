@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Only github-actions. Full commit-sha pins are where drift is invisible and
+  # hand-tracking genuinely fails, and dependabot rewrites the pin and its
+  # version comment together.
+  #
+  # Deliberately not cargo: with every dependency pinned to an exact version
+  # and a hand-curated Cargo.lock, it would open a pull request per crate per
+  # week until nobody reads them, which is worse than not having it. Advisories
+  # are covered by the weekly audit workflow instead.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

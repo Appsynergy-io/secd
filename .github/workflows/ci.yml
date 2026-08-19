@@ -134,13 +134,27 @@ jobs:
       - uses: ./.github/actions/setup
       - run: scripts/check.sh compile-fail
 
+  # Flags advisories introduced by a pull request, at pull-request time. The
+  # weekly audit workflow covers advisories published after a merge.
+  deps:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+
   # The only job named in branch protection. Every other job is a `needs` of
   # this one, which is what makes treating "skipped" as acceptable safe: a job
   # skipped because its dependency failed is always accompanied by that
   # dependency reporting "failure" here.
   gate:
     if: always() && github.event_name != 'push'
-    needs: [fast, ui, clippy, test, test-release, compile-fail]
+    needs: [fast, ui, clippy, test, test-release, compile-fail, deps]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
