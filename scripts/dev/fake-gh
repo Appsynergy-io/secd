@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""A stand-in for `gh release` that enforces the semantics we now depend on.
+
+Point SECD_GH at this and set SECD_GH_DIR to a scratch directory. It is
+deliberately strict, because a permissive stub would let a broken publish
+flow pass:
+
+  * `create` without --verify-tag on a tag that does not exist is an error,
+    which is what stops a release tag being invented at whatever the default
+    branch happened to be;
+  * `upload` of an asset that already exists without --clobber is an error,
+    the real 422, so a re-run cannot silently replace a published artifact;
+  * `download` refuses a draft's assets to an unauthenticated caller;
+  * the draft/latest transitions are recorded, so a test can assert the
+    release stayed a draft through every upload and flipped exactly once.
+
+What it cannot tell you is how GitHub's own `releases/latest` pointer behaves.
+Confirm that once, for real, with a prerelease tag.
+
+Tags that "exist" are listed one per line in $SECD_GH_DIR/tags.
+"""
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+
+def store() -> Path:
+    root = os.environ.get("SECD_GH_DIR")
+    if not root:
+        sys.exit("fake-gh: SECD_GH_DIR is required")
+    path = Path(root)
+    (path / "assets").mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def state_path(root: Path, tag: str) -> Path:
+    return root / f"release-{tag}.json"
+
+
+def load(root: Path, tag: str) -> dict | None:
+    path = state_path(root, tag)
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def save(root: Path, tag: str, state: dict) -> None:
+    state_path(root, tag).write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def log(root: Path, entry: str) -> None:
+    with (root / "transitions.log").open("a") as f:
+        f.write(entry + "\n")
+
+
+def tag_exists(root: Path, tag: str) -> bool:
+    tags = root / "tags"
+    return tags.is_file() and tag in tags.read_text().split()
+
+
+def main(argv: list[str]) -> int:
+    root = store()
+    args = [a for a in argv if a not in ("-R",)]
+    # Drop the repo slug that follows -R.
+    if "-R" in argv:
+        slug = argv[argv.index("-R") + 1]
+        args = [a for a in args if a != slug]
+
+    if not args or args[0] != "release":
+        return 0
+    action = args[1] if len(args) > 1 else ""
+    rest = args[2:]
+
+    if action == "create":
+        tag = rest[0]
+        if "--verify-tag" in rest and not tag_exists(root, tag):
+            print(f"fake-gh: tag {tag} does not exist in the remote", file=sys.stderr)
+            return 1
+        if load(root, tag) is not None:
+            print(f"fake-gh: release {tag} already exists", file=sys.stderr)
+            return 1
+        target = rest[rest.index("--target") + 1] if "--target" in rest else ""
+        save(root, tag, {"draft": "--draft" in rest, "latest": False,
+                         "target": target, "assets": []})
+        log(root, f"create {tag} draft={'--draft' in rest} target={target}")
+        return 0
+
+    if action == "upload":
+        tag = rest[0]
+        state = load(root, tag)
+        if state is None:
+            print(f"fake-gh: no release {tag}", file=sys.stderr)
+            return 1
+        clobber = "--clobber" in rest
+        for path in (p for p in rest[1:] if not p.startswith("--")):
+            name = Path(path).name
+            if name in state["assets"] and not clobber:
+                print(
+                    f"fake-gh: asset {name} already exists (HTTP 422); "
+                    "pass --clobber to replace it",
+                    file=sys.stderr,
+                )
+                return 1
+            shutil.copyfile(path, root / "assets" / name)
+            if name not in state["assets"]:
+                state["assets"].append(name)
+        save(root, tag, state)
+        log(root, f"upload {tag} draft={state['draft']} n={len(state['assets'])}")
+        return 0
+
+    if action == "download":
+        tag = rest[0]
+        state = load(root, tag)
+        if state is None:
+            print(f"fake-gh: no release {tag}", file=sys.stderr)
+            return 1
+        if state["draft"] and not os.environ.get("GH_TOKEN"):
+            print("fake-gh: draft assets need a token", file=sys.stderr)
+            return 1
+        dest = Path(rest[rest.index("-D") + 1]) if "-D" in rest else Path.cwd()
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in state["assets"]:
+            shutil.copyfile(root / "assets" / name, dest / name)
+        return 0
+
+    if action == "edit":
+        tag = rest[0]
+        state = load(root, tag)
+        if state is None:
+            print(f"fake-gh: no release {tag}", file=sys.stderr)
+            return 1
+        if "--draft=false" in rest:
+            state["draft"] = False
+        if "--latest" in rest:
+            state["latest"] = True
+        save(root, tag, state)
+        log(root, f"edit {tag} draft={state['draft']} latest={state['latest']}")
+        return 0
+
+    if action == "view":
+        tag = rest[0]
+        state = load(root, tag)
+        if state is None:
+            return 1
+        print(json.dumps({"isDraft": state["draft"], "isLatest": state["latest"]}))
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

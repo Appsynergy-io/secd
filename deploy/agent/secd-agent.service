@@ -1,0 +1,22 @@
+[Unit]
+Description=Converge secd-web to the digest of the latest release
+Documentation=https://github.com/Appsynergy-io/secd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust to wherever the checkout lives on the cluster host.
+WorkingDirectory=/opt/secd
+ExecStart=/opt/secd/deploy/agent/secd-agent.sh --once
+# The agent needs kubectl and the cluster's kubeconfig, nothing else. It holds
+# no GitHub credential: the digest it reads is a public release asset.
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+TimeoutStartSec=600
+Nice=10
+
+# It only ever reads the repo and talks to the cluster.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

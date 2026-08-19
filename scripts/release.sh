@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Build signed secd for one Rust triple. Linux also builds secd-web and pushes
-# ghcr.io/appsynergy-io/secd-web:${ver} (and :sha-${GITHUB_SHA} when set).
-# Tag must equal v + Cargo.toml version.
+# Build, sign and push one Rust triple. Split into phases so the job that
+# compiles third-party code never holds a secret or a write permission:
+#
+#   --build-only   compile + smoke test. No cosign key, no registry, no gh.
+#   --sign-only    sign an existing target/release-dist. Compiles nothing.
+#   --push-image   push the built secd-web. Compiles nothing.
+#   (no phase)     all three, which is what a local dry run wants.
+#
+# --dry-run swaps destinations only -- an ephemeral cosign key, a local
+# registry -- and never skips a step, or it would validate a program we do not
+# ship. Tag must equal v + Cargo.toml version.
 set -euo pipefail
 set +o xtrace
 
@@ -10,6 +18,10 @@ cd "$root"
 
 target="x86_64-unknown-linux-musl"
 do_image=1
+do_build=0
+do_sign=0
+do_push=0
+dry_run=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
@@ -20,12 +32,34 @@ while [[ $# -gt 0 ]]; do
       do_image=0
       shift
       ;;
+    --build-only)
+      do_build=1
+      shift
+      ;;
+    --sign-only)
+      do_sign=1
+      shift
+      ;;
+    --push-image)
+      do_push=1
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
     *)
       echo "release: usage: release.sh [--target TRIPLE] [--no-image]" >&2
+      echo "                          [--build-only|--sign-only|--push-image] [--dry-run]" >&2
       exit 2
       ;;
   esac
 done
+if [[ $((do_build + do_sign + do_push)) -eq 0 ]]; then
+  do_build=1
+  do_sign=1
+  do_push=1
+fi
 
 case "$target" in
   x86_64-unknown-linux-musl) ;;
@@ -67,8 +101,10 @@ if [[ "$tag" != "v${ver}" ]]; then
   exit 1
 fi
 
-: "${COSIGN_KEY:?release: COSIGN_KEY is required}"
-: "${COSIGN_PASSWORD:?release: COSIGN_PASSWORD is required}"
+if [[ "$do_sign" -eq 1 && "$dry_run" -eq 0 ]]; then
+  : "${COSIGN_KEY:?release: COSIGN_KEY is required}"
+  : "${COSIGN_PASSWORD:?release: COSIGN_PASSWORD is required}"
+fi
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -82,31 +118,8 @@ sha256() {
 }
 
 ensure_cosign() {
-  if command -v cosign >/dev/null 2>&1; then
-    return 0
-  fi
-  local url sha tmp asset
-  case "$(uname -s):$(uname -m)" in
-    Linux:x86_64)
-      asset="cosign-linux-amd64"
-      sha="1f6c194dd0891eb345b436bb71ff9f996768355f5e0ce02dde88567029ac2188"
-      ;;
-    Darwin:arm64)
-      asset="cosign-darwin-arm64"
-      sha="780da3654d9601367b0d54686ac65cb9716578610cabe292d725c7008de4db85"
-      ;;
-    *)
-      echo "release: no pinned cosign binary for $(uname -s) $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-  url="https://github.com/sigstore/cosign/releases/download/v2.5.0/${asset}"
-  tmp="$(mktemp)"
-  curl -fsSL -o "$tmp" "$url"
-  printf '%s  %s\n' "$sha" "$tmp" | sha256 -c -
-  chmod 0755 "$tmp"
-  mv "$tmp" "${TMPDIR:-/tmp}/cosign"
-  PATH="${TMPDIR:-/tmp}:${PATH}"
+  "$root/scripts/ensure-cosign.sh"
+  PATH="${CARGO_HOME:-$HOME/.cargo}/bin:${TMPDIR:-/tmp}:${PATH}"
   export PATH
   command -v cosign >/dev/null 2>&1
 }
@@ -204,9 +217,31 @@ smoke_linux() {
   esac
 }
 
+# Panic locations and debug info embed the paths of the machine that built the
+# binary, so the same commit built in two places produced different bytes. The
+# --remap-path-prefix flags below are supposed to prevent that; this is what
+# proves they did. Measured baseline: a binary built without them carries 112
+# absolute registry paths, and 0 with them.
+no_build_paths() {
+  local bin="$1" registry hits
+  registry="${CARGO_HOME:-$HOME/.cargo}/registry"
+  if ! command -v strings >/dev/null 2>&1; then
+    echo "release: strings is required" >&2
+    exit 1
+  fi
+  for needle in "$registry" "$root"; do
+    hits="$(strings "$bin" | grep -c -F "$needle" || true)"
+    if [[ "$hits" -ne 0 ]]; then
+      echo "release: ${bin} embeds ${hits} build-machine paths under ${needle};" >&2
+      echo "release: --remap-path-prefix is not taking effect" >&2
+      exit 1
+    fi
+  done
+}
+
 push_image() {
   local bin="$1"
-  local img_repo img sha_img="" last
+  local img_repo img last
   if [[ -n "${SECD_IMAGE:-}" ]]; then
     last="${SECD_IMAGE##*/}"
     if [[ "$last" == *:* ]]; then
@@ -220,218 +255,38 @@ push_image() {
     img_repo="ghcr.io/appsynergy-io/secd-web"
     img="${img_repo}:${ver}"
   fi
+  local args=(--binary "$bin" --image "$img")
   if [[ -n "${GITHUB_SHA:-}" ]]; then
-    sha_img="${img_repo}:sha-${GITHUB_SHA}"
+    args+=(--extra-tag "sha-${GITHUB_SHA}")
   fi
-  local ctx
-  ctx="$(mktemp -d)"
-  cp "$bin" "$ctx/secd-web"
-  chmod 0755 "$ctx/secd-web"
-  # Image expose stays off (no EXPOSE).
-  cat >"$ctx/Dockerfile" <<'EOF'
-FROM scratch
-COPY secd-web /secd-web
-USER 1000
-ENTRYPOINT ["/secd-web"]
-EOF
-
-  local pushed=0
-  if command -v docker >/dev/null 2>&1; then
-    docker build -t "$img" "$ctx"
-    if [[ -n "$sha_img" ]]; then
-      docker tag "$img" "$sha_img"
-    fi
-    if docker push "$img"; then
-      if [[ -z "$sha_img" ]] || docker push "$sha_img"; then
-        pushed=1
-      fi
-    fi
-  fi
-  if [[ "$pushed" -eq 0 ]] && command -v podman >/dev/null 2>&1; then
-    podman build -t "$img" "$ctx"
-    if [[ -n "$sha_img" ]]; then
-      podman tag "$img" "$sha_img"
-    fi
-    if podman push "$img"; then
-      if [[ -z "$sha_img" ]] || podman push "$sha_img"; then
-        pushed=1
-      fi
-    fi
-  fi
-  if [[ "$pushed" -eq 0 ]]; then
-    if [[ -z "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]]; then
-      echo "release: GITHUB_TOKEN or GH_TOKEN is required to push the image" >&2
-      exit 1
-    fi
-    local extra_tags=()
-    if [[ -n "$sha_img" ]]; then
-      extra_tags+=("${sha_img##*:}")
-    fi
-    python3 - "$bin" "$img" "${extra_tags[@]}" <<'PY'
-import base64
-import gzip
-import hashlib
-import io
-import json
-import os
-import re
-import sys
-import tarfile
-import urllib.error
-import urllib.parse
-import urllib.request
-
-bin_path, image = sys.argv[1], sys.argv[2]
-extra_tags = sys.argv[3:]
-token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-if not token:
-    raise SystemExit("release: GITHUB_TOKEN or GH_TOKEN is required to push the image")
-user = os.environ.get("GITHUB_ACTOR") or os.environ.get("GITHUB_USER") or "git"
-
-host, rest = image.split("/", 1)
-name, tag = rest.rsplit(":", 1)
-registry = "https://" + host
-
-data = open(bin_path, "rb").read()
-tar_buf = io.BytesIO()
-with tarfile.open(fileobj=tar_buf, mode="w") as tf:
-    info = tarfile.TarInfo(name="secd-web")
-    info.size = len(data)
-    info.mode = 0o755
-    info.uid = 0
-    info.gid = 0
-    info.mtime = 0
-    tf.addfile(info, io.BytesIO(data))
-tar_bytes = tar_buf.getvalue()
-diff_id = "sha256:" + hashlib.sha256(tar_bytes).hexdigest()
-gz_bytes = gzip.compress(tar_bytes, mtime=0)
-layer_digest = "sha256:" + hashlib.sha256(gz_bytes).hexdigest()
-
-config = {
-    "architecture": "amd64",
-    "os": "linux",
-    "config": {"Entrypoint": ["/secd-web"], "User": "1000"},
-    "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+  "$root/scripts/push-image.sh" "${args[@]}"
 }
-config_bytes = (json.dumps(config, separators=(",", ":"), sort_keys=True) + "\n").encode()
-config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
-
-manifest = {
-    "schemaVersion": 2,
-    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-    "config": {
-        "mediaType": "application/vnd.docker.container.image.v1+json",
-        "size": len(config_bytes),
-        "digest": config_digest,
-    },
-    "layers": [
-        {
-            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-            "size": len(gz_bytes),
-            "digest": layer_digest,
-        }
-    ],
-}
-manifest_bytes = (json.dumps(manifest, separators=(",", ":")) + "\n").encode()
-
-bearer = None
-
-
-def parse_challenge(www):
-    realm = service = ""
-    for m in re.finditer(r'([A-Za-z]+)="([^"]*)"', www):
-        if m.group(1) == "realm":
-            realm = m.group(2)
-        elif m.group(1) == "service":
-            service = m.group(2)
-    return realm, service
-
-
-def fetch_bearer(www):
-    realm, service = parse_challenge(www)
-    if not realm:
-        raise RuntimeError("registry 401: missing WWW-Authenticate realm")
-    if not service:
-        service = host
-    q = urllib.parse.urlencode(
-        {"service": service, "scope": "repository:" + name + ":pull,push"}
-    )
-    tok_url = realm + ("&" if "?" in realm else "?") + q
-    raw = base64.b64encode(f"{user}:{token}".encode()).decode()
-    req = urllib.request.Request(
-        tok_url, method="GET", headers={"Authorization": "Basic " + raw}
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"registry token -> HTTP {e.code}") from None
-    got = body.get("token") or body.get("access_token")
-    if not got:
-        raise RuntimeError("registry token: empty response")
-    return got
-
-
-def do(method, url, data=None, headers=None, retry_auth=True):
-    global bearer
-    h = {"Authorization": "Bearer " + (bearer or token)}
-    if headers:
-        h.update(headers)
-    req = urllib.request.Request(url, data=data, method=method, headers=h)
-    try:
-        return urllib.request.urlopen(req)
-    except urllib.error.HTTPError as e:
-        if e.code == 401 and retry_auth and not bearer:
-            bearer = fetch_bearer(e.headers.get("WWW-Authenticate", ""))
-            return do(method, url, data=data, headers=headers, retry_auth=False)
-        raise RuntimeError(f"registry {method} {urlparse_path(url)} -> HTTP {e.code}") from None
-
-
-def urlparse_path(url):
-    return urllib.parse.urlparse(url).path
-
-
-def put_blob(digest, blob, content_type):
-    start = f"{registry}/v2/{name}/blobs/uploads/"
-    with do("POST", start) as resp:
-        loc = resp.headers.get("Location")
-        if not loc:
-            raise RuntimeError("registry upload: missing Location")
-    upload = urllib.parse.urljoin(start, loc)
-    sep = "&" if "?" in upload else "?"
-    upload = upload + sep + "digest=" + urllib.parse.quote(digest, safe=":")
-    with do(
-        "PUT",
-        upload,
-        data=blob,
-        headers={"Content-Type": content_type},
-    ):
-        pass
-
-
-put_blob(layer_digest, gz_bytes, "application/octet-stream")
-put_blob(config_digest, config_bytes, "application/vnd.docker.container.image.v1+json")
-for t in [tag] + extra_tags:
-    man_url = f"{registry}/v2/{name}/manifests/{urllib.parse.quote(t, safe='')}"
-    with do(
-        "PUT",
-        man_url,
-        data=manifest_bytes,
-        headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
-    ):
-        pass
-    print(f"release: pushed {host}/{name}:{t}", file=sys.stderr)
-PY
-  fi
-  rm -rf "$ctx"
-}
-
-ensure_cosign
-prepare_cosign_key
 
 dist="${RELEASE_DIST:-target/release-dist}"
 mkdir -p "$dist"
 
+# Absolute registry and workspace paths end up in panic messages and debug
+# info, so the same commit built on two machines produced different binaries.
+repro_flags="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry=/cargo/registry"
+repro_flags="${repro_flags} --remap-path-prefix=${root}=/src"
+
+# A dry run swaps destinations, never steps: a throwaway key still exercises
+# cosign sign-blob and the base64 signature shape src/update.rs depends on.
+dry_dir=""
+if [[ "$do_sign" -eq 1 ]]; then
+  ensure_cosign
+  if [[ "$dry_run" -eq 1 && -z "${COSIGN_KEY:-}" ]]; then
+    dry_dir="$(mktemp -d)"
+    trap 'rm -rf "$dry_dir"' EXIT
+    export COSIGN_PASSWORD="dry-run"
+    (cd "$dry_dir" && cosign generate-key-pair >/dev/null)
+    export COSIGN_KEY="$dry_dir/cosign.key"
+    export SECD_VERIFY_PUB="$dry_dir/cosign.pub"
+  fi
+  prepare_cosign_key
+fi
+
+if [[ "$do_build" -eq 1 ]]; then
 case "$target" in
   x86_64-unknown-linux-musl)
     if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
@@ -441,7 +296,7 @@ case "$target" in
     fi
     # scratch has no musl loader; default musl target is dynamically linked.
     # Do not export RUSTFLAGS: crt-static breaks host proc-macros (wasm-bindgen-cli).
-    musl_flags="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+    musl_flags="${RUSTFLAGS:+$RUSTFLAGS }${repro_flags} -C target-feature=+crt-static"
     if [[ "$do_image" -eq 1 ]]; then
       if [[ ! -d crates/secd-web ]]; then
         echo "release: crates/secd-web missing" >&2
@@ -449,33 +304,52 @@ case "$target" in
       fi
       "$root/scripts/build-ui.sh"
     fi
-    RUSTFLAGS="$musl_flags" cargo build --release --target "$target" --bin secd
+    RUSTFLAGS="$musl_flags" cargo build --locked --release --target "$target" --bin secd
     if [[ "$do_image" -eq 1 ]]; then
-      RUSTFLAGS="$musl_flags" cargo build --release --target "$target" -p secd-web
+      RUSTFLAGS="$musl_flags" cargo build --locked --release --target "$target" -p secd-web
     fi
     ;;
   aarch64-apple-darwin)
-    cargo build --release --target "$target" --bin secd
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${repro_flags}" \
+      cargo build --locked --release --target "$target" --bin secd
     ;;
 esac
+fi
 
 out="${CARGO_TARGET_DIR:-target}/${target}/release"
 src="${out}/secd"
-if [[ ! -f "$src" ]]; then
-  echo "release: missing ${src}" >&2
+name="secd-${target}"
+
+if [[ "$do_build" -eq 1 ]]; then
+  if [[ ! -f "$src" ]]; then
+    echo "release: missing ${src}" >&2
+    exit 1
+  fi
+  if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
+    smoke_linux "$out/secd" secd
+    no_build_paths "$out/secd"
+    if [[ "$do_image" -eq 1 ]]; then
+      smoke_linux "$out/secd-web" secd-web
+      no_build_paths "$out/secd-web"
+      cp "$out/secd-web" "${dist}/secd-web"
+      chmod 0755 "${dist}/secd-web"
+    fi
+  else
+    no_build_paths "$src"
+  fi
+  cp "$src" "${dist}/${name}"
+  chmod 0755 "${dist}/${name}"
+fi
+
+if [[ "$do_sign" -eq 0 ]]; then
+  echo "release: ${tag} ${target} built -> ${dist}"
+  exit 0
+fi
+
+if [[ ! -f "${dist}/${name}" ]]; then
+  echo "release: missing ${dist}/${name}; run --build-only first" >&2
   exit 1
 fi
-
-if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
-  smoke_linux "$out/secd" secd
-  if [[ "$do_image" -eq 1 ]]; then
-    smoke_linux "$out/secd-web" secd-web
-  fi
-fi
-
-name="secd-${target}"
-cp "$src" "${dist}/${name}"
-chmod 0755 "${dist}/${name}"
 
 cosign sign-blob \
   --key "$COSIGN_KEY" \
@@ -497,13 +371,32 @@ digest="$(awk '{print $1; exit}' "${dist}/SHA256SUMS-${target}")"
 write_latest_json "${dist}/latest.json" "$name" "$digest"
 cp "${dist}/latest.json" "${dist}/latest-${target}.json"
 
-if [[ "$do_image" -eq 1 ]]; then
-  web="${out}/secd-web"
-  if [[ ! -f "$web" ]]; then
-    echo "release: missing ${web}" >&2
+# Verify what we just signed, with the key we signed it with. Same openssl
+# path src/update.rs uses, so a green run means the published signature will
+# actually verify on a client.
+verify_pub="${SECD_VERIFY_PUB:-$root/keys/cosign.pub}"
+if command -v openssl >/dev/null 2>&1; then
+  sigbin="$(mktemp)"
+  base64 -d <"${dist}/${name}.sig" >"$sigbin" 2>/dev/null \
+    || cp "${dist}/${name}.sig" "$sigbin"
+  if ! openssl dgst -sha256 -verify "$verify_pub" \
+    -signature "$sigbin" "${dist}/${name}" >/dev/null; then
+    echo "release: the signature we just produced does not verify against ${verify_pub}" >&2
+    rm -f "$sigbin"
     exit 1
   fi
-  push_image "$web"
+  rm -f "$sigbin"
+fi
+
+if [[ "$do_push" -eq 1 && "$do_image" -eq 1 ]]; then
+  web="${dist}/secd-web"
+  [[ -f "$web" ]] || web="${out}/secd-web"
+  if [[ ! -f "$web" ]]; then
+    echo "release: missing secd-web; run --build-only first" >&2
+    exit 1
+  fi
+  push_image "$web" >"${dist}/image-digest.txt"
+  echo "release: image $(cat "${dist}/image-digest.txt")"
 fi
 
 echo "release: ${tag} ${target} -> ${dist}"

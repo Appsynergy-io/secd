@@ -4,13 +4,16 @@ LAN-only secrets store. Humans see values in the TUI and web console; agents nev
 
 Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.10.
 
-Origin: `https://github.com/Appsynergy-io/secd.git`. Image: `ghcr.io/appsynergy-io/secd-web`. Apply: `scripts/k3s-apply.sh` (digest-pinned Deployment in `deploy/k3s`; NAD/PVC/TLS stay in nuc-k3s).
+Origin: `https://github.com/Appsynergy-io/secd.git`. Image: `ghcr.io/appsynergy-io/secd-web`. Apply: `scripts/k3s-apply.sh --expect-digest` against the digest the release published; `deploy/k3s` carries the version tag and the digest is bound at apply time. NAD/PVC/TLS stay in nuc-k3s.
 
 ## Commands
 
 ```
-scripts/check.sh
+scripts/check.sh [LANE ...]
+scripts/check.sh pipeline --update
 scripts/plan-contract.sh
+scripts/install-hooks.sh
+scripts/repo-settings.sh [--apply] [--enforce]
 scripts/merge.sh
 scripts/k3s-apply.sh
 ```
@@ -43,13 +46,23 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `crates/secd-web` | TLS 1.3 API (later) |
 | `crates/secd-ui` | web console (later) |
 | `contract.toml` | commands, routes, providers, test IDs, file allow-list |
-| `scripts/check.sh` | rustfmt, clippy `-D warnings`, test, test --release, compile-fail, plan-contract |
-| `scripts/release.sh` | musl/darwin build, cosign sign-blob, GHCR push |
-| `scripts/publish-release.sh` | GitHub Release assets + `latest.json` |
+| `scripts/check.sh` | the gate. Lanes: `contract shell workflow fmt ui clippy test test-release compile-fail`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
+| `scripts/tools.sh` | shared helpers: pinned tool fetch, `Cargo.lock` version lookup |
+| `scripts/build-ui.sh` | wasm + wasm-bindgen + wasm-opt into `crates/secd-ui/dist` |
+| `rust-toolchain.toml` | the toolchain, for laptop, agent sandbox and CI alike |
+| `.githooks/pre-push` | fast lanes before a push; refuses `main` |
+| `scripts/release.sh` | phases: `--build-only` compiles, `--sign-only` signs, `--push-image` pushes. `--dry-run` swaps destinations, never steps |
+| `scripts/push-image.sh` | deterministic scratch-image push; prints the manifest digest |
+| `scripts/ensure-cosign.sh` | pinned, checksummed cosign on PATH |
+| `scripts/sbom.sh` | pinned syft; CycloneDX SBOM to a chosen path |
+| `scripts/repo-settings.sh` | the ruleset and settings the workflows cannot set themselves; dry run by default |
+| `scripts/publish-release.sh` | draft → upload → verify → publish, once |
+| `scripts/dev/` | local stand-ins: strict OCI registry, `gh`, and the release dry run |
 | `scripts/k3s-apply.sh` | digest-pin GHCR image and apply `deploy/k3s` |
-| `deploy/k3s` | digest-pinned Deployment |
-| `.github/workflows/ci.yml` | PR: `ubuntu-24.04` + session keyring + `scripts/check.sh` |
-| `.github/workflows/release.yml` | `main`: linux musl + macos-14; GHCR + Releases. No second check. |
+| `deploy/k3s` | Deployment; the digest is bound at apply time, not committed |
+| `deploy/agent/` | pull-based CD for the cluster host: systemd timer, no inbound access |
+| `.github/workflows/ci.yml` | PR, merge queue and `main`: one lane per job behind the `gate` status; `warm` on `main` writes the shared cache |
+| `.github/workflows/release.yml` | tag `v*`: preflight → build → sign → image → publish |
 | `keys/cosign.pub` | verify key for `secd update` |
 | `skills/` | grok ≡ claude (later) |
 
@@ -59,9 +72,17 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - `Secret`: no `Display`/`Serialize`/`Deref`; `Debug` redacts bytes; `mlock` + `Zeroize`.
 - Unlock: passkey PRF and/or password (argon2id). Terminal never prompts.
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.
-- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`.
+- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`, which runs the gate; GitHub performs the merge itself once the ruleset's required `gate` status is green. Nothing in this repo calls `gh pr merge`.
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
-- Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`. Cosign is `sign-blob` on the two CLI binaries; the GHCR image is not signed.
+- Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
+- No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
+- A version is a promise about bytes. Releases are tag-triggered, built once, and published only after the draft's assets verify. Nothing uses `--clobber`.
+- The release is the record of what should be deployed: the image job publishes image-digest.txt, and the apply refuses any digest that does not match it. `deploy/agent/` converges the cluster on a timer, pulling rather than being pushed to, so no cluster credential leaves the LAN.
+- A released binary carries no path from the machine that built it. The release refuses one that does.
+- Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
 - DEK: kernel keyring, else `$XDG_RUNTIME_DIR/secd/` (tmpfs). `store` keeps a kernel write only if `load` reads it back.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
+- Toolchain, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.
+- `crates/secd-ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes cargo itself; run `scripts/check.sh ui` first.
+- A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck and actionlint. CI sets both.

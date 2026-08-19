@@ -8,14 +8,19 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 image_flag=""
+expect_digest=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --image)
       image_flag="${2:?k3s-apply: --image needs a ref}"
       shift 2
       ;;
+    --expect-digest)
+      expect_digest="${2:?k3s-apply: --expect-digest needs sha256:...}"
+      shift 2
+      ;;
     *)
-      echo "k3s-apply: usage: k3s-apply.sh [--image REF]" >&2
+      echo "k3s-apply: usage: k3s-apply.sh [--image REF] [--expect-digest sha256:...]" >&2
       exit 2
       ;;
   esac
@@ -64,6 +69,7 @@ fi
 digest="$(
   python3 - "$tag" <<'PY'
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -71,8 +77,8 @@ import urllib.parse
 import urllib.request
 
 tag = sys.argv[1]
-host = "ghcr.io"
-name = "appsynergy-io/secd-web"
+host = os.environ.get("SECD_REGISTRY_HOST", "ghcr.io")
+name = os.environ.get("SECD_IMAGE_NAME", "appsynergy-io/secd-web")
 url = f"https://{host}/v2/{name}/manifests/{urllib.parse.quote(tag, safe='')}"
 accept = (
     "application/vnd.oci.image.index.v1+json, "
@@ -159,6 +165,28 @@ if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 
+# A tag is mutable. Without this, whatever GHCR currently serves for the
+# version is trusted on sight -- and :0.1.10 has already resolved to three
+# different digests. Pass the digest the release published.
+if [[ -n "$expect_digest" && "$digest" != "$expect_digest" ]]; then
+  echo "k3s-apply: ${tag} resolves to ${digest}, expected ${expect_digest}" >&2
+  exit 1
+fi
+
+# The image is what actually runs; verify it was signed by the release key.
+if command -v cosign >/dev/null 2>&1; then
+  img_host="${SECD_REGISTRY_HOST:-ghcr.io}"
+  img_name="${SECD_IMAGE_NAME:-appsynergy-io/secd-web}"
+  if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
+    "${img_host}/${img_name}@${digest}" >/dev/null 2>&1; then
+    echo "k3s-apply: ${digest} is not signed by keys/cosign.pub" >&2
+    exit 1
+  fi
+  echo "k3s-apply: signature ok" >&2
+else
+  echo "k3s-apply: cosign not found; skipping the image signature check" >&2
+fi
+
 if [[ -n "${KUBECTL:-}" ]]; then
   kc=("$KUBECTL")
 elif command -v kubectl >/dev/null 2>&1; then
@@ -208,5 +236,10 @@ kus.write_text(knew, encoding="utf-8")
 PY
 
 "${kc[@]}" apply -k "$tmp"
-"${kc[@]}" -n secd rollout status deploy/secd-web
+# Without a timeout a bad image blocks here forever.
+if ! "${kc[@]}" -n secd rollout status deploy/secd-web --timeout=180s; then
+  echo "k3s-apply: rollout failed; rolling back" >&2
+  "${kc[@]}" -n secd rollout undo deploy/secd-web || true
+  exit 1
+fi
 echo "$digest"

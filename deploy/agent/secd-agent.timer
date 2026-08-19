@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for a new secd-web release
+Documentation=https://github.com/Appsynergy-io/secd
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Spread the load off the minute boundary.
+RandomizedDelaySec=60
+Persistent=true
+Unit=secd-agent.service
+
+[Install]
+WantedBy=timers.target
