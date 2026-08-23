@@ -262,10 +262,11 @@ jobs:
   # run hold the credential", and it is read through env because the `secrets`
   # context is not available in a step `if`.
   #
-  # This job holds the only write scopes in the workflow. It runs
-  # plan-contract.sh and nothing that builds, so contract rule 10 -- no job
-  # that compiles third-party code holds a secret or a write scope -- still
-  # holds with them.
+  # GITHUB_TOKEN stays at the workflow's contents: read. Writes go through
+  # the App token, minted only for this job and exported only on the
+  # commit/push and `gh pr merge --auto` steps. fetch-metadata and
+  # `scripts/check.sh pipeline --update` run without it. The job still
+  # compiles nothing, so contract rule 10 holds.
   dependabot:
     name: dependabot — re-pin [pipeline] and arm auto-merge
     if: >-
@@ -273,9 +274,6 @@ jobs:
       && github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
     env:
       APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
     steps:
@@ -301,15 +299,17 @@ jobs:
         if: env.APP_ID != ''
         id: meta
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: re-pin contract.toml [pipeline]
+        if: env.APP_ID != ''
+        run: scripts/check.sh pipeline --update
+      - name: push the re-pin
         if: env.APP_ID != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          scripts/check.sh pipeline --update
           if git diff --quiet -- contract.toml; then
             echo "[pipeline] already matches the tree"
             exit 0
