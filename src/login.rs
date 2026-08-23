@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -190,20 +190,10 @@ pub fn finish(flow: DeviceFlow, token: String, sealed: Value) -> anyhow::Result<
 pub fn save_snapshot(
     token: &str,
     dek: &Secret,
-    names: &[String],
-    values: &HashMap<String, Secret>,
-    meta: &HashMap<String, Value>,
+    rows: &[crate::policy::Row<'_>],
     before: &BTreeMap<String, String>,
 ) -> anyhow::Result<BTreeMap<String, String>> {
-    let empty = json!({});
-    let rows: Vec<crate::policy::Row<'_>> = names
-        .iter()
-        .filter_map(|name| {
-            let value = values.get(name)?;
-            Some((name.as_str(), value, meta.get(name).unwrap_or(&empty)))
-        })
-        .collect();
-    crate::policy::save_entries_read_back(token, dek, &rows, before)
+    crate::policy::save_entries_read_back(token, dek, rows, before)
 }
 
 pub fn save_session(token: &str) -> anyhow::Result<()> {
