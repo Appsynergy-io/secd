@@ -90,6 +90,21 @@ pub(crate) struct RawConn {
 // Connection is used only while the Mutex is held.
 unsafe impl Send for RawConn {}
 
+/// ROLLBACK on drop unless disarmed after COMMIT. A panic in `f` must not
+/// leave the IMMEDIATE transaction open for the next `with()` caller.
+struct RollbackOnDrop<'a> {
+    conn: &'a RawConn,
+    armed: bool,
+}
+
+impl Drop for RollbackOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.conn.exec("ROLLBACK");
+        }
+    }
+}
+
 impl Drop for RawConn {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -114,17 +129,23 @@ impl RawConn {
         }
     }
 
-    /// One BEGIN IMMEDIATE; ROLLBACK if `f` fails so a later statement
-    /// cannot leave a partial mutation.
+    /// One BEGIN IMMEDIATE. ROLLBACK if `f` fails or panics, or if COMMIT
+    /// fails, so the next `with()` caller cannot see a half-done mutation.
     pub(crate) fn immediate<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
         self.exec("BEGIN IMMEDIATE")?;
-        match f() {
-            Ok(v) => {
-                self.exec("COMMIT")?;
+        let mut guard = RollbackOnDrop {
+            conn: self,
+            armed: true,
+        };
+        let v = f()?;
+        match self.exec("COMMIT") {
+            Ok(()) => {
+                guard.armed = false;
                 Ok(v)
             }
             Err(e) => {
                 let _ = self.exec("ROLLBACK");
+                guard.armed = false;
                 Err(e)
             }
         }
@@ -395,5 +416,132 @@ fn tighten(dir: &Path) {
         if p.exists() {
             let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fresh_dir(tag: &str) -> Dir {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("secd-u-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("test dir");
+        Dir(p)
+    }
+
+    fn entry_count(conn: &RawConn) -> i64 {
+        let stmt = conn.prepare("SELECT COUNT(*) FROM entries").expect("count");
+        match stmt.step().expect("step") {
+            Step::Row => stmt.i64_at(0),
+            Step::Done => 0,
+        }
+    }
+
+    fn open_raw(path: &Path) -> RawConn {
+        let path_str = path.to_str().expect("utf-8");
+        let c_path = CString::new(path_str).expect("nul");
+        let mut ptr = ptr::null_mut();
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
+        let rc = unsafe { sqlite3_open_v2(c_path.as_ptr(), &mut ptr, flags, ptr::null()) };
+        assert!(rc == SQLITE_OK && !ptr.is_null(), "open raw {rc}");
+        RawConn { ptr }
+    }
+
+    fn insert_entry(conn: &RawConn, name: &str) -> anyhow::Result<()> {
+        let stmt =
+            conn.prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, 'c', 'm')")?;
+        stmt.bind_text(1, name)?;
+        stmt.run()
+    }
+
+    /// A panic inside `f` must ROLLBACK: the next `with()` caller cannot
+    /// start a nested transaction, and the insert is gone.
+    #[test]
+    fn T_TXN_PANIC_ROLLS_BACK() {
+        let dir = fresh_dir("txn-panic");
+        let db = Db::open(&dir.0).expect("open");
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _ = db.with(|conn| {
+                conn.immediate(|| -> anyhow::Result<()> {
+                    insert_entry(conn, "gone")?;
+                    panic!("txn panic");
+                })
+            });
+        }));
+        assert!(caught.is_err(), "f must panic");
+        db.with(|conn| {
+            conn.immediate(|| Ok(()))?;
+            assert_eq!(entry_count(conn), 0, "panicked insert must not persist");
+            Ok(())
+        })
+        .expect("connection usable after panic");
+    }
+
+    /// A COMMIT that fails must ROLLBACK on this connection, not wait for
+    /// sqlite3_close. DELETE journal + a held SHARED lock makes COMMIT
+    /// return SQLITE_BUSY while the IMMEDIATE transaction is still open.
+    #[test]
+    fn T_TXN_COMMIT_FAIL_ROLLS_BACK() {
+        let dir = fresh_dir("txn-commit");
+        let db = Db::open(&dir.0).expect("open");
+        db.with(|conn| {
+            conn.exec("PRAGMA journal_mode=DELETE")?;
+            conn.exec("PRAGMA busy_timeout=0")?;
+            insert_entry(conn, "keep")
+        })
+        .expect("seed");
+
+        let reader = open_raw(&dir.0.join(DB_NAME));
+        reader
+            .exec("PRAGMA busy_timeout=0")
+            .expect("reader timeout");
+        reader.exec("BEGIN").expect("reader begin");
+        let hold = reader.prepare("SELECT name FROM entries").expect("hold");
+        assert!(
+            matches!(hold.step().expect("row"), Step::Row),
+            "reader must hold SHARED"
+        );
+
+        let err = db.with(|conn| {
+            conn.exec("PRAGMA busy_timeout=0")?;
+            conn.immediate(|| insert_entry(conn, "gone"))
+        });
+        assert!(err.is_err(), "COMMIT must fail while SHARED is held");
+
+        // Same connection, still inside the Mutex, with the reader holding
+        // SHARED: a skipped ROLLBACK would show the insert here.
+        db.with(|conn| {
+            assert_eq!(
+                entry_count(conn),
+                1,
+                "uncommitted insert must not be visible on this connection"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .expect("count");
+        drop(hold);
+        drop(reader);
+
+        db.with(|conn| {
+            conn.exec("PRAGMA busy_timeout=5000")?;
+            conn.immediate(|| Ok(()))?;
+            Ok(())
+        })
+        .expect("connection usable after COMMIT fail");
     }
 }

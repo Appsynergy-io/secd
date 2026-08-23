@@ -411,6 +411,12 @@ pending = false
 [tests.T_AUDIT_READ_FAILS_CLOSED]
 pending = false
 
+[tests.T_TXN_PANIC_ROLLS_BACK]
+pending = false
+
+[tests.T_TXN_COMMIT_FAIL_ROLLS_BACK]
+pending = false
+
 [tests.T_PK_LIST_UNAUTH]
 pending = false
 
