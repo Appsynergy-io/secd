@@ -4,9 +4,12 @@
 # Runs the cheap lanes before anything reaches GitHub, so a formatting slip or
 # a contract violation costs a second locally instead of a CI round trip.
 #
-#   SECD_PREPUSH=fast   contract, shell, workflow, fmt   (default, ~60s)
+#   SECD_PREPUSH=fast   contract, shell, workflow, fmt, secrets  (default, ~60s)
 #   SECD_PREPUSH=full   the whole gate
 #   SECD_PREPUSH=off    skip
+#
+# The secret scan runs here as well as in CI: a value that reaches GitHub is
+# compromised the moment it arrives, and by then the only remedy is rotation.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 
@@ -22,5 +25,5 @@ done
 case "${SECD_PREPUSH:-fast}" in
   off) exit 0 ;;
   full) exec "$root/scripts/check.sh" ;;
-  *) exec "$root/scripts/check.sh" fast ;;
+  *) exec "$root/scripts/check.sh" fast secrets ;;
 esac

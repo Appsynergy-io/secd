@@ -13,3 +13,28 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # A release that is compromised at publication is usually yanked within
+    # days. Waiting a week costs nothing here and skips that window; security
+    # updates ignore the cooldown.
+    cooldown:
+      default-days: 7
+    # One pull request for the minor and patch bumps, which ci.yml re-pins and
+    # arms for auto-merge. A major stays on its own, for a human.
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  # npm for the Stage 2 console. `open-pull-requests-limit: 0` is how
+  # dependabot expresses security-updates-only -- there is no such key -- so
+  # this opens a pull request for an advisory and never for a version bump.
+  # That keeps the reasoning above: version currency for /ui is carried by
+  # `bun audit` and the exact pins in package.json, and the advisory axis is
+  # the one no lockfile can answer by itself.
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7

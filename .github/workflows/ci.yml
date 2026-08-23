@@ -23,9 +23,10 @@ env:
   SECD_REQUIRE_LINTERS: "1"
 
 jobs:
-  # No cargo build at all: contract, shellcheck, actionlint, rustfmt. Reports
-  # in about a minute, so the cheap mistakes never cost a test run.
+  # No cargo build at all: contract, shellcheck, actionlint, zizmor, rustfmt.
+  # Reports in about a minute, so the cheap mistakes never cost a test run.
   fast:
+    name: fast — contract, shell, workflow, fmt
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -42,11 +43,32 @@ jobs:
           }
       - run: scripts/check.sh fast
 
+  # gitleaks over the working tree and over every commit that produced it.
+  # This is a secrets manager: the scan that catches a committed value is the
+  # one check the gate cannot be missing, so it is required, it is never
+  # advisory, and it runs whatever changed -- a value can land in any file.
+  #
+  # fetch-depth: 0 because the history half of the lane needs the history.
+  # check.sh refuses a shallow clone rather than reporting a pass over one
+  # commit.
+  secrets:
+    name: secrets — gitleaks over the tree and the history
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: scripts/check.sh secrets
+
   # Which lanes are worth running. The base comes from git, not the event
   # payload, so this behaves identically on pull_request, merge_group and push
   # and does not depend on the shape of any webhook. It fails open: if the base
   # cannot be resolved, everything is considered changed.
   changes:
+    name: changes — what this pull request touches
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -67,8 +89,14 @@ jobs:
             echo "code=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
+          # Every job downstream of this is `if: code == true`, and the gate
+          # reads a skipped job as success -- so anything missing from this
+          # pattern is not "cheaper", it is unchecked. vendor/ is here because
+          # crates/secd-ui links against it and a change there once passed the
+          # gate with every cargo lane skipped; scripts/, deploy/ and .github/
+          # are here because they decide how the code is built and shipped.
           if git diff --name-only "$base" HEAD \
-            | grep -qE '^(src/|crates/|tests/|tools/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'; then
+            | grep -qE '^(src/|crates/|tests/|tools/|ui/|vendor/|scripts/|deploy/|\.github/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|bun\.lock$)'; then
             echo "code=true" >>"$GITHUB_OUTPUT"
           else
             echo "code=false" >>"$GITHUB_OUTPUT"
@@ -78,6 +106,7 @@ jobs:
   # crates/secd-ui/dist, so this is a prerequisite of every cargo job rather
   # than a peer lane.
   ui:
+    name: ui — wasm bundle for secd-web
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
@@ -96,6 +125,7 @@ jobs:
           retention-days: 1
 
   clippy:
+    name: clippy — workspace, all targets, warnings denied
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
@@ -115,6 +145,7 @@ jobs:
       - run: scripts/check.sh clippy
 
   test:
+    name: test — workspace, debug
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
@@ -130,7 +161,10 @@ jobs:
           path: crates/secd-ui/dist
       - run: touch crates/secd-ui/dist/*
       - uses: ./.github/actions/testdeps
+        id: testdeps
       - name: test
+        env:
+          SECD_BROWSER: ${{ steps.testdeps.outputs.browser }}
         run: |
           # new_session installs a session keyring on THIS shell, so the check
           # must run in the same run: block to inherit it.
@@ -138,6 +172,7 @@ jobs:
           scripts/check.sh test
 
   test-release:
+    name: test-release — workspace, release profile
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
@@ -153,13 +188,17 @@ jobs:
           path: crates/secd-ui/dist
       - run: touch crates/secd-ui/dist/*
       - uses: ./.github/actions/testdeps
+        id: testdeps
       - name: test-release
+        env:
+          SECD_BROWSER: ${{ steps.testdeps.outputs.browser }}
         run: |
           keyctl new_session
           scripts/check.sh test-release
 
   # Only needs secd-core, so no ui dependency.
   compile-fail:
+    name: compile-fail — Secret stays unprintable
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
@@ -173,9 +212,10 @@ jobs:
 
   # The release path, end to end, against a local registry and a stand-in gh.
   # It publishes nothing and needs no secret.
-  # Not gated on the code filter: the release scripts live under scripts/,
-  # which that filter deliberately does not match, and this lane is a minute.
+  # Not gated on the code filter: this lane is a minute, and the release path
+  # is worth running even for a change the filter calls documentation.
   release-dry:
+    name: release-dry — the release path against a local registry
     if: github.event_name != 'push'
     needs: [fast]
     runs-on: ubuntu-24.04
@@ -187,24 +227,124 @@ jobs:
       - uses: ./.github/actions/setup
       - run: scripts/check.sh release-dry
 
-  # There is deliberately no dependency-review job here. It needs the
-  # repository's dependency graph, which is off -- the action fails with
-  # "Dependency review is not supported on this repository" -- and no
-  # contributor can turn that on from a pull request, so it would block every
-  # merge while catching nothing. It would also contradict what this repo
-  # already decided: dependabot.yml and audit.yml both say advisories are
-  # reported weekly as an issue rather than turning a pull request red for a
-  # dependency nobody touched, and scripts/audit.sh reports a strict superset
-  # of what dependency review would flag. Re-add it only together with
-  # `scripts/repo-settings.sh --apply`, which enables the graph.
+  # Dependabot's own pull requests, and nobody else's.
   #
-  # The only job named in branch protection. Every other job is a `needs` of
-  # this one, which is what makes treating "skipped" as acceptable safe: a job
-  # skipped because its dependency failed is always accompanied by that
-  # dependency reporting "failure" here.
+  # contract.toml [pipeline] pins the sha256 of every file under .github/, and
+  # a workflow bump changes one -- so the contract lane rejects every bot pull
+  # request with "ci.yml changed without updating contract.toml [pipeline]".
+  # That is the pin working, not a defect: the fix is to re-pin, which is
+  # mechanical, so this job does it and pushes the result.
+  #
+  # The push must come from a GitHub App token. A push made with GITHUB_TOKEN
+  # starts no workflow run at all, so the re-pinned head would sit there with
+  # the previous run's red gate forever. The token also has to be readable here:
+  # dependabot-triggered runs see Dependabot secrets, not Actions secrets, so
+  # DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY belong under
+  # Settings > Secrets and variables > Dependabot.
+  #
+  # This job holds the only write scopes in the workflow. It runs
+  # plan-contract.sh and nothing that builds, so contract rule 10 -- no job
+  # that compiles third-party code holds a secret or a write scope -- still
+  # holds with them.
+  dependabot:
+    name: dependabot — re-pin [pipeline] and arm auto-merge
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.DEPENDABOT_APP_ID }}
+          private-key: ${{ secrets.DEPENDABOT_APP_PRIVATE_KEY }}
+          # Without these the token carries whatever the installation was
+          # granted. It needs to push one commit and arm one auto-merge.
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: false
+      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        id: meta
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+      - name: re-pin contract.toml [pipeline]
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          scripts/check.sh pipeline --update
+          if git diff --quiet -- contract.toml; then
+            echo "[pipeline] already matches the tree"
+            exit 0
+          fi
+          git config user.name "dependabot[bot]"
+          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+          # The token stays in the environment: no remote URL to leak it into
+          # a log, and nothing written to .git/config for a later step to read.
+          # The single quotes are the point -- git expands $GH_TOKEN when it
+          # runs the helper, and this shell never sees the value.
+          # shellcheck disable=SC2016
+          git config credential.helper \
+            '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
+          git add contract.toml
+          git commit -m "contract: re-pin [pipeline] for the workflow bump"
+          git push origin "HEAD:${HEAD_REF}"
+      - name: arm auto-merge for a minor or patch bump
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          # A repository whose thesis is exact pinning does not merge a major
+          # bump unread. For a grouped update this is the highest bump in the
+          # group, so one major keeps the whole group for a human.
+          if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
+            echo "major bump — leaving this one for a human"
+            exit 0
+          fi
+          # --auto arms; GitHub merges it when the required gate is green.
+          gh pr merge --auto --squash "$PR_URL"
+
+  # There is deliberately no dependency-review job here, and this is now a
+  # permanent exclusion rather than a wait. The dependency graph it needs is
+  # enabled -- scripts/repo-settings.sh --apply turned it on, which was the
+  # condition the earlier note left open -- and the job is still not worth
+  # having: scripts/audit.sh reports a strict superset of what dependency
+  # review would flag, from the same advisory database, and audit.yml already
+  # files what it finds as an issue rather than turning a pull request red for
+  # a dependency nobody in it touched. Two checks reading one database, one of
+  # which can only duplicate the other, is a slower gate and not a stricter
+  # one.
+  #
+  # `gate` is the only job named in branch protection, so its name is that
+  # check's context and cannot change. Every other job is a `needs` of this
+  # one -- plan-contract.sh proves it, because a job outside this list can
+  # fail while the gate reports success -- and that is what makes treating
+  # "skipped" as acceptable safe: a job skipped because its dependency failed
+  # is always accompanied by that dependency reporting "failure" here.
   gate:
+    name: gate
     if: always() && github.event_name != 'push'
-    needs: [changes, fast, ui, clippy, test, test-release, compile-fail, release-dry]
+    needs:
+      - changes
+      - fast
+      - secrets
+      - ui
+      - clippy
+      - test
+      - test-release
+      - compile-fail
+      - release-dry
+      - dependabot
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -217,11 +357,23 @@ jobs:
 
           needs = json.loads(os.environ["NEEDS"])
           bad = []
+          rows = []
           for name in sorted(needs):
               result = needs[name]["result"]
               print(f"{result:>9}  {name}")
+              mark = {"success": "✅", "skipped": "⏭️"}.get(result, "❌")
+              rows.append(f"| `{name}` | {mark} {result} |")
               if result not in ("success", "skipped"):
                   bad.append(name)
+
+          # The same table the log holds, one click deep instead of three.
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              verdict = ("**gate: " + ", ".join(bad) + " did not succeed**") if bad else "**gate: ok**"
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## gate\n\n| job | result |\n| --- | --- |\n")
+                  fh.write("\n".join(rows) + "\n\n" + verdict + "\n")
+
           if bad:
               sys.exit("gate: did not succeed -> " + ", ".join(bad))
           print("gate: ok")
@@ -231,13 +383,18 @@ jobs:
   # cache: caches are branch-scoped, so without a run on the default branch
   # every pull request starts cold. Running every lane means the saved target/
   # holds the debug, release and wasm32 artifact sets the lanes restore.
+  #
+  # fetch-depth: 0 because every lane includes `secrets`, whose history half
+  # refuses a shallow clone.
   warm:
+    name: warm — every lane on main, writes the shared cache
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
       - name: shellcheck
@@ -247,7 +404,10 @@ jobs:
             sudo apt-get install -y shellcheck
           }
       - uses: ./.github/actions/testdeps
+        id: testdeps
       - name: check
+        env:
+          SECD_BROWSER: ${{ steps.testdeps.outputs.browser }}
         run: |
           keyctl new_session
           scripts/check.sh
