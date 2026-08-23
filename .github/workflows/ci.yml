@@ -241,50 +241,55 @@ jobs:
   # a workflow bump changes one -- so the contract lane rejects every bot pull
   # request with "ci.yml changed without updating contract.toml [pipeline]".
   # That is the pin working, not a defect: the fix is to re-pin, which is
-  # mechanical, so this job does it and pushes the result.
+  # mechanical, so dependabot-update does it.
   #
-  # The push must come from a GitHub App token. A push made with GITHUB_TOKEN
-  # starts no workflow run at all, so the re-pinned head would sit there with
-  # the previous run's red gate forever. The token also has to be readable here:
-  # dependabot-triggered runs see Dependabot secrets, not Actions secrets, so
-  # DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY belong under
-  # Settings > Secrets and variables > Dependabot.
+  # Two jobs, because a secret in the same job as an untrusted checkout is
+  # readable by a poisoned runner. dependabot-update holds no App secret: it
+  # checks out the PR head, classifies the bump, re-pins [pipeline], and
+  # uploads contract.toml. dependabot holds the App secret, checks out
+  # nothing, runs no tree-controlled script, and commits through the Contents
+  # API so a hook or credential.helper never sees the token.
   #
-  # The job's own push is why every step is conditional. That push is a
-  # `pull_request: synchronize` whose actor is the App rather than
-  # dependabot[bot], so the run it starts is not a dependabot-triggered run and
-  # is served Actions secrets, where these two are not. The condition on the
-  # pull request's author still holds there, so without a guard the token step
-  # would run with an empty app-id, fail, and take `gate` -- which needs this
-  # job -- red on the very head the re-pin created. Nothing is lost by standing
-  # down: [pipeline] already matches and auto-merge is already armed. The
-  # author check stays the authorization one; APP_ID answers only "does this
-  # run hold the credential", and it is read through env because the `secrets`
-  # context is not available in a step `if`.
+  # The commit must come from a GitHub App token. A commit made with
+  # GITHUB_TOKEN starts no workflow run at all, so the re-pinned head would
+  # sit there with the previous run's red gate forever. The token also has to
+  # be readable here: dependabot-triggered runs see Dependabot secrets, not
+  # Actions secrets, so DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY
+  # belong under Settings > Secrets and variables > Dependabot.
   #
-  # GITHUB_TOKEN is contents: read plus pull-requests: read. fetch-metadata
-  # always calls pulls.listCommits, which 403s on contents:read alone. Writes
-  # go through the App token, minted after checkout and pipeline --update, and
-  # exported only on the `gh pr merge --auto` and commit/push steps.
-  # fetch-metadata and `scripts/check.sh pipeline --update` run without it.
-  # The job still compiles nothing, so contract rule 10 holds.
+  # The job's own commit is why dependabot's steps are conditional. That
+  # commit is a `pull_request: synchronize` whose actor is the App rather
+  # than dependabot[bot], so the run it starts is not a dependabot-triggered
+  # run and is served Actions secrets, where these two are not. The condition
+  # on the pull request's author still holds there, so without a guard the
+  # token step would run with an empty app-id, fail, and take `gate` -- which
+  # needs this job -- red on the very head the re-pin created. Nothing is
+  # lost by standing down: [pipeline] already matches and auto-merge is
+  # already armed. The author check stays the authorization one; APP_ID
+  # answers only "does this run hold the credential", and it is read through
+  # env because the `secrets` context is not available in a step `if`.
   #
-  # Auto-merge is armed before the push: the push is a synchronize in this
-  # same concurrency group (cancel-in-progress: true), and the follow-up run
-  # stands down with no App token. `--auto` queues on a red gate. A failed
-  # arm still pushes (`!cancelled()`): a rebase, retry or conflict must not
-  # leave [pipeline] stale, and an already-armed autoMergeRequest is success
-  # so the job stays green on retry.
+  # GITHUB_TOKEN is contents: read plus pull-requests: read on
+  # dependabot-update (fetch-metadata always calls pulls.listCommits, which
+  # 403s on contents:read alone). dependabot's GITHUB_TOKEN stays at the
+  # workflow default. Writes go through the App token, minted only in
+  # dependabot, with permission-contents/pull-requests write only there.
+  # Both jobs compile nothing, so contract rule 10 holds.
+  #
+  # Auto-merge is armed before the commit: the commit is a synchronize in
+  # this same concurrency group (cancel-in-progress: true), and the follow-up
+  # run stands down with no App token. `--auto` queues on a red gate. A
+  # failed arm still commits (`!cancelled()`): a rebase, retry or conflict
+  # must not leave [pipeline] stale, and an already-armed autoMergeRequest
+  # is success so the job stays green on retry.
   #
   # fetch-metadata is classification only. `pipeline --update` does not read
   # it, so a flake there must not skip the re-pin: that step is
-  # continue-on-error, and re-pin plus token mint run on `!cancelled()` like
-  # the push. Arm stays on metadata; an empty update-type already leaves the
-  # PR for a human. Checkout is the event SHA, not the moving branch tip;
-  # add/commit/push pass core.hooksPath=/dev/null so a tree-controlled hook
-  # cannot inherit GH_TOKEN.
-  dependabot:
-    name: dependabot — re-pin [pipeline] and arm auto-merge
+  # continue-on-error, and re-pin runs on `!cancelled()`. Arm stays on
+  # metadata; an empty update-type already leaves the PR for a human.
+  # Checkout is the event SHA, not the moving branch tip.
+  dependabot-update:
+    name: dependabot-update — re-pin [pipeline]
     if: >-
       github.event_name == 'pull_request'
       && github.event.pull_request.user.login == 'dependabot[bot]'
@@ -293,26 +298,49 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      update-type: ${{ steps.meta.outputs.update-type }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        id: meta
+        continue-on-error: true
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: re-pin contract.toml [pipeline]
+        if: ${{ !cancelled() }}
+        run: scripts/check.sh pipeline --update
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: dependabot-contract-toml
+          path: contract.toml
+          if-no-files-found: error
+          retention-days: 1
+
+  dependabot:
+    name: dependabot — arm auto-merge and commit the re-pin
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.user.login == 'dependabot[bot]'
+    needs: [dependabot-update]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     env:
       APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
     steps:
       - name: stand down without the App credential
         if: env.APP_ID == ''
         run: echo "not a dependabot-triggered run — the re-pin has happened and auto-merge is already armed"
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        if: env.APP_ID != ''
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
-        if: env.APP_ID != ''
-        id: meta
-        continue-on-error: true
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: re-pin contract.toml [pipeline]
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !cancelled() && env.APP_ID != '' }}
-        run: scripts/check.sh pipeline --update
+        with:
+          name: dependabot-contract-toml
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: ${{ !cancelled() && env.APP_ID != '' }}
         id: app-token
@@ -320,7 +348,7 @@ jobs:
           app-id: ${{ secrets.DEPENDABOT_APP_ID }}
           private-key: ${{ secrets.DEPENDABOT_APP_PRIVATE_KEY }}
           # Without these the token carries whatever the installation was
-          # granted. It needs to push one commit and arm one auto-merge.
+          # granted. It needs to commit one file and arm one auto-merge.
           permission-contents: write
           permission-pull-requests: write
       - name: arm auto-merge for a minor or patch bump
@@ -328,7 +356,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          UPDATE_TYPE: ${{ needs.dependabot-update.outputs.update-type }}
         run: |
           set -euo pipefail
           # A repository whose thesis is exact pinning does not merge a major
@@ -355,29 +383,71 @@ jobs:
               echo "update-type '${UPDATE_TYPE:-<none>}' — leaving this one for a human"
               ;;
           esac
-      - name: push the re-pin
+      - name: commit the re-pin
         if: ${{ !cancelled() && env.APP_ID != '' && steps.app-token.outputs.token != '' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if git diff --quiet -- contract.toml; then
-            echo "[pipeline] already matches the tree"
-            exit 0
-          fi
-          git config user.name "dependabot[bot]"
-          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
-          # The token stays in the environment: no remote URL to leak it into
-          # a log, and nothing written to .git/config for a later step to read.
-          # The single quotes are the point -- git expands $GH_TOKEN when it
-          # runs the helper, and this shell never sees the value.
-          # shellcheck disable=SC2016
-          git config credential.helper \
-            '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
-          git -c core.hooksPath=/dev/null add contract.toml
-          git -c core.hooksPath=/dev/null commit -m "contract: re-pin [pipeline] for the workflow bump"
-          git -c core.hooksPath=/dev/null push origin "HEAD:${HEAD_REF}"
+          [ -f contract.toml ]
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import sys
+          from urllib.parse import quote
+
+          path = "contract.toml"
+          repo = os.environ["REPO"]
+          branch = os.environ["HEAD_REF"]
+          new = open(path, "rb").read()
+
+          def gh_api(method, url, body=None):
+              cmd = ["gh", "api", "--method", method, url]
+              if body is not None:
+                  cmd += ["--input", "-"]
+              p = subprocess.run(
+                  cmd,
+                  input=None if body is None else json.dumps(body).encode(),
+                  capture_output=True,
+                  check=False,
+              )
+              if p.returncode != 0:
+                  sys.stderr.buffer.write(p.stderr)
+                  sys.exit(p.returncode or 1)
+              if not p.stdout:
+                  return {}
+              return json.loads(p.stdout)
+
+          info = gh_api(
+              "GET",
+              f"repos/{repo}/contents/{quote(path, safe='/')}?ref={quote(branch, safe='')}",
+          )
+          remote = base64.b64decode(info["content"])
+          if remote == new:
+              print("[pipeline] already matches the tree")
+              sys.exit(0)
+
+          identity = {
+              "name": "dependabot[bot]",
+              "email": "49699333+dependabot[bot]@users.noreply.github.com",
+          }
+          gh_api(
+              "PUT",
+              f"repos/{repo}/contents/{quote(path, safe='/')}",
+              {
+                  "message": "contract: re-pin [pipeline] for the workflow bump",
+                  "content": base64.b64encode(new).decode("ascii"),
+                  "sha": info["sha"],
+                  "branch": branch,
+                  "committer": identity,
+                  "author": identity,
+              },
+          )
+          PY
 
   # There is deliberately no dependency-review job here, and this is now a
   # permanent exclusion rather than a wait. The dependency graph it needs is
@@ -409,6 +479,7 @@ jobs:
       - test-release
       - compile-fail
       - release-dry
+      - dependabot-update
       - dependabot
     runs-on: ubuntu-24.04
     timeout-minutes: 5
