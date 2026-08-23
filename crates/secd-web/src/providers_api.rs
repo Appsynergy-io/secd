@@ -61,15 +61,12 @@ async fn put_provider(
     if is_builtin(&provider.name) {
         return json_status(StatusCode::BAD_REQUEST, "builtin");
     }
-    if state.vault.put_custom_provider(&provider).is_err() {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
-    }
     if state
-        .audit
-        .record_names("provider.put", None, &[provider.name.as_str()])
+        .vault
+        .put_custom_provider(&provider, &state.audit)
         .is_err()
     {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
@@ -85,17 +82,8 @@ async fn delete_provider(
     if is_builtin(&name) {
         return json_status(StatusCode::BAD_REQUEST, "builtin");
     }
-    match state.vault.delete_custom_provider(&name) {
-        Ok(true) => {
-            if state
-                .audit
-                .record_names("provider.delete", None, &[name.as_str()])
-                .is_err()
-            {
-                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
-            }
-            json_value(StatusCode::OK, json!({ "ok": true }))
-        }
+    match state.vault.delete_custom_provider(&name, &state.audit) {
+        Ok(true) => json_value(StatusCode::OK, json!({ "ok": true })),
         Ok(false) => json_status(StatusCode::NOT_FOUND, "not found"),
         Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     }

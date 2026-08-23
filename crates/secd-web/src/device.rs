@@ -207,13 +207,15 @@ async fn revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(s) = state.sessions.device_from_headers(&headers) else {
         return fail_auth();
     };
-    if let Some(token) = crate::sessions::bearer_token(&headers) {
-        if state.sessions.revoke_token(&token).is_err() {
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
-        }
-    }
-    if state.audit.record("session.revoke", Some(&s.id)).is_err() {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+    let Some(token) = crate::sessions::bearer_token(&headers) else {
+        return fail_auth();
+    };
+    if state
+        .sessions
+        .revoke_token_with_audit(&token, &s.id, &state.audit)
+        .is_err()
+    {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
     json_value(StatusCode::OK, json!({ "ok": true }))
 }

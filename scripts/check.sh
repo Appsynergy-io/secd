@@ -134,6 +134,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[workspace]
+
 [dependencies]
 secd-core = { path = "$root/crates/secd-core" }
 serde = "=${serde_ver}"

@@ -10,6 +10,7 @@ use axum::Router;
 use secd_core::{check_name, CustomProvider, Field};
 use serde_json::{json, Value};
 
+use crate::audit::AuditLog;
 use crate::db::{Db, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
@@ -37,17 +38,16 @@ pub struct VaultStore {
 
 impl VaultStore {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        let db = Db::open(dir)?;
+        Ok(Self::from_db(Db::open(dir)?, dir))
+    }
+
+    pub(crate) fn from_db(db: Db, dir: &Path) -> Self {
         let store = Self {
             db,
             dir: dir.to_path_buf(),
         };
         store.sync_wraps();
-        Ok(store)
-    }
-
-    pub(crate) fn db(&self) -> &Db {
-        &self.db
+        store
     }
 
     pub fn entries(&self) -> anyhow::Result<Vec<VaultEntry>> {
@@ -84,70 +84,71 @@ impl VaultStore {
         })
     }
 
-    pub fn replace_entries(&self, entries: &[VaultEntry]) -> anyhow::Result<()> {
+    pub fn replace_entries(
+        &self,
+        entries: &[VaultEntry],
+        audit: &AuditLog,
+        session_id: Option<&str>,
+        names: &[&str],
+    ) -> anyhow::Result<()> {
         let created = crate::auth::now_rfc3339();
-        self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
-                // Names whose ciphertext changes (or appears) in this snapshot
-                // get a new version row; unchanged names keep their history.
-                let mut before: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-                let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
-                loop {
-                    match sel.step()? {
-                        Step::Done => break,
-                        Step::Row => {
-                            before.insert(
-                                sel.text(0).unwrap_or_default(),
-                                sel.text(1).unwrap_or_default(),
-                            );
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    // Names whose ciphertext changes (or appears) in this snapshot
+                    // get a new version row; unchanged names keep their history.
+                    let mut before: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
+                    let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
+                    loop {
+                        match sel.step()? {
+                            Step::Done => break,
+                            Step::Row => {
+                                before.insert(
+                                    sel.text(0).unwrap_or_default(),
+                                    sel.text(1).unwrap_or_default(),
+                                );
+                            }
                         }
                     }
-                }
-                conn.exec("DELETE FROM entries")?;
-                let stmt =
-                    conn.prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)")?;
-                let ver = conn.prepare(
-                    "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
-                     (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
-                )?;
-                for e in entries {
-                    let ct = e.ciphertext.to_string();
-                    let meta = e.meta.to_string();
-                    stmt.reset()?;
-                    stmt.bind_text(1, &e.name)?;
-                    stmt.bind_text(2, &ct)?;
-                    stmt.bind_text(3, &meta)?;
-                    match stmt.step()? {
-                        Step::Done => {}
-                        Step::Row => return Err(anyhow!("insert returned a row")),
-                    }
-                    if before.get(&e.name).map(String::as_str) != Some(ct.as_str()) {
-                        ver.reset()?;
-                        ver.bind_text(1, &e.name)?;
-                        ver.bind_text(2, &e.name)?;
-                        ver.bind_text(3, &ct)?;
-                        ver.bind_text(4, &meta)?;
-                        ver.bind_text(5, &created)?;
-                        match ver.step()? {
+                    conn.exec("DELETE FROM entries")?;
+                    let stmt = conn
+                        .prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)")?;
+                    let ver = conn.prepare(
+                        "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
+                    )?;
+                    for e in entries {
+                        let ct = e.ciphertext.to_string();
+                        let meta = e.meta.to_string();
+                        stmt.reset()?;
+                        stmt.bind_text(1, &e.name)?;
+                        stmt.bind_text(2, &ct)?;
+                        stmt.bind_text(3, &meta)?;
+                        match stmt.step()? {
                             Step::Done => {}
                             Step::Row => return Err(anyhow!("insert returned a row")),
                         }
+                        if before.get(&e.name).map(String::as_str) != Some(ct.as_str()) {
+                            ver.reset()?;
+                            ver.bind_text(1, &e.name)?;
+                            ver.bind_text(2, &e.name)?;
+                            ver.bind_text(3, &ct)?;
+                            ver.bind_text(4, &meta)?;
+                            ver.bind_text(5, &created)?;
+                            match ver.step()? {
+                                Step::Done => {}
+                                Step::Row => return Err(anyhow!("insert returned a row")),
+                            }
+                        }
                     }
                 }
-                Ok(())
-            })();
-            match tx {
-                Ok(()) => conn.exec("COMMIT"),
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+                crate::audit::append_on(conn, "vault.put", session_id, names)
+            })
         })?;
         self.db.tighten();
         self.sync_wraps();
+        audit.journal(&event);
         Ok(())
     }
 
@@ -179,22 +180,28 @@ impl VaultStore {
     /// Restores version `seq` of `name` as the current entry and appends the
     /// restored ciphertext as a new version. Returns false when no such
     /// version exists.
-    pub fn rollback(&self, name: &str, seq: i64) -> anyhow::Result<bool> {
+    pub fn rollback(
+        &self,
+        name: &str,
+        seq: i64,
+        audit: &AuditLog,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let created = crate::auth::now_rfc3339();
-        let hit = self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
+        let (hit, event) = self.db.with(|conn| {
+            conn.immediate(|| {
                 let sel = conn
                     .prepare("SELECT ciphertext, meta FROM versions WHERE name = ? AND seq = ?")?;
                 sel.bind_text(1, name)?;
                 sel.bind_text(2, &seq.to_string())?;
                 let (ct, meta) = match sel.step()? {
-                    Step::Done => return Ok(false),
+                    Step::Done => return Ok((false, None)),
                     Step::Row => (
                         sel.text(0).unwrap_or_default(),
                         sel.text(1).unwrap_or_else(|| "{}".into()),
                     ),
                 };
+                drop(sel);
                 let up = conn.prepare(
                     "INSERT OR REPLACE INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)",
                 )?;
@@ -205,6 +212,7 @@ impl VaultStore {
                     Step::Done => {}
                     Step::Row => return Err(anyhow!("insert returned a row")),
                 }
+                drop(up);
                 let ver = conn.prepare(
                     "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
                      (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
@@ -215,22 +223,18 @@ impl VaultStore {
                 ver.bind_text(4, &meta)?;
                 ver.bind_text(5, &created)?;
                 match ver.step()? {
-                    Step::Done => Ok(true),
-                    Step::Row => Err(anyhow!("insert returned a row")),
+                    Step::Done => {}
+                    Step::Row => return Err(anyhow!("insert returned a row")),
                 }
-            })();
-            match tx {
-                Ok(hit) => {
-                    conn.exec("COMMIT")?;
-                    Ok(hit)
-                }
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+                drop(ver);
+                let event = crate::audit::append_on(conn, "vault.rollback", session_id, &[name])?;
+                Ok((true, Some(event)))
+            })
         })?;
         self.db.tighten();
+        if let Some(event) = event {
+            audit.journal(&event);
+        }
         Ok(hit)
     }
 
@@ -259,34 +263,54 @@ impl VaultStore {
         })
     }
 
-    pub fn put_custom_provider(&self, p: &CustomProvider) -> anyhow::Result<()> {
+    pub fn put_custom_provider(&self, p: &CustomProvider, audit: &AuditLog) -> anyhow::Result<()> {
         let fields = serde_json::to_string(&fields_json(&p.fields)).context("fields json")?;
-        self.db.with(|conn| {
-            let stmt = conn.prepare(
-                "INSERT INTO custom_providers (name, title, fields) VALUES (?, ?, ?)
-                 ON CONFLICT(name) DO UPDATE SET title=excluded.title, fields=excluded.fields",
-            )?;
-            stmt.bind_text(1, &p.name)?;
-            stmt.bind_text(2, &p.title)?;
-            stmt.bind_text(3, &fields)?;
-            match stmt.step()? {
-                Step::Done => Ok(()),
-                Step::Row => Err(anyhow!("upsert returned a row")),
-            }
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    let stmt = conn.prepare(
+                        "INSERT INTO custom_providers (name, title, fields) VALUES (?, ?, ?)
+                         ON CONFLICT(name) DO UPDATE SET title=excluded.title, fields=excluded.fields",
+                    )?;
+                    stmt.bind_text(1, &p.name)?;
+                    stmt.bind_text(2, &p.title)?;
+                    stmt.bind_text(3, &fields)?;
+                    stmt.run()?;
+                }
+                crate::audit::append_on(conn, "provider.put", None, &[p.name.as_str()])
+            })
         })?;
         self.db.tighten();
+        audit.journal(&event);
         Ok(())
     }
 
-    pub fn delete_custom_provider(&self, name: &str) -> anyhow::Result<bool> {
-        let n = self.db.with(|conn| {
-            let stmt = conn.prepare("DELETE FROM custom_providers WHERE name = ?")?;
-            stmt.bind_text(1, name)?;
-            stmt.run()?;
-            Ok(conn.changes())
+    pub fn delete_custom_provider(&self, name: &str, audit: &AuditLog) -> anyhow::Result<bool> {
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    let stmt = conn.prepare("DELETE FROM custom_providers WHERE name = ?")?;
+                    stmt.bind_text(1, name)?;
+                    stmt.run()?;
+                }
+                if conn.changes() == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(crate::audit::append_on(
+                    conn,
+                    "provider.delete",
+                    None,
+                    &[name],
+                )?))
+            })
         })?;
         self.db.tighten();
-        Ok(n > 0)
+        if let Some(event) = event {
+            audit.journal(&event);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn sync_wraps(&self) {
@@ -433,77 +457,6 @@ pub(crate) fn has_forbidden(v: &Value) -> bool {
     }
 }
 
-pub(crate) fn last_audit_hash(db: &Db) -> anyhow::Result<String> {
-    db.with(|conn| {
-        let stmt = conn.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1")?;
-        match stmt.step()? {
-            Step::Row => Ok(stmt.text(0).unwrap_or_else(zero_hash)),
-            Step::Done => Ok(zero_hash()),
-        }
-    })
-}
-
-pub(crate) fn insert_audit(
-    db: &Db,
-    action: &str,
-    session_id: Option<&str>,
-    names_json: &str,
-    prev_hash: &str,
-    hash: &str,
-) -> anyhow::Result<()> {
-    db.with(|conn| {
-        let stmt = conn.prepare(
-            "INSERT INTO audit (action, session_id, names, prev_hash, hash) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        stmt.bind_text(1, action)?;
-        stmt.bind_opt(2, session_id)?;
-        stmt.bind_text(3, names_json)?;
-        stmt.bind_text(4, prev_hash)?;
-        stmt.bind_text(5, hash)?;
-        match stmt.step()? {
-            Step::Done => Ok(()),
-            Step::Row => Err(anyhow!("insert returned a row")),
-        }
-    })?;
-    db.tighten();
-    Ok(())
-}
-
-pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
-    db.with(|conn| {
-        let stmt = conn
-            .prepare("SELECT action, session_id, names, prev_hash, hash FROM audit ORDER BY seq")?;
-        let mut out = Vec::new();
-        loop {
-            match stmt.step()? {
-                Step::Done => break,
-                Step::Row => {
-                    out.push(AuditRow {
-                        action: stmt.text(0).unwrap_or_default(),
-                        session_id: stmt.text(1),
-                        names: stmt.text(2).unwrap_or_else(|| "[]".into()),
-                        prev_hash: stmt.text(3).unwrap_or_default(),
-                        hash: stmt.text(4).unwrap_or_default(),
-                    });
-                }
-            }
-        }
-        Ok(out)
-    })
-}
-
-pub(crate) struct AuditRow {
-    pub action: String,
-    pub session_id: Option<String>,
-    pub names: String,
-    pub prev_hash: String,
-    pub hash: String,
-}
-
-pub(crate) fn zero_hash() -> String {
-    "0".repeat(64)
-}
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/vault", get(get_vault).put(put_vault))
@@ -594,16 +547,13 @@ async fn put_vault(
             version: 0,
         });
     }
-    if state.vault.replace_entries(&entries).is_err() {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
-    }
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     if state
-        .audit
-        .record_names("vault.put", Some(&session.id), &name_refs)
+        .vault
+        .replace_entries(&entries, &state.audit, Some(&session.id), &name_refs)
         .is_err()
     {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
@@ -666,17 +616,11 @@ async fn post_rollback(
     if version < 1 {
         return json_status(StatusCode::BAD_REQUEST, "version");
     }
-    match state.vault.rollback(name, version) {
-        Ok(true) => {
-            if state
-                .audit
-                .record_names("vault.rollback", Some(&session.id), &[name])
-                .is_err()
-            {
-                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
-            }
-            json_value(StatusCode::OK, json!({ "ok": true }))
-        }
+    match state
+        .vault
+        .rollback(name, version, &state.audit, Some(&session.id))
+    {
+        Ok(true) => json_value(StatusCode::OK, json!({ "ok": true })),
         Ok(false) => json_status(StatusCode::NOT_FOUND, "version"),
         Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     }

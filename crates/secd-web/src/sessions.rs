@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::audit::AuditLog;
 use crate::db::{Db, RawConn, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
@@ -70,7 +71,11 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn open(dir: &std::path::Path) -> anyhow::Result<Self> {
-        Ok(Self { db: Db::open(dir)? })
+        Ok(Self::from_db(Db::open(dir)?))
+    }
+
+    pub(crate) fn from_db(db: Db) -> Self {
+        Self { db }
     }
 
     pub fn create_console(&self, email: &str) -> anyhow::Result<(String, String)> {
@@ -225,33 +230,45 @@ impl SessionStore {
         })
     }
 
-    pub fn revoke_id(&self, email: &str, id: &str) -> anyhow::Result<Revoke> {
-        self.db.with(|conn| {
-            let sel = conn.prepare("SELECT email, kind FROM sessions WHERE id = ?")?;
-            sel.bind_text(1, id)?;
-            let found = match sel.step()? {
-                Step::Done => None,
-                Step::Row => Some((
-                    sel.text(0).unwrap_or_default(),
-                    sel.text(1).unwrap_or_default(),
-                )),
-            };
-            drop(sel);
-            let Some((owner, kind)) = found else {
-                return Ok(Revoke::Unknown);
-            };
-            if owner != email {
-                return Ok(Revoke::Unknown);
-            }
-            let del = conn.prepare("DELETE FROM sessions WHERE id = ?")?;
-            del.bind_text(1, id)?;
-            del.run()?;
-            Ok(if SessionKind::parse(&kind) == Some(SessionKind::Console) {
-                Revoke::Console
-            } else {
-                Revoke::Other
+    pub fn revoke_id(&self, email: &str, id: &str, audit: &AuditLog) -> anyhow::Result<Revoke> {
+        let (revoked, event) = self.db.with(|conn| {
+            conn.immediate(|| {
+                let found = {
+                    let sel = conn.prepare("SELECT email, kind FROM sessions WHERE id = ?")?;
+                    sel.bind_text(1, id)?;
+                    match sel.step()? {
+                        Step::Done => None,
+                        Step::Row => Some((
+                            sel.text(0).unwrap_or_default(),
+                            sel.text(1).unwrap_or_default(),
+                        )),
+                    }
+                };
+                let Some((owner, kind)) = found else {
+                    return Ok((Revoke::Unknown, None));
+                };
+                if owner != email {
+                    return Ok((Revoke::Unknown, None));
+                }
+                {
+                    let del = conn.prepare("DELETE FROM sessions WHERE id = ?")?;
+                    del.bind_text(1, id)?;
+                    del.run()?;
+                }
+                let event = crate::audit::append_on(conn, "session.revoke", Some(id), &[])?;
+                let revoked = if SessionKind::parse(&kind) == Some(SessionKind::Console) {
+                    Revoke::Console
+                } else {
+                    Revoke::Other
+                };
+                Ok((revoked, Some(event)))
             })
-        })
+        })?;
+        self.db.tighten();
+        if let Some(event) = event {
+            audit.journal(&event);
+        }
+        Ok(revoked)
     }
 
     pub fn revoke_token(&self, token: &str) -> anyhow::Result<bool> {
@@ -262,6 +279,28 @@ impl SessionStore {
             del.run()?;
             Ok(conn.changes() > 0)
         })
+    }
+
+    pub fn revoke_token_with_audit(
+        &self,
+        token: &str,
+        session_id: &str,
+        audit: &AuditLog,
+    ) -> anyhow::Result<()> {
+        let hash = token_hash(token);
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    let del = conn.prepare("DELETE FROM sessions WHERE token_hash = ?")?;
+                    del.bind_text(1, &hash)?;
+                    del.run()?;
+                }
+                crate::audit::append_on(conn, "session.revoke", Some(session_id), &[])
+            })
+        })?;
+        self.db.tighten();
+        audit.journal(&event);
+        Ok(())
     }
 }
 
@@ -315,26 +354,15 @@ async fn revoke_session(
     let Some(current) = state.sessions.console_from_headers(&headers) else {
         return fail_auth();
     };
-    let revoked = match state.sessions.revoke_id(&current.email, &id) {
-        Ok(r) => r,
-        Err(_) => return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
-    };
-    match revoked {
-        Revoke::Unknown => json_status(StatusCode::NOT_FOUND, "not found"),
-        Revoke::Console => {
-            if state.audit.record("session.revoke", Some(&id)).is_err() {
-                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
-            }
+    match state.sessions.revoke_id(&current.email, &id, &state.audit) {
+        Ok(Revoke::Unknown) => json_status(StatusCode::NOT_FOUND, "not found"),
+        Ok(Revoke::Console) => {
             let mut res = json_value(StatusCode::OK, json!({"ok": true}));
             res.headers_mut().insert(header::SET_COOKIE, clear_cookie());
             res
         }
-        Revoke::Other => {
-            if state.audit.record("session.revoke", Some(&id)).is_err() {
-                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
-            }
-            json_value(StatusCode::OK, json!({"ok": true}))
-        }
+        Ok(Revoke::Other) => json_value(StatusCode::OK, json!({"ok": true})),
+        Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     }
 }
 
@@ -482,7 +510,8 @@ mod tests {
         );
     }
 
-    /// An audit insert that fails must fail the request it is recording.
+    /// An audit insert that fails must fail the request and leave the
+    /// session in place.
     #[test]
     fn T_AUDIT_INSERT_FAILS_REQUEST() {
         let dir = fresh_dir("audit-insert");
@@ -491,7 +520,7 @@ mod tests {
             .sessions
             .create_console("op@secd.test")
             .expect("console");
-        let (device_id, _device_token) = state
+        let (device_id, device_token) = state
             .sessions
             .create_device("op@secd.test", "testhost")
             .expect("device");
@@ -516,10 +545,14 @@ mod tests {
         .expect("break the audit insert");
 
         let res = block_on(revoke_session(
-            State(state),
+            State(state.clone()),
             Path(device_id),
             cookie(&console_token),
         ));
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            state.sessions.by_token(&device_token).is_some(),
+            "a failed audit must not delete the session"
+        );
     }
 }

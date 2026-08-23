@@ -13,10 +13,9 @@ use axum::Router;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::db::Db;
+use crate::db::{Db, RawConn, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
-use crate::vault::{insert_audit, last_audit_hash, list_audit, zero_hash};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AuditEvent {
@@ -40,7 +39,10 @@ pub struct AuditLog {
 
 impl AuditLog {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        let db = Db::open(dir)?;
+        Self::from_db(Db::open(dir)?, dir)
+    }
+
+    pub(crate) fn from_db(db: Db, dir: &Path) -> anyhow::Result<Self> {
         let path = dir.join("audit.jsonl");
         // A read that fails is not an empty chain: importing the jsonl on top
         // of rows we could not see would append the whole log twice.
@@ -61,10 +63,12 @@ impl AuditLog {
         })
     }
 
-    /// Records one event, or fails. This is the security record of a secrets
-    /// manager: an event that cannot be written must take the request that
-    /// caused it down with it, and a chain that cannot be read must not be
-    /// silently started again from zero.
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// Sqlite is the chain: a failed INSERT or an unreadable head fails the
+    /// record. jsonl is a replica written after COMMIT.
     pub fn record(&self, action: &str, session_id: Option<&str>) -> anyhow::Result<()> {
         self.record_names(action, session_id, &[])
     }
@@ -75,29 +79,31 @@ impl AuditLog {
         session_id: Option<&str>,
         names: &[&str],
     ) -> anyhow::Result<()> {
-        let names_owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-        let names_json = serde_json::to_string(&names_owned).context("audit names json")?;
-        let prev = last_audit_hash(&self.db).context("read the audit head")?;
-        let hash = event_hash(&prev, action, session_id, &names_json);
-        insert_audit(&self.db, action, session_id, &names_json, &prev, &hash)
+        let event = self
+            .db
+            .with(|conn| conn.immediate(|| append_on(conn, action, session_id, names)))
             .context("append to the audit chain")?;
-        let event = AuditEvent {
-            action: action.to_string(),
-            session_id: session_id.map(str::to_string),
-            names: names_owned,
-            prev,
-            hash,
-        };
-        let line = serde_json::to_string(&event).context("audit event json")?;
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&self.path)
-            .context("open the audit journal")?;
-        writeln!(f, "{line}").context("append to the audit journal")?;
-        lock(&self.events).push(event);
+        self.db.tighten();
+        self.journal(&event);
         Ok(())
+    }
+
+    /// Sqlite is the chain. A journal miss must not fail the request or
+    /// roll back a committed row.
+    pub(crate) fn journal(&self, event: &AuditEvent) {
+        if let Ok(line) = serde_json::to_string(event) {
+            if let Ok(mut f) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&self.path)
+            {
+                if writeln!(f, "{line}").is_ok() {
+                    let _ = f.sync_all();
+                }
+            }
+        }
+        lock(&self.events).push(event.clone());
     }
 
     pub fn events(&self) -> Vec<AuditEvent> {
@@ -112,7 +118,7 @@ impl AuditLog {
     }
 }
 
-fn row_to_event(row: &crate::vault::AuditRow) -> AuditEvent {
+fn row_to_event(row: &AuditRow) -> AuditEvent {
     let names: Vec<String> = serde_json::from_str(&row.names).unwrap_or_default();
     AuditEvent {
         action: row.action.clone(),
@@ -150,14 +156,16 @@ fn import_jsonl(path: &Path, db: &Db) -> anyhow::Result<Vec<AuditEvent>> {
             .unwrap_or_default();
         let names_json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".into());
         let hash = event_hash(&prev, &action, session_id.as_deref(), &names_json);
-        insert_audit(
-            db,
-            &action,
-            session_id.as_deref(),
-            &names_json,
-            &prev,
-            &hash,
-        )?;
+        db.with(|conn| {
+            insert_on(
+                conn,
+                &action,
+                session_id.as_deref(),
+                &names_json,
+                &prev,
+                &hash,
+            )
+        })?;
         events.push(AuditEvent {
             action,
             session_id,
@@ -170,7 +178,7 @@ fn import_jsonl(path: &Path, db: &Db) -> anyhow::Result<Vec<AuditEvent>> {
     Ok(events)
 }
 
-fn verify_rows(rows: Vec<crate::vault::AuditRow>) -> bool {
+fn verify_rows(rows: Vec<AuditRow>) -> bool {
     let mut prev = zero_hash();
     for row in rows {
         if row.prev_hash != prev {
@@ -254,6 +262,96 @@ pub(crate) fn event_hash(
     hex::encode(sha256(&buf))
 }
 
+/// SELECT the head and INSERT the next row. Caller holds BEGIN IMMEDIATE.
+/// The hash is computed from the head read here, not from a previous with().
+pub(crate) fn append_on(
+    conn: &RawConn,
+    action: &str,
+    session_id: Option<&str>,
+    names: &[&str],
+) -> anyhow::Result<AuditEvent> {
+    let names_owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+    let names_json = serde_json::to_string(&names_owned).context("audit names json")?;
+    let prev = head_hash(conn).context("read the audit head")?;
+    let hash = event_hash(&prev, action, session_id, &names_json);
+    insert_on(conn, action, session_id, &names_json, &prev, &hash)
+        .context("append to the audit chain")?;
+    Ok(AuditEvent {
+        action: action.to_string(),
+        session_id: session_id.map(str::to_string),
+        names: names_owned,
+        prev,
+        hash,
+    })
+}
+
+fn head_hash(conn: &RawConn) -> anyhow::Result<String> {
+    let stmt = conn.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1")?;
+    match stmt.step()? {
+        Step::Row => Ok(stmt.text(0).unwrap_or_else(zero_hash)),
+        Step::Done => Ok(zero_hash()),
+    }
+}
+
+fn insert_on(
+    conn: &RawConn,
+    action: &str,
+    session_id: Option<&str>,
+    names_json: &str,
+    prev_hash: &str,
+    hash: &str,
+) -> anyhow::Result<()> {
+    let stmt = conn.prepare(
+        "INSERT INTO audit (action, session_id, names, prev_hash, hash) VALUES (?, ?, ?, ?, ?)",
+    )?;
+    stmt.bind_text(1, action)?;
+    stmt.bind_opt(2, session_id)?;
+    stmt.bind_text(3, names_json)?;
+    stmt.bind_text(4, prev_hash)?;
+    stmt.bind_text(5, hash)?;
+    stmt.run()
+}
+
+#[cfg(test)]
+pub(crate) fn last_audit_hash(db: &Db) -> anyhow::Result<String> {
+    db.with(head_hash)
+}
+
+pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
+    db.with(|conn| {
+        let stmt = conn
+            .prepare("SELECT action, session_id, names, prev_hash, hash FROM audit ORDER BY seq")?;
+        let mut out = Vec::new();
+        loop {
+            match stmt.step()? {
+                Step::Done => break,
+                Step::Row => {
+                    out.push(AuditRow {
+                        action: stmt.text(0).unwrap_or_default(),
+                        session_id: stmt.text(1),
+                        names: stmt.text(2).unwrap_or_else(|| "[]".into()),
+                        prev_hash: stmt.text(3).unwrap_or_default(),
+                        hash: stmt.text(4).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
+pub(crate) struct AuditRow {
+    pub action: String,
+    pub session_id: Option<String>,
+    pub names: String,
+    pub prev_hash: String,
+    pub hash: String,
+}
+
+pub(crate) fn zero_hash() -> String {
+    "0".repeat(64)
+}
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/audit", get(get_audit))
 }
@@ -262,7 +360,7 @@ async fn get_audit(State(state): State<AppState>, headers: HeaderMap) -> Respons
     if state.sessions.vault_from_headers(&headers).is_none() {
         return fail_auth();
     }
-    let rows = match list_audit(state.vault.db()) {
+    let rows = match list_audit(state.audit.db()) {
         Ok(r) => r,
         Err(_) => return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     };

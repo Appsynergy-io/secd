@@ -1,5 +1,5 @@
 //! The one sqlite handle. Vault entries, the audit chain and sessions all
-//! live in `secd.db`; nothing in this crate opens a second store.
+//! live in `secd.db`; AppState::open clones this Arc into each store.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
@@ -111,6 +111,22 @@ impl RawConn {
                 return "sqlite error".into();
             }
             CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
+
+    /// One BEGIN IMMEDIATE; ROLLBACK if `f` fails so a later statement
+    /// cannot leave a partial mutation.
+    pub(crate) fn immediate<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        self.exec("BEGIN IMMEDIATE")?;
+        match f() {
+            Ok(v) => {
+                self.exec("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.exec("ROLLBACK");
+                Err(e)
+            }
         }
     }
 
