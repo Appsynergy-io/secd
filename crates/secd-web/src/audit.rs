@@ -4,6 +4,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -12,9 +13,10 @@ use axum::Router;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::db::Db;
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
-use crate::vault::{insert_audit, last_audit_hash, list_audit, zero_hash, Db};
+use crate::vault::{insert_audit, last_audit_hash, list_audit, zero_hash};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AuditEvent {
@@ -40,12 +42,13 @@ impl AuditLog {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         let db = Db::open(dir)?;
         let path = dir.join("audit.jsonl");
-        let mut events = Vec::new();
-        if let Ok(rows) = list_audit(&db) {
-            for row in &rows {
-                events.push(row_to_event(row));
-            }
-        }
+        // A read that fails is not an empty chain: importing the jsonl on top
+        // of rows we could not see would append the whole log twice.
+        let mut events: Vec<AuditEvent> = list_audit(&db)
+            .context("read the audit chain")?
+            .iter()
+            .map(row_to_event)
+            .collect();
         if events.is_empty() && path.exists() {
             if let Ok(imported) = import_jsonl(&path, &db) {
                 events = imported;
@@ -58,16 +61,26 @@ impl AuditLog {
         })
     }
 
-    pub fn record(&self, action: &str, session_id: Option<&str>) {
-        self.record_names(action, session_id, &[]);
+    /// Records one event, or fails. This is the security record of a secrets
+    /// manager: an event that cannot be written must take the request that
+    /// caused it down with it, and a chain that cannot be read must not be
+    /// silently started again from zero.
+    pub fn record(&self, action: &str, session_id: Option<&str>) -> anyhow::Result<()> {
+        self.record_names(action, session_id, &[])
     }
 
-    pub fn record_names(&self, action: &str, session_id: Option<&str>, names: &[&str]) {
+    pub fn record_names(
+        &self,
+        action: &str,
+        session_id: Option<&str>,
+        names: &[&str],
+    ) -> anyhow::Result<()> {
         let names_owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-        let names_json = serde_json::to_string(&names_owned).unwrap_or_else(|_| "[]".into());
-        let prev = last_audit_hash(&self.db).unwrap_or_else(|_| zero_hash());
+        let names_json = serde_json::to_string(&names_owned).context("audit names json")?;
+        let prev = last_audit_hash(&self.db).context("read the audit head")?;
         let hash = event_hash(&prev, action, session_id, &names_json);
-        let _ = insert_audit(&self.db, action, session_id, &names_json, &prev, &hash);
+        insert_audit(&self.db, action, session_id, &names_json, &prev, &hash)
+            .context("append to the audit chain")?;
         let event = AuditEvent {
             action: action.to_string(),
             session_id: session_id.map(str::to_string),
@@ -75,17 +88,16 @@ impl AuditLog {
             prev,
             hash,
         };
-        if let Ok(line) = serde_json::to_string(&event) {
-            if let Ok(mut f) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(&self.path)
-            {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+        let line = serde_json::to_string(&event).context("audit event json")?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&self.path)
+            .context("open the audit journal")?;
+        writeln!(f, "{line}").context("append to the audit journal")?;
         lock(&self.events).push(event);
+        Ok(())
     }
 
     pub fn events(&self) -> Vec<AuditEvent> {
@@ -93,7 +105,10 @@ impl AuditLog {
     }
 
     pub fn verify(&self) -> bool {
-        verify_rows(list_audit(&self.db).unwrap_or_default()) && verify_jsonl(&self.path)
+        let Ok(rows) = list_audit(&self.db) else {
+            return false;
+        };
+        verify_rows(rows) && verify_jsonl(&self.path)
     }
 }
 
@@ -271,7 +286,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn sha256(input: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -355,4 +370,74 @@ fn sha256(input: &[u8]) -> [u8; 32] {
         out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use crate::db::Step;
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "secd-u-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("test dir");
+        p
+    }
+
+    fn audit_rows(db: &Db) -> i64 {
+        db.with(|conn| {
+            let stmt = conn.prepare("SELECT COUNT(*) FROM audit")?;
+            match stmt.step()? {
+                Step::Row => Ok(stmt.i64_at(0)),
+                Step::Done => Ok(0),
+            }
+        })
+        .expect("count")
+    }
+
+    /// A head the chain cannot read is an error, never a chain that starts
+    /// again from zero.
+    #[test]
+    fn T_AUDIT_READ_FAILS_CLOSED() {
+        let dir = fresh_dir("audit-read");
+        let log = AuditLog::open(&dir).expect("open");
+        log.record("session.revoke", Some("first")).expect("record");
+
+        // Inserts still land; the head cannot be read, because the ordering
+        // column the read names is gone.
+        let db = Db::open(&dir).expect("db");
+        db.with(|conn| {
+            conn.exec(
+                "DROP TABLE audit;
+                 CREATE TABLE audit (
+                   action TEXT NOT NULL,
+                   session_id TEXT,
+                   names TEXT NOT NULL,
+                   prev_hash TEXT NOT NULL,
+                   hash TEXT NOT NULL
+                 );",
+            )
+        })
+        .expect("break the audit read");
+
+        assert!(
+            last_audit_hash(&db).is_err(),
+            "an unreadable chain must not report a head"
+        );
+        assert!(
+            log.record("session.revoke", Some("second")).is_err(),
+            "a failed head read must fail the record"
+        );
+        assert_eq!(
+            audit_rows(&db),
+            0,
+            "a failed head read must not restart the chain from zero"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -13,12 +11,13 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::db::{Db, RawConn, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
 
 pub const COOKIE_NAME: &str = "__Host-secd";
-const CONSOLE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
-const DEVICE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const CONSOLE_TTL: i64 = 12 * 60 * 60;
+const DEVICE_TTL: i64 = 30 * 24 * 60 * 60;
 const COOKIE_MAX_AGE: i64 = 12 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +33,22 @@ impl SessionKind {
             Self::Device => "device",
         }
     }
+
+    /// An unknown kind is no kind: a row we cannot classify is not a session.
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "console" => Some(Self::Console),
+            "device" => Some(Self::Device),
+            _ => None,
+        }
+    }
+
+    fn ttl(self) -> i64 {
+        match self {
+            Self::Console => CONSOLE_TTL,
+            Self::Device => DEVICE_TTL,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -46,29 +61,23 @@ pub struct Session {
     pub last_seen: SystemTime,
 }
 
+/// Sessions live in the sqlite store beside the vault and audit tables, so a
+/// restart signs nobody out and a revocation stays revoked.
 #[derive(Clone)]
 pub struct SessionStore {
-    inner: Arc<Mutex<HashMap<String, Session>>>,
-}
-
-impl Default for SessionStore {
-    fn default() -> Self {
-        Self::new()
-    }
+    db: Db,
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-        }
+    pub fn open(dir: &std::path::Path) -> anyhow::Result<Self> {
+        Ok(Self { db: Db::open(dir)? })
     }
 
-    pub fn create_console(&self, email: &str) -> (String, String) {
+    pub fn create_console(&self, email: &str) -> anyhow::Result<(String, String)> {
         self.create(email, SessionKind::Console, "This browser")
     }
 
-    pub fn create_device(&self, email: &str, hostname: &str) -> (String, String) {
+    pub fn create_device(&self, email: &str, hostname: &str) -> anyhow::Result<(String, String)> {
         let label = if hostname.is_empty() {
             "device"
         } else {
@@ -77,34 +86,82 @@ impl SessionStore {
         self.create(email, SessionKind::Device, label)
     }
 
-    fn create(&self, email: &str, kind: SessionKind, label: &str) -> (String, String) {
-        let now = SystemTime::now();
+    fn create(
+        &self,
+        email: &str,
+        kind: SessionKind,
+        label: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let now = unix_now();
         let id = Uuid::new_v4().to_string();
         let token = random_token();
-        let session = Session {
-            id: id.clone(),
-            email: email.to_string(),
-            kind,
-            label: label.to_string(),
-            created: now,
-            last_seen: now,
-        };
-        lock(&self.inner).insert(token.clone(), session);
-        (id, token)
+        let hash = token_hash(&token);
+        let expires = now.saturating_add(kind.ttl());
+        self.db.with(|conn| {
+            let stmt = conn.prepare(
+                "INSERT INTO sessions \
+                 (token_hash, id, email, kind, label, created, last_seen, expires) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+            stmt.bind_text(1, &hash)?;
+            stmt.bind_text(2, &id)?;
+            stmt.bind_text(3, email)?;
+            stmt.bind_text(4, kind.as_str())?;
+            stmt.bind_text(5, label)?;
+            stmt.bind_i64(6, now)?;
+            stmt.bind_i64(7, now)?;
+            stmt.bind_i64(8, expires)?;
+            stmt.run()
+        })?;
+        self.db.tighten();
+        Ok((id, token))
     }
 
+    /// A store that cannot answer denies: every caller treats `None` as
+    /// unauthenticated.
     pub fn by_token(&self, token: &str) -> Option<Session> {
-        let now = SystemTime::now();
-        let mut map = lock(&self.inner);
-        let s = map.get(token)?;
-        if expired(s, now) {
-            map.remove(token);
-            return None;
-        }
-        if let Some(s) = map.get_mut(token) {
-            s.last_seen = now;
-        }
-        map.get(token).cloned()
+        self.lookup(token).ok().flatten()
+    }
+
+    fn lookup(&self, token: &str) -> anyhow::Result<Option<Session>> {
+        let hash = token_hash(token);
+        let now = unix_now();
+        self.db.with(|conn| {
+            sweep(conn, now)?;
+            let sel = conn.prepare(
+                "SELECT id, email, kind, label, created FROM sessions WHERE token_hash = ?",
+            )?;
+            sel.bind_text(1, &hash)?;
+            let row = match sel.step()? {
+                Step::Done => None,
+                Step::Row => Some((
+                    sel.text(0).unwrap_or_default(),
+                    sel.text(1).unwrap_or_default(),
+                    sel.text(2).unwrap_or_default(),
+                    sel.text(3).unwrap_or_default(),
+                    sel.i64_at(4),
+                )),
+            };
+            drop(sel);
+            let Some((id, email, kind, label, created)) = row else {
+                return Ok(None);
+            };
+            let Some(kind) = SessionKind::parse(&kind) else {
+                return Ok(None);
+            };
+            let touch = conn.prepare("UPDATE sessions SET last_seen = ? WHERE token_hash = ?")?;
+            touch.bind_i64(1, now)?;
+            touch.bind_text(2, &hash)?;
+            touch.run()?;
+            Ok(Some(Session {
+                id,
+                email,
+                kind,
+                label,
+                created: from_unix(created),
+                last_seen: from_unix(now),
+            }))
+        })
     }
 
     pub fn console_from_headers(&self, headers: &HeaderMap) -> Option<Session> {
@@ -135,31 +192,76 @@ impl SessionStore {
         Some(s)
     }
 
-    pub fn list_for(&self, email: &str) -> Vec<Session> {
-        let now = SystemTime::now();
-        let mut map = lock(&self.inner);
-        map.retain(|_, s| !expired(s, now));
-        map.values().filter(|s| s.email == email).cloned().collect()
+    pub fn list_for(&self, email: &str) -> anyhow::Result<Vec<Session>> {
+        let now = unix_now();
+        self.db.with(|conn| {
+            sweep(conn, now)?;
+            let stmt = conn.prepare(
+                "SELECT id, kind, label, created, last_seen FROM sessions \
+                 WHERE email = ? ORDER BY created",
+            )?;
+            stmt.bind_text(1, email)?;
+            let mut out = Vec::new();
+            loop {
+                match stmt.step()? {
+                    Step::Done => break,
+                    Step::Row => {
+                        let Some(kind) = SessionKind::parse(&stmt.text(1).unwrap_or_default())
+                        else {
+                            continue;
+                        };
+                        out.push(Session {
+                            id: stmt.text(0).unwrap_or_default(),
+                            email: email.to_string(),
+                            kind,
+                            label: stmt.text(2).unwrap_or_default(),
+                            created: from_unix(stmt.i64_at(3)),
+                            last_seen: from_unix(stmt.i64_at(4)),
+                        });
+                    }
+                }
+            }
+            Ok(out)
+        })
     }
 
-    pub fn revoke_id(&self, email: &str, id: &str) -> Revoke {
-        let mut map = lock(&self.inner);
-        let Some(found) = map.values().find(|s| s.id == id).cloned() else {
-            return Revoke::Unknown;
-        };
-        if found.email != email {
-            return Revoke::Unknown;
-        }
-        map.retain(|_, s| s.id != id);
-        if found.kind == SessionKind::Console {
-            Revoke::Console
-        } else {
-            Revoke::Other
-        }
+    pub fn revoke_id(&self, email: &str, id: &str) -> anyhow::Result<Revoke> {
+        self.db.with(|conn| {
+            let sel = conn.prepare("SELECT email, kind FROM sessions WHERE id = ?")?;
+            sel.bind_text(1, id)?;
+            let found = match sel.step()? {
+                Step::Done => None,
+                Step::Row => Some((
+                    sel.text(0).unwrap_or_default(),
+                    sel.text(1).unwrap_or_default(),
+                )),
+            };
+            drop(sel);
+            let Some((owner, kind)) = found else {
+                return Ok(Revoke::Unknown);
+            };
+            if owner != email {
+                return Ok(Revoke::Unknown);
+            }
+            let del = conn.prepare("DELETE FROM sessions WHERE id = ?")?;
+            del.bind_text(1, id)?;
+            del.run()?;
+            Ok(if SessionKind::parse(&kind) == Some(SessionKind::Console) {
+                Revoke::Console
+            } else {
+                Revoke::Other
+            })
+        })
     }
 
-    pub fn revoke_token(&self, token: &str) -> bool {
-        lock(&self.inner).remove(token).is_some()
+    pub fn revoke_token(&self, token: &str) -> anyhow::Result<bool> {
+        let hash = token_hash(token);
+        self.db.with(|conn| {
+            let del = conn.prepare("DELETE FROM sessions WHERE token_hash = ?")?;
+            del.bind_text(1, &hash)?;
+            del.run()?;
+            Ok(conn.changes() > 0)
+        })
     }
 }
 
@@ -167,6 +269,13 @@ pub enum Revoke {
     Unknown,
     Console,
     Other,
+}
+
+/// Expiry is a stored deadline, so it outlives the process that set it.
+fn sweep(conn: &RawConn, now: i64) -> anyhow::Result<()> {
+    let del = conn.prepare("DELETE FROM sessions WHERE expires <= ?")?;
+    del.bind_i64(1, now)?;
+    del.run()
 }
 
 pub fn router() -> Router<AppState> {
@@ -179,9 +288,10 @@ async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Res
     let Some(current) = state.sessions.console_from_headers(&headers) else {
         return fail_auth();
     };
-    let rows: Vec<_> = state
-        .sessions
-        .list_for(&current.email)
+    let Ok(sessions) = state.sessions.list_for(&current.email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
+    let rows: Vec<_> = sessions
         .into_iter()
         .map(|s| {
             json!({
@@ -205,16 +315,24 @@ async fn revoke_session(
     let Some(current) = state.sessions.console_from_headers(&headers) else {
         return fail_auth();
     };
-    match state.sessions.revoke_id(&current.email, &id) {
+    let revoked = match state.sessions.revoke_id(&current.email, &id) {
+        Ok(r) => r,
+        Err(_) => return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+    };
+    match revoked {
         Revoke::Unknown => json_status(StatusCode::NOT_FOUND, "not found"),
         Revoke::Console => {
-            state.audit.record("session.revoke", Some(&id));
+            if state.audit.record("session.revoke", Some(&id)).is_err() {
+                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+            }
             let mut res = json_value(StatusCode::OK, json!({"ok": true}));
             res.headers_mut().insert(header::SET_COOKIE, clear_cookie());
             res
         }
         Revoke::Other => {
-            state.audit.record("session.revoke", Some(&id));
+            if state.audit.record("session.revoke", Some(&id)).is_err() {
+                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+            }
             json_value(StatusCode::OK, json!({"ok": true}))
         }
     }
@@ -260,14 +378,15 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
     Some(rest.to_string())
 }
 
-fn expired(s: &Session, now: SystemTime) -> bool {
-    let ttl = match s.kind {
-        SessionKind::Console => CONSOLE_TTL,
-        SessionKind::Device => DEVICE_TTL,
-    };
-    now.duration_since(s.created)
-        .map(|d| d > ttl)
-        .unwrap_or(true)
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn from_unix(secs: i64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs.max(0) as u64)
 }
 
 fn rfc3339(t: SystemTime) -> String {
@@ -284,12 +403,123 @@ fn random_token() -> String {
     hex::encode(b)
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+/// The store holds the hash, never the bearer token: reading the database
+/// yields nothing that can be presented as a session.
+fn token_hash(token: &str) -> String {
+    hex::encode(crate::audit::sha256(token.as_bytes()))
 }
 
 pub fn with_cookie(mut res: Response, token: &str) -> Response {
     res.headers_mut()
         .insert(header::SET_COOKIE, set_cookie(token));
     res
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fresh_dir(tag: &str) -> Dir {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("secd-u-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("test dir");
+        Dir(p)
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(f)
+    }
+
+    fn cookie(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{COOKIE_NAME}={token}")).expect("cookie"),
+        );
+        h
+    }
+
+    /// A deadline written before the restart is still a deadline after it.
+    #[test]
+    fn T_SESS_EXPIRY_PERSIST() {
+        let dir = fresh_dir("expiry");
+        let store = SessionStore::open(&dir.0).expect("open");
+        let (id, token) = store.create_console("op@secd.test").expect("create");
+        assert!(store.by_token(&token).is_some(), "fresh session is live");
+
+        let db = Db::open(&dir.0).expect("db");
+        db.with(|conn| {
+            let stmt = conn.prepare("UPDATE sessions SET expires = 1 WHERE id = ?")?;
+            stmt.bind_text(1, &id)?;
+            stmt.run()
+        })
+        .expect("age the session");
+        drop(store);
+
+        let reopened = SessionStore::open(&dir.0).expect("reopen");
+        assert!(
+            reopened.by_token(&token).is_none(),
+            "an expired session must not survive a restart"
+        );
+    }
+
+    /// An audit insert that fails must fail the request it is recording.
+    #[test]
+    fn T_AUDIT_INSERT_FAILS_REQUEST() {
+        let dir = fresh_dir("audit-insert");
+        let state = AppState::open(&dir.0).expect("state");
+        let (_console_id, console_token) = state
+            .sessions
+            .create_console("op@secd.test")
+            .expect("console");
+        let (device_id, _device_token) = state
+            .sessions
+            .create_device("op@secd.test", "testhost")
+            .expect("device");
+
+        // Reads still answer; the insert cannot, because `blocked` has no
+        // default and the insert does not name it.
+        let db = Db::open(&dir.0).expect("db");
+        db.with(|conn| {
+            conn.exec(
+                "DROP TABLE audit;
+                 CREATE TABLE audit (
+                   seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                   action TEXT NOT NULL,
+                   session_id TEXT,
+                   names TEXT NOT NULL,
+                   prev_hash TEXT NOT NULL,
+                   hash TEXT NOT NULL,
+                   blocked TEXT NOT NULL
+                 );",
+            )
+        })
+        .expect("break the audit insert");
+
+        let res = block_on(revoke_session(
+            State(state),
+            Path(device_id),
+            cookie(&console_token),
+        ));
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

@@ -150,7 +150,10 @@ impl Harness {
         fs::create_dir_all(&data).expect("data");
 
         let state = AppState::open(&data).expect("appstate");
-        let (_id, token) = state.sessions.create_device("t7@secd.test", "t7host");
+        let (_id, token) = state
+            .sessions
+            .create_device("t7@secd.test", "t7host")
+            .expect("device session");
         let mut dek = [0u8; 32];
         File::open("/dev/urandom")
             .expect("urandom")

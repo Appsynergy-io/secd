@@ -43,6 +43,15 @@ fn fresh() -> H {
     }
 }
 
+impl H {
+    /// A second store over the same directory: what a pod restart leaves
+    /// behind, since nothing about a session lives in the old process.
+    fn restart(&self) -> Router {
+        let state = AppState::open(&self.dir).expect("reopen");
+        secd_web::app(state)
+    }
+}
+
 fn block_on<F: Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -374,7 +383,11 @@ fn T_SESS_REVOKE_FOREIGN() {
             passkeys: vec![],
         };
         h.state.users.put(user_b).expect("put b");
-        let (_id_b, token_b) = h.state.sessions.create_console("b@secd.test");
+        let (_id_b, token_b) = h
+            .state
+            .sessions
+            .create_console("b@secd.test")
+            .expect("console session");
         let (_, list_b) = get_json(&h.app, "/api/v1/sessions", Some(&token_b), None).await;
         let id_b = list_b["sessions"]
             .as_array()
@@ -432,5 +445,82 @@ fn T_SESS_AUDIT() {
             let v: Value = serde_json::from_str(line).expect("audit line");
             assert!(v.get("token").is_none());
         }
+    });
+}
+
+#[test]
+fn T_SESS_PERSIST_RESTART() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h, "op@secd.test").await;
+        let restarted = h.restart();
+        let (s, v) = get_json(&restarted, "/api/session", Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["email"], "op@secd.test");
+    });
+}
+
+#[test]
+fn T_DEV_PERSIST_RESTART() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h, "op@secd.test").await;
+        let (_, token) = approve_device(&h, &cookie).await;
+        let restarted = h.restart();
+        let (s, _, _) = exchange(
+            &restarted,
+            Method::GET,
+            "/api/v1/vault",
+            None,
+            None,
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    });
+}
+
+#[test]
+fn T_SESS_REVOKE_PERSIST() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h, "op@secd.test").await;
+        let (_, token) = approve_device(&h, &cookie).await;
+        let (_, list) = get_json(&h.app, "/api/v1/sessions", Some(&cookie), None).await;
+        let device_id = list["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .find(|r| r["kind"] == "device")
+            .and_then(|r| r["id"].as_str())
+            .expect("device id")
+            .to_string();
+        let (s, _, _) = exchange(
+            &h.app,
+            Method::DELETE,
+            &format!("/api/v1/sessions/{device_id}"),
+            None,
+            None,
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        let restarted = h.restart();
+        let (s, _, _) = exchange(
+            &restarted,
+            Method::GET,
+            "/api/v1/vault",
+            None,
+            None,
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "a revoked session came back");
+        let (s, _) = get_json(&restarted, "/api/session", Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK, "the console session was not revoked");
     });
 }

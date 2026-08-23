@@ -30,7 +30,7 @@ impl AppState {
             pending: Pending::new(),
             devices: DevicePending::new(),
             users: UserStore::open(&db)?,
-            sessions: SessionStore::new(),
+            sessions: SessionStore::open(&db)?,
             vault: VaultStore::open(&db)?,
             audit: AuditLog::open(&db)?,
             db,

@@ -175,7 +175,9 @@ async fn approve(
         return json_status(StatusCode::BAD_REQUEST, "sealed_dek");
     }
     let hostname = d.hostname.clone();
-    let (_id, token) = state.sessions.create_device(&session.email, &hostname);
+    let Ok((_id, token)) = state.sessions.create_device(&session.email, &hostname) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     d.approved = Some(Approved {
         token,
         sealed_dek: body.sealed_dek,
@@ -206,9 +208,13 @@ async fn revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return fail_auth();
     };
     if let Some(token) = crate::sessions::bearer_token(&headers) {
-        state.sessions.revoke_token(&token);
+        if state.sessions.revoke_token(&token).is_err() {
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+        }
     }
-    state.audit.record("session.revoke", Some(&s.id));
+    if state.audit.record("session.revoke", Some(&s.id)).is_err() {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+    }
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
 

@@ -64,9 +64,13 @@ async fn put_provider(
     if state.vault.put_custom_provider(&provider).is_err() {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
-    state
+    if state
         .audit
-        .record_names("provider.put", None, &[provider.name.as_str()]);
+        .record_names("provider.put", None, &[provider.name.as_str()])
+        .is_err()
+    {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+    }
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
 
@@ -83,9 +87,13 @@ async fn delete_provider(
     }
     match state.vault.delete_custom_provider(&name) {
         Ok(true) => {
-            state
+            if state
                 .audit
-                .record_names("provider.delete", None, &[name.as_str()]);
+                .record_names("provider.delete", None, &[name.as_str()])
+                .is_err()
+            {
+                return json_status(StatusCode::INTERNAL_SERVER_ERROR, "audit");
+            }
             json_value(StatusCode::OK, json!({ "ok": true }))
         }
         Ok(false) => json_status(StatusCode::NOT_FOUND, "not found"),
