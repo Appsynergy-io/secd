@@ -330,8 +330,7 @@ impl VaultStore {
 
     fn replace_wraps(&self, rows: &[WrapRow]) -> anyhow::Result<()> {
         self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
+            conn.immediate(|| {
                 conn.exec("DELETE FROM wraps")?;
                 let stmt = conn.prepare(
                     "INSERT INTO wraps (factor, cred_id, salt, blob) VALUES (?, ?, ?, ?)",
@@ -348,14 +347,7 @@ impl VaultStore {
                     }
                 }
                 Ok(())
-            })();
-            match tx {
-                Ok(()) => conn.exec("COMMIT"),
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+            })
         })
     }
 }
