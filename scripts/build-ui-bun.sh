@@ -39,5 +39,8 @@ bun build ./index.html \
   --splitting \
   --entry-naming "[name].[ext]" \
   --chunk-naming "[name]-[hash].[ext]" \
-  --asset-naming "[name].[ext]"
+  --asset-naming "[name].[ext]" \
+  --external="*.woff2"
+mkdir -p dist/fonts
+cp -a fonts/*.woff2 fonts/OFL.txt dist/fonts/
 echo "build-ui-bun: ui/dist"

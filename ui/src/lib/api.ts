@@ -9,6 +9,20 @@ export const REMEMBER_DAYS = 30;
 export const NO_DEK_SENTENCE =
   "This browser holds no vault key. Sign out and sign in again, then retry.";
 export const NO_EPH_SENTENCE = "Open the approval link printed by the secd CLI.";
+export const LAST_FACTOR_SENTENCE = "At least one factor must remain.";
+
+export type LayoutMode = "list-only" | "list-inspector";
+
+export function layoutMode(widthPx: number): LayoutMode {
+  return widthPx >= BREAKPOINT_PX ? "list-inspector" : "list-only";
+}
+
+export function removePasskeyEnabled(
+  passkeyCount: number,
+  hasPassword: boolean,
+): boolean {
+  return !(passkeyCount <= 1 && !hasPassword);
+}
 
 export function startUrl(): string {
   return "/api/auth/start";

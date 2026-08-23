@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build ./index.html --outdir dist --target browser --production --sourcemap=none --splitting --entry-naming [name].[ext] --chunk-naming [name]-[hash].[ext] --asset-naming [name].[ext]",
+    "build": "bun build ./index.html --outdir dist --target browser --production --sourcemap=none --splitting --entry-naming [name].[ext] --chunk-naming [name]-[hash].[ext] --asset-naming [name].[ext] --external=*.woff2",
     "check": "tsc --noEmit",
     "test": "bun test"
   },

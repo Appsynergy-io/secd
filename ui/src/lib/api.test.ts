@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BREAKPOINT_PX,
+  LAST_FACTOR_SENTENCE,
   deviceQuery,
   errorMessage,
+  layoutMode,
   passkeyDeletePath,
   queryParam,
+  removePasskeyEnabled,
   sessionRevokeDelete,
   sessionRevokePath,
   startUrl,
@@ -43,5 +47,18 @@ describe("api", () => {
     expect(errorMessage({ error: "prf" })).toBe("prf");
     expect(errorMessage({ ok: true })).toBeUndefined();
     expect(errorMessage(null)).toBeUndefined();
+  });
+
+  test("layout is list-inspector at 900px", () => {
+    expect(BREAKPOINT_PX).toBe(900);
+    expect(layoutMode(899)).toBe("list-only");
+    expect(layoutMode(900)).toBe("list-inspector");
+  });
+
+  test("the last factor cannot be removed", () => {
+    expect(removePasskeyEnabled(1, false)).toBe(false);
+    expect(removePasskeyEnabled(1, true)).toBe(true);
+    expect(removePasskeyEnabled(2, false)).toBe(true);
+    expect(LAST_FACTOR_SENTENCE).toBe("At least one factor must remain.");
   });
 });

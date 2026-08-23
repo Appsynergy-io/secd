@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { hrefFor, initialPath, resolveGate, screenFromPath, SCREENS } from "./main.ts";
+import {
+  dekFactors,
+  hrefFor,
+  initialPath,
+  lastFactor,
+  resolveGate,
+  screenFromPath,
+  SCREENS,
+} from "./main.ts";
 
 describe("router", () => {
   test("five screens with stable hrefs", () => {
@@ -46,5 +54,26 @@ describe("resolveGate", () => {
     expect(v.kind).toBe("cold");
     expect(v.showEmail).toBe(true);
     expect(v.emailAutocomplete).toBe("username webauthn");
+  });
+});
+
+describe("dek chain", () => {
+  test("the DEK is the factors that unwrap it", () => {
+    expect(dekFactors({ has_passkey: true, has_password: true })).toEqual([
+      "passkey",
+      "password",
+    ]);
+    expect(dekFactors({ has_passkey: true, has_password: false })).toEqual([
+      "passkey",
+    ]);
+    expect(dekFactors({ has_passkey: false, has_password: true })).toEqual([
+      "password",
+    ]);
+  });
+
+  test("one remaining factor is last", () => {
+    expect(lastFactor(["passkey"])).toBe(true);
+    expect(lastFactor(["passkey", "password"])).toBe(false);
+    expect(lastFactor([])).toBe(false);
   });
 });

@@ -1,17 +1,22 @@
 import {
+  BREAKPOINT_PX,
   EMAIL_AUTOCOMPLETE,
   FAIL_SENTENCE,
+  LAST_FACTOR_SENTENCE,
   LAST_KEY,
   NO_EPH_SENTENCE,
   RATE_SENTENCE,
   REMEMBER_DAYS,
   deviceApproveUrl,
   deviceQuery,
+  layoutMode,
   logoutUrl,
   passwordLoginUrl,
+  removePasskeyEnabled,
   req,
   sessionUrl,
   startUrl,
+  type LayoutMode,
 } from "./lib/api.ts";
 import { copyText } from "./lib/clipboard.ts";
 import { signal } from "./lib/signal.ts";
@@ -45,6 +50,33 @@ export function hrefFor(screen: Screen): string {
       return "/";
   }
 }
+
+export type DekFactor = "passkey" | "password";
+
+export function dekFactors(q: {
+  has_passkey: boolean;
+  has_password: boolean;
+}): DekFactor[] {
+  const out: DekFactor[] = [];
+  if (q.has_passkey) {
+    out.push("passkey");
+  }
+  if (q.has_password) {
+    out.push("password");
+  }
+  return out;
+}
+
+export function lastFactor(factors: readonly DekFactor[]): boolean {
+  return factors.length === 1;
+}
+
+export function currentLayout(widthPx = globalThis.innerWidth): LayoutMode {
+  const w = typeof widthPx === "number" && Number.isFinite(widthPx) ? widthPx : BREAKPOINT_PX;
+  return layoutMode(w);
+}
+
+export { layoutMode, removePasskeyEnabled };
 
 export function screenFromPath(path: string): Screen {
   switch (path) {
@@ -351,6 +383,7 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
   if (device) {
     const input = el("input", {
       id: "user_code",
+      class: "mono",
       name: "user_code",
       autocomplete: "off",
       value: state.userCode.get(),
@@ -417,13 +450,22 @@ function renderRegister(state: AppState, root: HTMLElement): void {
   copy.addEventListener("click", () => {
     void copyText("••••••••");
   });
+  const layout = currentLayout();
   root.replaceChildren(
-    el("div", { class: "app", "data-page": "register" }, [
+    el("div", { class: "app", "data-page": "register", "data-layout": layout }, [
       nav(state, "register"),
       el("h1", {}, ["Register"]),
       el("p", {}, ["Copy is the default action."]),
-      el("div", { class: "list", "data-list": "secrets" }, [
-        el("p", {}, ["No secrets yet."]),
+      el("div", { class: "workspace" }, [
+        el("div", { class: "card", "data-pane": "list" }, [
+          el("div", { class: "list", "data-list": "secrets" }, [
+            el("p", {}, ["No secrets yet."]),
+          ]),
+        ]),
+        el("div", { class: "card", "data-pane": "inspector" }, [
+          el("h2", { class: "mono" }, ["Secret"]),
+          el("p", {}, ["Select a secret"]),
+        ]),
       ]),
       copy,
     ]),
@@ -444,7 +486,52 @@ function renderActivity(state: AppState, root: HTMLElement): void {
 }
 
 function renderAccount(state: AppState, root: HTMLElement): void {
-  const out = el("button", { type: "button", "data-action": "logout" }, ["Sign out"]);
+  const session = state.session.get();
+  const factors = dekFactors({
+    has_passkey: session?.has_passkey === true,
+    has_password: session?.has_password === true,
+  });
+  const last = lastFactor(factors);
+  const passkeyCount = session?.has_passkey === true ? 1 : 0;
+  const removeOk = removePasskeyEnabled(
+    passkeyCount,
+    session?.has_password === true,
+  );
+  const links = factors.map((factor) => {
+    const label = factor === "passkey" ? "Passkey" : "Password";
+    const children: Array<Node | string> = [el("span", { class: "mono" }, [label])];
+    if (factor === "passkey") {
+      children.push(
+        el(
+          "button",
+          {
+            type: "button",
+            class: "danger",
+            "data-action": "remove",
+            disabled: removeOk ? undefined : true,
+          },
+          ["Remove"],
+        ),
+      );
+    }
+    return el("li", { class: "chain-link", "data-factor": factor }, children);
+  });
+  const chain = el(
+    "div",
+    {
+      class: "chain",
+      "data-chain": "dek",
+      "data-last": last ? "1" : "0",
+    },
+    [
+      el("h2", {}, ["Vault key"]),
+      el("ul", { class: "chain-links" }, links),
+      last ? el("p", { class: "chain-reason" }, [LAST_FACTOR_SENTENCE]) : "",
+    ],
+  );
+  const out = el("button", { type: "button", class: "secondary", "data-action": "logout" }, [
+    "Sign out",
+  ]);
   out.addEventListener("click", () => {
     void (async () => {
       await req("POST", logoutUrl());
@@ -458,7 +545,8 @@ function renderAccount(state: AppState, root: HTMLElement): void {
     el("div", { class: "app", "data-page": "account" }, [
       nav(state, "account"),
       el("h1", {}, ["Account"]),
-      el("p", {}, [state.session.get()?.email ?? ""]),
+      el("p", {}, [session?.email ?? ""]),
+      chain,
       el("h2", {}, ["Sessions"]),
       el("div", { class: "list", "data-list": "sessions" }),
       el("h2", {}, ["Passkeys"]),

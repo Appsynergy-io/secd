@@ -104,7 +104,7 @@ files = [
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
-"scripts/build-ui-bun.sh" = "f7d34d0546c17e3617ff632f19b1d35f22bf9e9a90f0eb6c37c0dac25f5a97e0"
+"scripts/build-ui-bun.sh" = "70958ac1527859c2b4bbbb151a49bde83e7a494ad03b229e10be4c6ea363cf61"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
 "scripts/check.sh" = "c601f9401495c8e219dad0fd7a9dd39102850b70e61ec93ea36f42d67dee41cb"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
@@ -123,7 +123,7 @@ files = [
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
 "ui/bunfig.toml" = "52527f820f0de4fc7ca7b3c631c42531383d52288cdec3679e2ecc047220ca14"
-"ui/package.json" = "75f643feb0bfc5782dd0f032e2d499bf8cada77dc1d7411cf0593b880c254161"
+"ui/package.json" = "a99763e4d441207b0fa30d2c7f44f6fcbebc9aeebc2441966f4f58ee9bf16031"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 
