@@ -1,9 +1,10 @@
 This project is licensed under the Apache License, Version 2.0 (below).
 
-ui/fonts/ does not exist yet. Once Stage 2 adds it, the font files under
-that path are licensed under the SIL Open Font License, Version 1.1
-(OFL-1.1) instead, per their own upstream terms; everything else in this
-repository remains Apache-2.0.
+The Geist typeface files under vendor/appsy-ui/assets/ (embedded by
+vendor/appsy-ui/src/fonts.rs) are licensed under the SIL Open Font License,
+Version 1.1 (OFL-1.1) instead, per their own upstream terms — see
+vendor/appsy-ui/assets/LICENSE.OFL. Everything else in this repository
+remains Apache-2.0.
 
 --------------------------------------------------------------------------
 

@@ -21,6 +21,7 @@ pub struct AppState {
     pub vault: VaultStore,
     pub audit: AuditLog,
     pub webauthn: Webauthn,
+    pub origin: String,
 }
 
 impl AppState {
@@ -55,6 +56,7 @@ impl AppState {
             audit: AuditLog::open(&db)?,
             db,
             webauthn,
+            origin,
         })
     }
 }
