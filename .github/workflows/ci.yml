@@ -94,9 +94,17 @@ jobs:
           # pattern is not "cheaper", it is unchecked. vendor/ is here because
           # crates/secd-ui links against it and a change there once passed the
           # gate with every cargo lane skipped; scripts/, deploy/ and .github/
-          # are here because they decide how the code is built and shipped.
+          # are here because they decide how the code is built and shipped;
+          # contract.toml and every *.md are here because tests/plan_contract.rs
+          # reads them at run time -- T_CONTRACT_AGENTS_EQ_CLAUDE compares
+          # AGENTS.md with CLAUDE.md and T_CONTRACT_ONE_DOC enumerates every
+          # tracked markdown file, so a documentation-only pull request that
+          # skipped `test` could merge those two invariants broken. keys/ and
+          # packaging/ for the same reason: keys/cosign.pub is include_str!'d
+          # into src/update.rs and tests/release_scripts.rs asserts it matches
+          # the copy embedded in packaging/install.sh.
           if git diff --name-only "$base" HEAD \
-            | grep -qE '^(src/|crates/|tests/|tools/|ui/|vendor/|scripts/|deploy/|\.github/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|bun\.lock$)'; then
+            | grep -qE '^(src/|crates/|tests/|tools/|vendor/|scripts/|deploy/|packaging/|skills/|keys/|\.github/|contract\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|.*\.md$)'; then
             echo "code=true" >>"$GITHUB_OUTPUT"
           else
             echo "code=false" >>"$GITHUB_OUTPUT"
@@ -242,6 +250,18 @@ jobs:
   # DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY belong under
   # Settings > Secrets and variables > Dependabot.
   #
+  # The job's own push is why every step is conditional. That push is a
+  # `pull_request: synchronize` whose actor is the App rather than
+  # dependabot[bot], so the run it starts is not a dependabot-triggered run and
+  # is served Actions secrets, where these two are not. The condition on the
+  # pull request's author still holds there, so without a guard the token step
+  # would run with an empty app-id, fail, and take `gate` -- which needs this
+  # job -- red on the very head the re-pin created. Nothing is lost by standing
+  # down: [pipeline] already matches and auto-merge is already armed. The
+  # author check stays the authorization one; APP_ID answers only "does this
+  # run hold the credential", and it is read through env because the `secrets`
+  # context is not available in a step `if`.
+  #
   # This job holds the only write scopes in the workflow. It runs
   # plan-contract.sh and nothing that builds, so contract rule 10 -- no job
   # that compiles third-party code holds a secret or a write scope -- still
@@ -256,8 +276,14 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
     steps:
+      - name: stand down without the App credential
+        if: env.APP_ID == ''
+        run: echo "not a dependabot-triggered run — the re-pin has happened and auto-merge is already armed"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: env.APP_ID != ''
         id: app-token
         with:
           app-id: ${{ secrets.DEPENDABOT_APP_ID }}
@@ -267,14 +293,17 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: env.APP_ID != ''
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           persist-credentials: false
       - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        if: env.APP_ID != ''
         id: meta
         with:
           github-token: ${{ steps.app-token.outputs.token }}
       - name: re-pin contract.toml [pipeline]
+        if: env.APP_ID != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -298,6 +327,7 @@ jobs:
           git commit -m "contract: re-pin [pipeline] for the workflow bump"
           git push origin "HEAD:${HEAD_REF}"
       - name: arm auto-merge for a minor or patch bump
+        if: env.APP_ID != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -305,14 +335,22 @@ jobs:
         run: |
           set -euo pipefail
           # A repository whose thesis is exact pinning does not merge a major
-          # bump unread. For a grouped update this is the highest bump in the
-          # group, so one major keeps the whole group for a human.
-          if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
-            echo "major bump — leaving this one for a human"
-            exit 0
-          fi
+          # bump unread, and it does not merge one it could not classify
+          # either: fetch-metadata yields an empty update-type for anything it
+          # does not recognise. So this arms on the two values that are safe
+          # rather than skipping the one that is not, and everything else --
+          # empty included -- goes to a human. For a grouped update the value
+          # is the highest bump in the group, so one major keeps the group.
+          #
           # --auto arms; GitHub merges it when the required gate is green.
-          gh pr merge --auto --squash "$PR_URL"
+          case "$UPDATE_TYPE" in
+            version-update:semver-minor | version-update:semver-patch)
+              gh pr merge --auto --squash "$PR_URL"
+              ;;
+            *)
+              echo "update-type '${UPDATE_TYPE:-<none>}' — leaving this one for a human"
+              ;;
+          esac
 
   # There is deliberately no dependency-review job here, and this is now a
   # permanent exclusion rather than a wait. The dependency graph it needs is

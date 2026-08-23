@@ -25,16 +25,9 @@ updates:
         applies-to: version-updates
         update-types: [minor, patch]
 
-  # npm for the Stage 2 console. `open-pull-requests-limit: 0` is how
-  # dependabot expresses security-updates-only -- there is no such key -- so
-  # this opens a pull request for an advisory and never for a version bump.
-  # That keeps the reasoning above: version currency for /ui is carried by
-  # `bun audit` and the exact pins in package.json, and the advisory axis is
-  # the one no lockfile can answer by itself.
-  - package-ecosystem: npm
-    directory: /ui
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 0
-    cooldown:
-      default-days: 7
+  # No npm entry. dependabot resolves `directory:` when the schedule fires and
+  # files a job error, on a tab nobody reads, for one that does not exist --
+  # and the Stage 2 console has no manifest in this repository yet. The npm
+  # ecosystem, security-updates-only via `open-pull-requests-limit: 0`, goes in
+  # the commit that adds `ui/package.json`, so the entry and the directory land
+  # together.

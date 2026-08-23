@@ -264,12 +264,20 @@ dispatch_lane() {
 # One foldable block per lane. GitHub collapses ::group::, and a local run gets
 # the same delimiters, so the output of a failing lane starts where its marker
 # does instead of somewhere in the scrollback.
+#
+# The lane is never the operand of `||`, `&&`, `!` or an `if`: bash turns
+# errexit off for the whole call chain of a function whose status is tested, so
+# a lane invoked that way reports its last command's status and every command
+# before it becomes advisory -- `actionlint` and `gitleaks dir` are both ahead
+# of one. The closing marker comes from an EXIT trap, which fires on the path
+# errexit takes out of the script.
 run_lane() {
-  local lane="$1" status=0
+  local lane="$1"
   echo "::group::check: ${lane}" >&2
-  dispatch_lane "$lane" || status=$?
+  trap 'echo "::endgroup::" >&2' EXIT
+  dispatch_lane "$lane"
+  trap - EXIT
   echo "::endgroup::" >&2
-  return "$status"
 }
 
 lanes=()

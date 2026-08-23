@@ -303,9 +303,17 @@ COMPILES = re.compile(
     r"|check\.sh\s+(?:ui|clippy|test|test-release|compile-fail)\b"
     r"|release\.sh[^\n]*--build-only\b"
 )
-# Any write scope, not an enumeration of the ones seen so far.
+# Any write scope and any secret, not an enumeration of the ones seen so far.
+# secrets.GITHUB_TOKEN is the exception: its power is exactly the job's
+# `permissions:` block, which the first two alternatives already read. Every
+# other secret is power the block does not describe -- a GitHub App key mints a
+# token whose scopes come from the installation, so a job can write to this
+# repository with no `permissions:` line naming write at all.
 POWERFUL = re.compile(
-    r"^\s*[\w-]+:\s*write\s*$|permissions:\s*write-all|secrets\.COSIGN",
+    r"^\s*[\w-]+:\s*write\s*$"
+    r"|permissions:\s*write-all"
+    r"|secrets\.(?!GITHUB_TOKEN\b)[A-Z0-9_]+"
+    r"|create-github-app-token",
     re.MULTILINE,
 )
 

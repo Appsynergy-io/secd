@@ -89,4 +89,4 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.
 - `gate` is the only check the ruleset requires, so every ci job but `warm` is one of its `needs`; `plan-contract.sh` proves it. A job outside that list can fail while the gate reports success.
-- Dependabot opens minor and patch bumps grouped. ci re-pins `[pipeline]` on the bot's branch with a GitHub App token — a `GITHUB_TOKEN` push starts no run — and arms auto-merge. A major stays for a human.
+- Dependabot opens minor and patch bumps grouped. ci re-pins `[pipeline]` on the bot's branch with a GitHub App token — a `GITHUB_TOKEN` push starts no run — and arms auto-merge. Anything not minor or patch stays for a human.
