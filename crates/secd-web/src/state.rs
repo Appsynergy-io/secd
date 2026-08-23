@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use webauthn_rs::prelude::Webauthn;
+
 use crate::audit::AuditLog;
-use crate::auth::{Pending, UserStore};
+use crate::auth::{self, Pending, UserStore};
 use crate::device::DevicePending;
 use crate::sessions::SessionStore;
 use crate::vault::VaultStore;
@@ -18,8 +20,7 @@ pub struct AppState {
     pub sessions: SessionStore,
     pub vault: VaultStore,
     pub audit: AuditLog,
-    pub rp_id: String,
-    pub origin: String,
+    pub webauthn: Webauthn,
 }
 
 impl AppState {
@@ -31,7 +32,9 @@ impl AppState {
     /// Opens with RP ID and origin derived from `hostname` (the `--hostname`
     /// flag), falling back to the `RP_ID`/`ORIGIN` defaults when `None`.
     /// Passkeys are bound to the RP ID, so this must match the host the
-    /// browser actually connects to.
+    /// browser actually connects to. The hostname is validated here, once,
+    /// at startup: a bad value fails this call instead of panicking later
+    /// on the first WebAuthn request.
     pub fn open_with_hostname(
         data: impl AsRef<Path>,
         hostname: Option<&str>,
@@ -42,6 +45,7 @@ impl AppState {
             Some(h) => (h.to_string(), format!("https://{h}")),
             None => (RP_ID.to_string(), ORIGIN.to_string()),
         };
+        let webauthn = auth::webauthn(&rp_id, &origin)?;
         Ok(Self {
             pending: Pending::new(),
             devices: DevicePending::new(),
@@ -50,8 +54,7 @@ impl AppState {
             vault: VaultStore::open(&db)?,
             audit: AuditLog::open(&db)?,
             db,
-            rp_id,
-            origin,
+            webauthn,
         })
     }
 }

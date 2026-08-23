@@ -53,6 +53,19 @@ fn fresh() -> H {
     }
 }
 
+fn fresh_with_hostname(hostname: &str) -> H {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("secd-t3-pk-h-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("data dir");
+    let state = AppState::open_with_hostname(&dir, Some(hostname)).expect("open");
+    H {
+        app: secd_web::app(state.clone()),
+        state,
+        dir,
+    }
+}
+
 fn block_on<F: Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -572,4 +585,38 @@ fn T_PK_DEL_FOREIGN() {
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
     });
+}
+
+/// `--hostname` must reach `publicKey.rp.id` (so the RP ID actually follows
+/// the flag instead of the compiled-in default), and a hostname that is not
+/// a bare, registrable DNS name of its own origin must be rejected at
+/// `open_with_hostname` rather than deferred to a panic on the first
+/// WebAuthn request.
+#[test]
+fn T_PK_RP_ID_FROM_HOSTNAME() {
+    block_on(async {
+        let h = fresh_with_hostname("other.example");
+        let (s, _, start) = post_json(
+            &h.app,
+            "/api/auth/passkey/register/start",
+            &json!({"email": "op@secd.test"}),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            start["publicKey"]["rp"]["id"].as_str(),
+            Some("other.example")
+        );
+    });
+
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("secd-t3-pk-badhost-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("data dir");
+    // An IP literal has no `domain()`, so it can never be a registrable
+    // domain of `https://{ip}` -- WebauthnBuilder::new rejects it, and that
+    // rejection must surface here rather than as a panic in a handler.
+    assert!(AppState::open_with_hostname(&dir, Some("192.168.101.122")).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -423,6 +423,9 @@ pending = false
 [tests.T_PK_DEL_FOREIGN]
 pending = false
 
+[tests.T_PK_RP_ID_FROM_HOSTNAME]
+pending = false
+
 [tests.T_VAULT_GET_UNAUTH]
 pending = false
 
