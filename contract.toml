@@ -104,9 +104,9 @@ files = [
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
-"scripts/build-ui-bun.sh" = "d009df483ca231dfad375575a016b9301d2fcfcfcf7c859d678ce756dc044099"
+"scripts/build-ui-bun.sh" = "f7d34d0546c17e3617ff632f19b1d35f22bf9e9a90f0eb6c37c0dac25f5a97e0"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "740a41a2f70b90bc7f1db318bb5b1e6abc676f54a2eab8704daa4ff9786df1be"
+"scripts/check.sh" = "c601f9401495c8e219dad0fd7a9dd39102850b70e61ec93ea36f42d67dee41cb"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
 "scripts/dev/release-dry.sh" = "62f55ffd879ba3453bd5fdbd3664ea0878966fbd7f080df8a8cda7e0910412ae"
@@ -123,7 +123,7 @@ files = [
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
 "ui/bunfig.toml" = "52527f820f0de4fc7ca7b3c631c42531383d52288cdec3679e2ecc047220ca14"
-"ui/package.json" = "1f0e64cd3e9e5f3027ec9c55fc8498d6b16edeb752d5287219560081ac0d744d"
+"ui/package.json" = "75f643feb0bfc5782dd0f032e2d499bf8cada77dc1d7411cf0593b880c254161"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 

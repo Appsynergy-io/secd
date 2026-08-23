@@ -9,7 +9,7 @@
 #   scripts/check.sh ui              build crates/secd-ui/dist
 #   scripts/check.sh ui-bun          build ui/dist, tsc, bun test
 #   scripts/check.sh bun-audit       bun audit against ui/bun.lock
-#   scripts/check.sh crypto-parity   secd-core fixture vs ui/dist/crypto.js
+#   scripts/check.sh crypto-parity   secd-core fixture vs the bun console crypto chunk
 #   scripts/check.sh clippy test     one or more named lanes
 #   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
 set -euo pipefail
@@ -255,8 +255,9 @@ lane_bun_audit() {
   )
 }
 
-# ui/dist/crypto.js must open the secd-core fixture. Missing or stale
-# fixture is a failure; the lane does not regenerate it in place.
+# The crypto chunk dist/index.html loads must open the secd-core fixture.
+# Missing or stale fixture is a failure; the lane does not regenerate it
+# in place. dist is always rebuilt, so a leftover bundle cannot open it.
 lane_crypto_parity() {
   local fixture="$root/crates/secd-core/tests/fixtures/crypto-parity.json"
   [[ -f "$fixture" ]] || secd_die "crypto-parity: missing fixture"
@@ -266,10 +267,7 @@ lane_crypto_parity() {
   if ! cmp -s "$fixture" "$generated"; then
     secd_die "crypto-parity: fixture is stale"
   fi
-  if [[ ! -f "$root/ui/dist/crypto.js" ]]; then
-    "$root/scripts/build-ui-bun.sh"
-  fi
-  [[ -f "$root/ui/dist/crypto.js" ]] || secd_die "crypto-parity: missing ui/dist/crypto.js"
+  "$root/scripts/build-ui-bun.sh"
   secd_ensure_bun
   (
     cd "$root/ui"

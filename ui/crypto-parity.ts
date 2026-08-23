@@ -1,4 +1,4 @@
-/** Prove ui/dist/crypto.js opens the secd-core fixture. Dummy vectors, not secrets. */
+/** Prove the crypto chunk dist/index.html loads opens the secd-core fixture. Dummy vectors, not secrets. */
 
 import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -30,8 +30,58 @@ function eq(a: Uint8Array, b: Uint8Array, what: string): void {
   }
 }
 
+function looksLikeCrypto(mod: object): mod is CryptoMod {
+  const rec = mod as Record<string, unknown>;
+  return typeof rec["sealWithNonce"] === "function" && typeof rec["open"] === "function";
+}
+
+async function loadConsoleCrypto(): Promise<CryptoMod> {
+  const distDir = new URL("./dist/", import.meta.url);
+  const htmlFile = Bun.file(new URL("./index.html", distDir));
+  if (!(await htmlFile.exists())) {
+    die("missing ui/dist/index.html");
+  }
+  const html = await htmlFile.text();
+  const scripts = [...html.matchAll(/\bsrc="(\.\/[^"]+\.js)"/g)].map((m) => m[1]);
+  if (scripts.length !== 1 || scripts[0] === undefined) {
+    die("dist/index.html must load exactly one script");
+  }
+  const entryUrl = new URL(scripts[0], distDir);
+  const entryFile = Bun.file(entryUrl);
+  if (!(await entryFile.exists())) {
+    die("missing console entry");
+  }
+  const entrySource = await entryFile.text();
+  const dyn = [...entrySource.matchAll(/\bimport\(\s*"(\.\/[^"]+\.js)"\s*\)/g)].map((m) => m[1]);
+  if (dyn.length === 0) {
+    die("console entry does not dynamically import a chunk");
+  }
+  let crypto: CryptoMod | undefined;
+  for (const rel of dyn) {
+    if (rel === undefined) {
+      continue;
+    }
+    let mod: object;
+    try {
+      mod = (await import(new URL(rel, entryUrl).href)) as object;
+    } catch {
+      continue;
+    }
+    if (!looksLikeCrypto(mod)) {
+      continue;
+    }
+    if (crypto !== undefined) {
+      die("console entry dynamically imports more than one crypto chunk");
+    }
+    crypto = mod;
+  }
+  if (crypto === undefined) {
+    die("console entry does not load a crypto chunk");
+  }
+  return crypto;
+}
+
 const here = fileURLToPath(new URL(".", import.meta.url));
-const distUrl = new URL("./dist/crypto.js", import.meta.url);
 const fixturePath = `${here}../crates/secd-core/tests/fixtures/crypto-parity.json`;
 
 const fixtureFile = Bun.file(fixturePath);
@@ -46,12 +96,7 @@ try {
   die("fixture is not JSON");
 }
 
-let crypto: CryptoMod;
-try {
-  crypto = (await import(distUrl.href)) as CryptoMod;
-} catch {
-  die("missing ui/dist/crypto.js");
-}
+const crypto = await loadConsoleCrypto();
 
 const aeadKey = crypto.fromHex(fixture.aead.k);
 const aeadNonce = crypto.fromHex(fixture.aead.nonce);

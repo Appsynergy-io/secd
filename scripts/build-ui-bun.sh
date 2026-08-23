@@ -2,8 +2,9 @@
 # Build the bun console into ui/dist/.
 #
 # bun is pinned by version and sha256 per platform in scripts/tools.sh.
-# Filenames are stable ([name].[ext]); content hashes would make two
-# builds of the same tree compare unequal.
+# HTML stays index.html. Split JS/CSS include a content hash so the
+# runtime helper and crypto.ts do not collide; two builds of the same
+# tree still compare equal.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -35,16 +36,8 @@ bun build ./index.html \
   --target browser \
   --production \
   --sourcemap=none \
+  --splitting \
   --entry-naming "[name].[ext]" \
-  --chunk-naming "[name].[ext]" \
-  --asset-naming "[name].[ext]"
-bun build ./src/lib/crypto.ts \
-  --outdir dist \
-  --target browser \
-  --format esm \
-  --production \
-  --sourcemap=none \
-  --entry-naming "[name].[ext]" \
-  --chunk-naming "[name].[ext]" \
+  --chunk-naming "[name]-[hash].[ext]" \
   --asset-naming "[name].[ext]"
 echo "build-ui-bun: ui/dist"
