@@ -114,7 +114,7 @@ async fn pk_reg_start(
             .map(|p| p.passkey.cred_id().clone())
             .collect()
     });
-    let wa = webauthn();
+    let wa = webauthn(&state.rp_id, &state.origin);
     let (ccr, reg) = match wa.start_passkey_registration(user_id, &email, &email, exclude) {
         Ok(v) => v,
         Err(_) => return json_status(StatusCode::BAD_REQUEST, "webauthn"),
@@ -164,7 +164,7 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
     let Some(cred) = parse_register_cred(&body.credential) else {
         return json_status(StatusCode::BAD_REQUEST, "credential");
     };
-    let wa = webauthn();
+    let wa = webauthn(&state.rp_id, &state.origin);
     let passkey = match wa.finish_passkey_registration(&cred, &reg_state) {
         Ok(p) => p,
         Err(_) => return fail_auth(),
@@ -207,7 +207,7 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
 }
 
 async fn pk_login_start(State(state): State<AppState>, Json(body): Json<EmailBody>) -> Response {
-    let wa = webauthn();
+    let wa = webauthn(&state.rp_id, &state.origin);
     let email = match body.email.as_deref() {
         None => None,
         Some("") => None,
@@ -279,7 +279,7 @@ async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishB
     let Some(cred) = parse_login_cred(&body.credential) else {
         return fail_auth();
     };
-    let wa = webauthn();
+    let wa = webauthn(&state.rp_id, &state.origin);
     let email = match entry {
         PendingEntry::LoginSpecific {
             email, state: ast, ..

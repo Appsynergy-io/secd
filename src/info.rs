@@ -17,14 +17,23 @@ pub fn run() -> anyhow::Result<()> {
     };
     println!("{name}");
     println!("bytes {}", entry.value.len());
-    if let Some(p) = entry.meta.get("provider").and_then(|v| v.as_str()) {
+    let provider = entry.meta.get("provider").and_then(|v| v.as_str());
+    if let Some(p) = provider {
         println!("provider {p}");
+    }
+    if let Some(fields) = entry.meta.get("fields").and_then(|v| v.as_array()) {
+        let keys: Vec<&str> = fields.iter().filter_map(|v| v.as_str()).collect();
+        if !keys.is_empty() {
+            println!("fields {}", keys.join(" "));
+        }
     } else if let Ok(s) = std::str::from_utf8(entry.value.as_bytes()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
             if let Some(obj) = v.as_object() {
                 let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-                if let Some(p) = infer(&keys) {
-                    println!("provider {p}");
+                if provider.is_none() {
+                    if let Some(p) = infer(&keys) {
+                        println!("provider {p}");
+                    }
                 }
                 if !keys.is_empty() {
                     println!("fields {}", keys.join(" "));

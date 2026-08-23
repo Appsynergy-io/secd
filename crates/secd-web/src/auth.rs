@@ -19,8 +19,6 @@ use webauthn_rs::prelude::{
     PublicKeyCredential, RegisterPublicKeyCredential, Webauthn, WebauthnBuilder,
 };
 
-use crate::state::{ORIGIN, RP_ID};
-
 const HANDLE_TTL: Duration = Duration::from_secs(5 * 60);
 const EMAIL_MAX: usize = 254;
 const PW_MIN: usize = 12;
@@ -306,9 +304,9 @@ fn sweep(map: &mut HashMap<String, PendingEntry>) {
     map.retain(|_, e| !expired(e));
 }
 
-pub fn webauthn() -> Webauthn {
-    let origin = Url::parse(ORIGIN).expect("invariant: locked origin");
-    WebauthnBuilder::new(RP_ID, &origin)
+pub fn webauthn(rp_id: &str, origin: &str) -> Webauthn {
+    let origin = Url::parse(origin).expect("invariant: locked origin");
+    WebauthnBuilder::new(rp_id, &origin)
         .expect("invariant: rp_id matches origin")
         .rp_name("secd")
         .build()

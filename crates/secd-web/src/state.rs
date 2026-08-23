@@ -18,14 +18,30 @@ pub struct AppState {
     pub sessions: SessionStore,
     pub vault: VaultStore,
     pub audit: AuditLog,
-    pub rp_id: &'static str,
-    pub origin: &'static str,
+    pub rp_id: String,
+    pub origin: String,
 }
 
 impl AppState {
+    /// Opens with the compiled-in RP ID and origin defaults.
     pub fn open(data: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_with_hostname(data, None)
+    }
+
+    /// Opens with RP ID and origin derived from `hostname` (the `--hostname`
+    /// flag), falling back to the `RP_ID`/`ORIGIN` defaults when `None`.
+    /// Passkeys are bound to the RP ID, so this must match the host the
+    /// browser actually connects to.
+    pub fn open_with_hostname(
+        data: impl AsRef<Path>,
+        hostname: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let db = data.as_ref().to_path_buf();
         std::fs::create_dir_all(&db)?;
+        let (rp_id, origin) = match hostname {
+            Some(h) => (h.to_string(), format!("https://{h}")),
+            None => (RP_ID.to_string(), ORIGIN.to_string()),
+        };
         Ok(Self {
             pending: Pending::new(),
             devices: DevicePending::new(),
@@ -34,8 +50,8 @@ impl AppState {
             vault: VaultStore::open(&db)?,
             audit: AuditLog::open(&db)?,
             db,
-            rp_id: RP_ID,
-            origin: ORIGIN,
+            rp_id,
+            origin,
         })
     }
 }
