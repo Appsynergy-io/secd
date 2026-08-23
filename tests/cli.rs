@@ -52,6 +52,29 @@ fn T_CLI_INFO_NO_VALUE() {
 }
 
 #[test]
+fn T_CLI_INFO_FIELDS_WITH_PROVIDER() {
+    let value = serde_json::json!({"user": "t7-user", "token": FIXTURE})
+        .to_string()
+        .into_bytes();
+    let meta = serde_json::json!({"provider": "github", "fields": ["user", "token"]});
+    let h = Harness::new_with_meta(&[("kv/gh", value, meta)]);
+    let out = h.run(&["info", "kv/gh"]);
+    assert!(out.status.success(), "info failed");
+    let stdout = utf8(&out.stdout);
+    let stderr = utf8(&out.stderr);
+    assert!(
+        stdout.contains("provider github"),
+        "info must print meta.provider"
+    );
+    assert!(
+        stdout.contains("fields user token"),
+        "info must print meta.fields even when meta.provider is set"
+    );
+    assert_no_value(&stdout, "info stdout");
+    assert_no_value(&stderr, "info stderr");
+}
+
+#[test]
 fn T_CLI_PROVIDERS_ENV() {
     let out = isolated_secd(&["providers"]).output().expect("providers");
     assert!(out.status.success(), "providers failed");

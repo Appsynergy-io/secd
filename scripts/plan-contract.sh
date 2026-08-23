@@ -236,6 +236,8 @@ for rel in found_pipeline:
 VERSION_SITES = (
     "crates/secd-ui/Cargo.toml",
     "crates/secd-web/Cargo.toml",
+    "crates/secd-core/Cargo.toml",
+    "tools/import-legacy/Cargo.toml",
 )
 
 

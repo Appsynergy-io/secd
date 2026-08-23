@@ -113,7 +113,7 @@ files = [
 "scripts/k3s-apply.sh" = "799ee33d8ed0510d48c5bfc6762bdaab659814694d3b7e9175704e0aa6ad952c"
 "scripts/merge-latest-json.sh" = "6a56449f8494e8f4f2724e6cd93e0d5c9ee96579a698eb08856e769bac472d41"
 "scripts/merge.sh" = "63ccbd79101736458e5e8b4f9305ae9cc64e9429dda1da32abbe0c118feab269"
-"scripts/plan-contract.sh" = "69c2c7c4e5aabf9f5cc18d7b42251f9528d93ed2df508c41d8d0f5dd695307b9"
+"scripts/plan-contract.sh" = "573f207dfcd46df1983c2bfed0bc734f3a336fccfb125a875dd024c72b722f53"
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
 "scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
@@ -447,6 +447,9 @@ pending = false
 [tests.T_PK_DEL_FOREIGN]
 pending = false
 
+[tests.T_PK_RP_ID_FROM_HOSTNAME]
+pending = false
+
 [tests.T_VAULT_GET_UNAUTH]
 pending = false
 
@@ -592,6 +595,9 @@ pending = false
 pending = false
 
 [tests.T_CLI_INFO_NO_VALUE]
+pending = false
+
+[tests.T_CLI_INFO_FIELDS_WITH_PROVIDER]
 pending = false
 
 [tests.T_CLI_PROVIDERS_ENV]

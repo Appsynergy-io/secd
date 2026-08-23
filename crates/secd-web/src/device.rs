@@ -19,7 +19,6 @@ use crate::state::AppState;
 
 const DEVICE_TTL: Duration = Duration::from_secs(10 * 60);
 const INTERVAL: u64 = 5;
-const VERIFICATION_URI: &str = "https://secd.imabee.com/device";
 
 struct Device {
     hostname: String,
@@ -112,6 +111,7 @@ async fn start(State(state): State<AppState>, Json(body): Json<StartBody>) -> Re
         return json_status(StatusCode::BAD_REQUEST, "device");
     }
     let _ = (eph, device_id);
+    let verification_uri = format!("{}/device", state.origin);
     let code = state.devices.insert(Device {
         hostname,
         created: Instant::now(),
@@ -122,7 +122,7 @@ async fn start(State(state): State<AppState>, Json(body): Json<StartBody>) -> Re
         json!({
             "user_code": code,
             "interval": INTERVAL,
-            "verification_uri": VERIFICATION_URI,
+            "verification_uri": verification_uri,
         }),
     )
 }
