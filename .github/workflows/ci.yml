@@ -274,9 +274,15 @@ jobs:
   # stands down with no App token. `--auto` queues on a red gate. A failed
   # arm still pushes (`!cancelled()`): a rebase, retry or conflict must not
   # leave [pipeline] stale, and an already-armed autoMergeRequest is success
-  # so the job stays green on retry. Checkout is the event SHA, not the
-  # moving branch tip; add/commit/push pass core.hooksPath=/dev/null so a
-  # tree-controlled hook cannot inherit GH_TOKEN.
+  # so the job stays green on retry.
+  #
+  # fetch-metadata is classification only. `pipeline --update` does not read
+  # it, so a flake there must not skip the re-pin: that step is
+  # continue-on-error, and re-pin plus token mint run on `!cancelled()` like
+  # the push. Arm stays on metadata; an empty update-type already leaves the
+  # PR for a human. Checkout is the event SHA, not the moving branch tip;
+  # add/commit/push pass core.hooksPath=/dev/null so a tree-controlled hook
+  # cannot inherit GH_TOKEN.
   dependabot:
     name: dependabot — re-pin [pipeline] and arm auto-merge
     if: >-
@@ -301,13 +307,14 @@ jobs:
       - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         if: env.APP_ID != ''
         id: meta
+        continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: re-pin contract.toml [pipeline]
-        if: env.APP_ID != ''
+        if: ${{ !cancelled() && env.APP_ID != '' }}
         run: scripts/check.sh pipeline --update
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: env.APP_ID != ''
+        if: ${{ !cancelled() && env.APP_ID != '' }}
         id: app-token
         with:
           app-id: ${{ secrets.DEPENDABOT_APP_ID }}
