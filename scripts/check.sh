@@ -229,18 +229,20 @@ lane_ui_bun() {
     bun x tsc --noEmit
     bun test
   )
-  local first second
-  first="$(mktemp -d)"
-  second="$(mktemp -d)"
-  "$root/scripts/build-ui-bun.sh"
-  cp -a "$root/ui/dist/." "$first/"
-  ui_bun_budgets
-  "$root/scripts/build-ui-bun.sh"
-  cp -a "$root/ui/dist/." "$second/"
-  if ! diff -rq "$first" "$second" >/dev/null; then
-    diff -rq "$first" "$second" >&2 || true
-    secd_die "ui/dist is not byte-identical across two builds"
-  fi
+  (
+    first="$(mktemp -d)"
+    second="$(mktemp -d)"
+    trap 'rm -rf "$first" "$second"' EXIT
+    "$root/scripts/build-ui-bun.sh"
+    cp -a "$root/ui/dist/." "$first/"
+    ui_bun_budgets
+    "$root/scripts/build-ui-bun.sh"
+    cp -a "$root/ui/dist/." "$second/"
+    if ! diff -rq "$first" "$second" >/dev/null; then
+      diff -rq "$first" "$second" >&2 || true
+      secd_die "ui/dist is not byte-identical across two builds"
+    fi
+  )
 }
 
 lane_bun_audit() {

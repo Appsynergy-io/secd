@@ -342,6 +342,7 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
       name: "password",
       autocomplete: "current-password",
     });
+    input.value = state.password.get();
     input.addEventListener("input", () => {
       state.password.set(input.value);
     });
@@ -676,8 +677,13 @@ function boot(root: HTMLElement): void {
     state.path.set(globalThis.location.pathname);
   });
   void (async () => {
-    await loadSession(state);
-    render(state);
+    try {
+      await loadSession(state);
+    } catch {
+      state.error.set(FAIL_SENTENCE);
+    } finally {
+      render(state);
+    }
   })();
 }
 

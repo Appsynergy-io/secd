@@ -25,10 +25,14 @@ updates:
         applies-to: version-updates
         update-types: [minor, patch]
 
-  # bun.lock in ui/. Version updates stay closed: bun-audit is the PR gate.
-  # Security updates ignore this limit.
+  # bun.lock in ui/. Bun has no Dependabot security updates, so grouped
+  # minor/patch version PRs are the idle-time opener; bun-audit is the PR gate.
   - package-ecosystem: bun
     directory: /ui
     schedule:
       interval: weekly
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 5
+    groups:
+      bun-minor-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
