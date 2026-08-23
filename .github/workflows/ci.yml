@@ -262,11 +262,18 @@ jobs:
   # run hold the credential", and it is read through env because the `secrets`
   # context is not available in a step `if`.
   #
-  # GITHUB_TOKEN stays at the workflow's contents: read. Writes go through
-  # the App token, minted only for this job and exported only on the
-  # commit/push and `gh pr merge --auto` steps. fetch-metadata and
-  # `scripts/check.sh pipeline --update` run without it. The job still
-  # compiles nothing, so contract rule 10 holds.
+  # GITHUB_TOKEN is contents: read plus pull-requests: read. fetch-metadata
+  # always calls pulls.listCommits, which 403s on contents:read alone. Writes
+  # go through the App token, minted after checkout and pipeline --update, and
+  # exported only on the `gh pr merge --auto` and commit/push steps.
+  # fetch-metadata and `scripts/check.sh pipeline --update` run without it.
+  # The job still compiles nothing, so contract rule 10 holds.
+  #
+  # Auto-merge is armed before the push: the push is a synchronize in this
+  # same concurrency group (cancel-in-progress: true), and the follow-up run
+  # stands down with no App token. `--auto` queues on a red gate. Checkout is
+  # the event SHA, not the moving branch tip; add/commit/push pass
+  # core.hooksPath=/dev/null so a tree-controlled hook cannot inherit GH_TOKEN.
   dependabot:
     name: dependabot — re-pin [pipeline] and arm auto-merge
     if: >-
@@ -274,12 +281,28 @@ jobs:
       && github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
     env:
       APP_ID: ${{ secrets.DEPENDABOT_APP_ID }}
     steps:
       - name: stand down without the App credential
         if: env.APP_ID == ''
         run: echo "not a dependabot-triggered run — the re-pin has happened and auto-merge is already armed"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: env.APP_ID != ''
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        if: env.APP_ID != ''
+        id: meta
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: re-pin contract.toml [pipeline]
+        if: env.APP_ID != ''
+        run: scripts/check.sh pipeline --update
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: env.APP_ID != ''
         id: app-token
@@ -290,42 +313,6 @@ jobs:
           # granted. It needs to push one commit and arm one auto-merge.
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        if: env.APP_ID != ''
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          persist-credentials: false
-      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
-        if: env.APP_ID != ''
-        id: meta
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: re-pin contract.toml [pipeline]
-        if: env.APP_ID != ''
-        run: scripts/check.sh pipeline --update
-      - name: push the re-pin
-        if: env.APP_ID != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- contract.toml; then
-            echo "[pipeline] already matches the tree"
-            exit 0
-          fi
-          git config user.name "dependabot[bot]"
-          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
-          # The token stays in the environment: no remote URL to leak it into
-          # a log, and nothing written to .git/config for a later step to read.
-          # The single quotes are the point -- git expands $GH_TOKEN when it
-          # runs the helper, and this shell never sees the value.
-          # shellcheck disable=SC2016
-          git config credential.helper \
-            '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
-          git add contract.toml
-          git commit -m "contract: re-pin [pipeline] for the workflow bump"
-          git push origin "HEAD:${HEAD_REF}"
       - name: arm auto-merge for a minor or patch bump
         if: env.APP_ID != ''
         env:
@@ -351,6 +338,29 @@ jobs:
               echo "update-type '${UPDATE_TYPE:-<none>}' — leaving this one for a human"
               ;;
           esac
+      - name: push the re-pin
+        if: env.APP_ID != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- contract.toml; then
+            echo "[pipeline] already matches the tree"
+            exit 0
+          fi
+          git config user.name "dependabot[bot]"
+          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+          # The token stays in the environment: no remote URL to leak it into
+          # a log, and nothing written to .git/config for a later step to read.
+          # The single quotes are the point -- git expands $GH_TOKEN when it
+          # runs the helper, and this shell never sees the value.
+          # shellcheck disable=SC2016
+          git config credential.helper \
+            '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
+          git -c core.hooksPath=/dev/null add contract.toml
+          git -c core.hooksPath=/dev/null commit -m "contract: re-pin [pipeline] for the workflow bump"
+          git -c core.hooksPath=/dev/null push origin "HEAD:${HEAD_REF}"
 
   # There is deliberately no dependency-review job here, and this is now a
   # permanent exclusion rather than a wait. The dependency graph it needs is
