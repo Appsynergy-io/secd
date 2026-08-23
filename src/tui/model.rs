@@ -1,9 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use secd_core::{check_name, Secret};
 use serde_json::Value;
 
 use crate::login::{self, Unlocked};
+use crate::policy;
 
 use super::view::{hit_key, Action, ActionHit};
 
@@ -77,6 +78,10 @@ pub struct Model {
     hits: Vec<ActionHit>,
     token: Option<String>,
     dek: Option<Secret>,
+    /// The vault as this register last saw it, name -> ciphertext.
+    before: BTreeMap<String, String>,
+    /// Why a save would lose data. Set means every save is refused.
+    save_blocked: Option<String>,
 }
 
 impl Default for Model {
@@ -99,22 +104,35 @@ impl Model {
             hits: Vec::new(),
             token: None,
             dek: None,
+            before: BTreeMap::new(),
+            save_blocked: None,
         }
     }
 
     pub fn from_unlocked(unlocked: Unlocked) -> Self {
         let Unlocked { token, dek } = unlocked;
-        let rows = login::load_snapshot(&token, &dek);
         let mut model = Self::new();
-        model.token = Some(token);
-        for (name, value, meta) in rows {
-            model.names.push(name.clone());
-            model.values.insert(name.clone(), value);
-            model.meta.insert(name, meta);
+        // A save replaces the whole vault, so a register built from a load that
+        // dropped entries -- or from no load at all -- would delete them.
+        match policy::load_vault(&token, &dek) {
+            Ok(loaded) => {
+                model.save_blocked = loaded.drop_refusal();
+                model.before = loaded.before;
+                for policy::Entry { name, value, meta } in loaded.entries {
+                    model.names.push(name.clone());
+                    model.values.insert(name.clone(), value);
+                    model.meta.insert(name, meta);
+                }
+            }
+            Err(e) => model.save_blocked = Some(format!("vault: {e}")),
         }
+        model.token = Some(token);
         model.names.sort();
         model.dek = Some(dek);
         model.note(format!("loaded {}", model.names.len()));
+        if let Some(why) = model.save_blocked.clone() {
+            model.note(format!("saves refused: {why}"));
+        }
         model.sync_detail();
         model
     }
@@ -341,11 +359,24 @@ impl Model {
     }
 
     fn push_snapshot(&mut self) {
+        if let Some(why) = self.save_blocked.clone() {
+            self.note(format!("save refused: {why}"));
+            return;
+        }
         let (Some(token), Some(dek)) = (self.token.as_deref(), self.dek.as_ref()) else {
             return;
         };
-        if let Err(e) = login::save_snapshot(token, dek, &self.names, &self.values, &self.meta) {
-            self.note(format!("save failed: {e}"));
+        let saved = login::save_snapshot(
+            token,
+            dek,
+            &self.names,
+            &self.values,
+            &self.meta,
+            &self.before,
+        );
+        match saved {
+            Ok(written) => self.before = written,
+            Err(e) => self.note(format!("save failed: {e}")),
         }
     }
 

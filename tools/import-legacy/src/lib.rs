@@ -1,7 +1,7 @@
 //! Black-box import from the old CLI (`sdxd`) into a live secd session.
 //! Never writes a secret value to this process's stdout, stderr, or logs.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
@@ -11,7 +11,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 
 use secd::login::Unlocked;
-use secd::policy::{Entry, VaultLoad};
+use secd::policy::{Entry, Row, VaultLoad};
 use secd_core::{check_name, infer, providers, Secret};
 use serde_json::{json, Map, Value};
 use zeroize::{Zeroize, Zeroizing};
@@ -169,18 +169,17 @@ pub fn import(opts: &Options) -> Result<(), ImportError> {
     let snapshot = preflight(opts)?;
     let unlocked = require_secd()?;
     let loaded = load_vault(&unlocked)?;
-    // Fail closed. `load_entries` drops every entry this DEK cannot open and
-    // the save is a whole-vault replace, so saving now would delete exactly
-    // those entries -- and nothing would say so.
-    let dropped = loaded.dropped();
-    if dropped > 0 {
-        return Err(ImportError::Refused(format!(
-            "vault: {dropped} of {} entries did not decode; a save would delete them",
-            loaded.raw
-        )));
+    // Fail closed. The load drops every entry this DEK cannot open and the save
+    // is a whole-vault replace, so saving now would delete exactly those
+    // entries -- and nothing would say so.
+    if let Some(refusal) = loaded.drop_refusal() {
+        return Err(ImportError::Refused(refusal));
     }
     let VaultLoad {
-        mut entries, body, ..
+        mut entries,
+        body,
+        before,
+        ..
     } = loaded;
     let names = wanted_names(opts)?;
     if opts.verify {
@@ -219,7 +218,7 @@ pub fn import(opts: &Options) -> Result<(), ImportError> {
         wipe_get_buffer(&mut buf);
         imported.push(name);
     }
-    save_vault(&unlocked, &entries)?;
+    save_vault(&unlocked, &entries, &before)?;
     for name in &imported {
         println!("{name}");
     }
@@ -245,6 +244,10 @@ fn preflight(opts: &Options) -> Result<Option<&Path>, ImportError> {
 }
 
 /// The whole-vault pre-image. Ciphertext, never plaintext.
+///
+/// On disk before it is returned, file and directory entry both: the vault is
+/// about to be replaced, and a pre-image still in the page cache is no
+/// pre-image at all.
 fn write_snapshot(path: &Path, body: &str) -> Result<(), ImportError> {
     let mut f = OpenOptions::new()
         .write(true)
@@ -253,7 +256,11 @@ fn write_snapshot(path: &Path, body: &str) -> Result<(), ImportError> {
         .open(path)
         .map_err(|e| ImportError::Refused(format!("snapshot {}: {e}", path.display())))?;
     f.write_all(body.as_bytes())
-        .and_then(|()| f.flush())
+        .and_then(|()| f.sync_all())
+        .map_err(|e| ImportError::Other(e.into()))?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
         .map_err(|e| ImportError::Other(e.into()))
 }
 
@@ -400,9 +407,14 @@ fn load_vault(unlocked: &Unlocked) -> Result<VaultLoad, ImportError> {
     }
 }
 
-fn save_vault(unlocked: &Unlocked, entries: &[Entry]) -> Result<(), ImportError> {
-    match secd::policy::save_entries_read_back(&unlocked.token, &unlocked.dek, entries) {
-        Ok(()) => Ok(()),
+fn save_vault(
+    unlocked: &Unlocked,
+    entries: &[Entry],
+    before: &BTreeMap<String, String>,
+) -> Result<(), ImportError> {
+    let rows: Vec<Row<'_>> = entries.iter().map(Entry::row).collect();
+    match secd::policy::save_entries_read_back(&unlocked.token, &unlocked.dek, &rows, before) {
+        Ok(_) => Ok(()),
         Err(e) => Err(map_vault_err(e)),
     }
 }

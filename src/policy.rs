@@ -33,25 +33,51 @@ pub struct Entry {
     pub meta: Value,
 }
 
+impl Entry {
+    /// This entry as a save borrows it: nothing is copied, least of all the value.
+    pub fn row(&self) -> Row<'_> {
+        (&self.name, &self.value, &self.meta)
+    }
+}
+
+/// One entry of a save, borrowed from wherever the caller keeps it.
+pub type Row<'a> = (&'a str, &'a Secret, &'a Value);
+
 /// One `GET /api/v1/vault`: what decoded, how many entries the server sent,
-/// and the body it sent.
+/// the body that puts them all back, and the ciphertext they came as.
 ///
 /// `entries` silently drops anything this DEK cannot open, and
 /// `PUT /api/v1/vault` replaces the whole vault, so a caller that loads,
-/// mutates and saves must compare `raw` against `entries.len()` first: every
-/// entry that did not decode is an entry the save deletes.
+/// mutates and saves must refuse on `drop_refusal` first: every entry that did
+/// not decode is an entry the save deletes.
 pub struct VaultLoad {
     pub entries: Vec<Entry>,
     /// Entries in the response, decoded or not.
     pub raw: usize,
-    /// The response body as the server sent it. Ciphertext, never plaintext.
+    /// Every entry the server sent, as a `PUT /api/v1/vault` body: the response
+    /// carries a `version` per entry and the route rejects any key but `name`,
+    /// `ciphertext` and `meta`, so this is the projection, not the response.
+    /// Ciphertext, never plaintext.
     pub body: String,
+    /// name -> ciphertext as loaded: what a save checks the vault against.
+    pub before: BTreeMap<String, String>,
 }
 
 impl VaultLoad {
     /// Entries the server sent that this DEK could not open.
     pub fn dropped(&self) -> usize {
         self.raw.saturating_sub(self.entries.len())
+    }
+
+    /// What a caller that saves must refuse with, when anything did not decode.
+    pub fn drop_refusal(&self) -> Option<String> {
+        let dropped = self.dropped();
+        (dropped > 0).then(|| {
+            format!(
+                "vault: {dropped} of {} entries did not decode; a save would delete them",
+                self.raw
+            )
+        })
     }
 }
 
@@ -297,7 +323,7 @@ pub fn load_entries(token: &str, dek: &Secret) -> anyhow::Result<Vec<Entry>> {
 
 /// `load_entries` plus what it had to leave behind, for a caller that saves.
 pub fn load_vault(token: &str, dek: &Secret) -> anyhow::Result<VaultLoad> {
-    let (status, v, body) = request_full("GET", "/api/v1/vault", None, Some(token))?;
+    let (status, v) = request("GET", "/api/v1/vault", None, Some(token))?;
     if status == 401 {
         return Err(locked_err());
     }
@@ -308,24 +334,30 @@ pub fn load_vault(token: &str, dek: &Secret) -> anyhow::Result<VaultLoad> {
         anyhow::bail!("vault: no entries");
     };
     let raw = arr.len();
+    let mut before = BTreeMap::new();
+    let mut put_entries = Vec::with_capacity(raw);
     let mut out = Vec::new();
     for e in arr {
         let Some(name) = e.get("name").and_then(Value::as_str) else {
             continue;
         };
-        if secd_core::check_name(name).is_err() {
-            continue;
-        }
         let Some(ct) = e.get("ciphertext").and_then(Value::as_str) else {
             continue;
         };
+        let meta = e.get("meta").cloned().unwrap_or_else(|| json!({}));
+        // The pre-image carries every entry the server sent, decoded or not:
+        // it is what restores the vault a save is about to replace.
+        put_entries.push(json!({ "name": name, "ciphertext": ct, "meta": meta }));
+        before.insert(name.to_string(), ct.to_string());
+        if secd_core::check_name(name).is_err() {
+            continue;
+        }
         let Ok(blob) = hex::decode(ct) else {
             continue;
         };
         let Ok(plain) = secd_core::open(dek.as_bytes(), name, &blob) else {
             continue;
         };
-        let meta = e.get("meta").cloned().unwrap_or_else(|| json!({}));
         out.push(Entry {
             name: name.to_string(),
             value: plain,
@@ -335,66 +367,84 @@ pub fn load_vault(token: &str, dek: &Secret) -> anyhow::Result<VaultLoad> {
     Ok(VaultLoad {
         entries: out,
         raw,
-        body,
+        body: json!({ "entries": put_entries }).to_string(),
+        before,
     })
 }
 
-pub fn save_entries(token: &str, dek: &Secret, entries: &[Entry]) -> anyhow::Result<()> {
-    put_vault(token, dek, entries).map(drop)
-}
-
-/// Save, then read the vault back and compare the entry set the server returns
-/// against the one that was sent.
+/// Check the vault still holds `before`, save, then read it back and compare
+/// what the server returns against what was sent. Returns the vault as written,
+/// which is `before` for this caller's next save.
 ///
 /// `PUT /api/v1/vault` replaces the whole vault and carries no version, so a
-/// save that lands between this write and this read wins and cannot be stopped
-/// here. This turns that clobber from silent into an error.
-pub fn save_entries_read_back(token: &str, dek: &Secret, entries: &[Entry]) -> anyhow::Result<()> {
-    let sent = put_vault(token, dek, entries)?;
-    let back = load_ciphertexts(token)?;
-    if back == sent {
-        return Ok(());
+/// save landing between the check and the write, or between the write and the
+/// read, wins and cannot be stopped here. The check narrows that window to one
+/// round trip, and the read-back turns a clobber from silent into an error.
+pub fn save_entries_read_back(
+    token: &str,
+    dek: &Secret,
+    rows: &[Row<'_>],
+    before: &BTreeMap<String, String>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let now = load_ciphertexts(token)?;
+    if &now != before {
+        return Err(changed_under_write("loaded", before, &now));
     }
-    let mut diff: Vec<&str> = sent
+    let sent = put_vault(token, dek, rows)?;
+    let back = load_ciphertexts(token)?;
+    if back != sent {
+        return Err(changed_under_write("sent", &sent, &back));
+    }
+    Ok(sent)
+}
+
+/// One sentence for a vault that is not what this write assumed it was.
+fn changed_under_write(
+    verb: &str,
+    mine: &BTreeMap<String, String>,
+    theirs: &BTreeMap<String, String>,
+) -> anyhow::Error {
+    let mut diff: Vec<&str> = mine
         .iter()
-        .filter(|(name, ct)| back.get(name.as_str()) != Some(ct))
+        .filter(|(name, ct)| theirs.get(name.as_str()) != Some(ct))
         .map(|(name, _)| name.as_str())
         .collect();
     diff.extend(
-        back.keys()
-            .filter(|name| !sent.contains_key(name.as_str()))
+        theirs
+            .keys()
+            .filter(|name| !mine.contains_key(name.as_str()))
             .map(String::as_str),
     );
     diff.sort_unstable();
     diff.dedup();
     diff.truncate(8);
-    anyhow::bail!(
-        "vault changed under the write: sent {}, read back {} ({})",
-        sent.len(),
-        back.len(),
+    anyhow!(
+        "vault changed under the write: {verb} {}, found {} ({})",
+        mine.len(),
+        theirs.len(),
         diff.join(", ")
-    );
+    )
 }
 
 /// PUT the whole vault. Returns name -> ciphertext, exactly as sent.
 fn put_vault(
     token: &str,
     dek: &Secret,
-    entries: &[Entry],
+    rows: &[Row<'_>],
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let mut sent: BTreeMap<String, String> = BTreeMap::new();
-    let mut body_entries = Vec::with_capacity(entries.len());
-    for e in entries {
-        let blob = secd_core::seal(dek.as_bytes(), &e.name, e.value.as_bytes())
-            .map_err(|err| anyhow!("seal {}: {err}", e.name))?;
+    let mut body_entries = Vec::with_capacity(rows.len());
+    for (name, value, meta) in rows {
+        let blob = secd_core::seal(dek.as_bytes(), name, value.as_bytes())
+            .map_err(|err| anyhow!("seal {name}: {err}"))?;
         let ct = hex::encode(blob);
         body_entries.push(json!({
-            "name": e.name,
+            "name": name,
             "ciphertext": ct,
-            "meta": e.meta,
+            "meta": meta,
         }));
-        if sent.insert(e.name.clone(), ct).is_some() {
-            anyhow::bail!("duplicate name {}", e.name);
+        if sent.insert((*name).to_string(), ct).is_some() {
+            anyhow::bail!("duplicate name {name}");
         }
     }
     let body = json!({ "entries": body_entries });
@@ -410,7 +460,7 @@ fn put_vault(
 
 /// The vault as name -> ciphertext, without opening anything.
 fn load_ciphertexts(token: &str) -> anyhow::Result<BTreeMap<String, String>> {
-    let (status, v, _) = request_full("GET", "/api/v1/vault", None, Some(token))?;
+    let (status, v) = request("GET", "/api/v1/vault", None, Some(token))?;
     if status == 401 {
         return Err(locked_err());
     }
@@ -570,17 +620,6 @@ fn request(
     body: Option<&Value>,
     bearer: Option<&str>,
 ) -> anyhow::Result<(u16, Value)> {
-    let (status, v, _) = request_full(method, path, body, bearer)?;
-    Ok((status, v))
-}
-
-/// `request`, keeping the response body as the server sent it.
-fn request_full(
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    bearer: Option<&str>,
-) -> anyhow::Result<(u16, Value, String)> {
     let payload = match body {
         Some(v) => serde_json::to_vec(v)?,
         None => Vec::new(),
@@ -661,7 +700,7 @@ fn read_limited(r: &mut impl Read, cap: usize) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Value, String)> {
+fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Value)> {
     let s = std::str::from_utf8(raw).context("response utf8")?;
     let (head, body) = s
         .split_once("\r\n\r\n")
@@ -679,7 +718,7 @@ fn parse_http(raw: &[u8]) -> anyhow::Result<(u16, Value, String)> {
     } else {
         serde_json::from_str(body).unwrap_or(Value::Null)
     };
-    Ok((status, val, body.to_string()))
+    Ok((status, val))
 }
 
 fn err_of(v: &Value) -> String {

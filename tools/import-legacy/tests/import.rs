@@ -29,6 +29,7 @@ static ZERO_HITS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
 struct Assets {
     bin: PathBuf,
     redir: PathBuf,
+    ca: PathBuf,
     cert: PathBuf,
     key: PathBuf,
     sdxd_dir: PathBuf,
@@ -76,6 +77,16 @@ fn pty_script() -> &'static Path {
         let p = work_root().join("pty_run.py");
         fs::create_dir_all(work_root()).expect("t9 root");
         fs::write(&p, PTY_PY).expect("pty_run.py");
+        p
+    })
+}
+
+fn restore_script() -> &'static Path {
+    static RESTORE: OnceLock<PathBuf> = OnceLock::new();
+    RESTORE.get_or_init(|| {
+        let p = work_root().join("put_body.py");
+        fs::create_dir_all(work_root()).expect("t9 root");
+        fs::write(&p, RESTORE_PY).expect("put_body.py");
         p
     })
 }
@@ -275,6 +286,7 @@ fn build_assets() -> Assets {
     Assets {
         bin,
         redir,
+        ca,
         cert,
         key,
         sdxd_dir,
@@ -408,6 +420,56 @@ impl Harness {
     fn arm_clobber(&self, doc: &str) {
         write_0600(&self.clobber, doc.as_bytes());
     }
+
+    /// `PUT /api/v1/vault` with a body of the caller's choosing, as a hand
+    /// restore of a pre-image would. The status the server answered with.
+    fn put_body(&self, body: &str) -> u16 {
+        let mut child = Command::new("/usr/bin/python3")
+            .arg(restore_script())
+            .arg(&assets().ca)
+            .arg(self.port.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("put client");
+        {
+            let mut sin = child.stdin.take().expect("put stdin");
+            sin.write_all(body.as_bytes()).expect("put body");
+        }
+        let out = child.wait_with_output().expect("put client");
+        assert!(out.status.success(), "put client: {}", utf8(&out.stderr));
+        utf8(&out.stdout).trim().parse().expect("status code")
+    }
+}
+
+/// The entries of a whole-vault pre-image, by name, sorted.
+fn snapshot_names(path: &Path) -> Vec<String> {
+    let raw = fs::read_to_string(path).expect("snapshot");
+    let doc: Value = serde_json::from_str(&raw).expect("snapshot json");
+    let mut names: Vec<String> = doc
+        .get("entries")
+        .and_then(Value::as_array)
+        .expect("snapshot entries")
+        .iter()
+        .filter_map(|e| e.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names
+}
+
+/// The same body as `GET /api/v1/vault` hands it out: one `version` per entry.
+fn with_version(body: &str) -> String {
+    let mut doc: Value = serde_json::from_str(body).expect("body json");
+    for e in doc
+        .get_mut("entries")
+        .and_then(Value::as_array_mut)
+        .expect("entries")
+    {
+        e["version"] = Value::from(1);
+    }
+    doc.to_string()
 }
 
 fn pty_run(bin: &Path, args: &[&str], env: impl FnOnce(&mut Command)) -> Output {
@@ -540,6 +602,16 @@ fn T_IMP_COUNT() {
     let pre = fs::read_to_string(&snap).expect("snapshot utf8");
     assert!(pre.contains("entries"), "snapshot is not a vault body");
     assert!(!leaked(&pre), "snapshot holds plaintext");
+    assert_eq!(snapshot_names(&snap), Vec::<String>::new(), "pre-image");
+    assert_eq!(
+        h.put_body(&pre),
+        200,
+        "the pre-image must PUT back as it is"
+    );
+    assert!(
+        h.stored_names().is_empty(),
+        "the restore must undo the import"
+    );
 }
 
 #[test]
@@ -637,9 +709,25 @@ fn T_IMP_SNAPSHOT_EXISTS() {
 #[test]
 fn T_IMP_READ_BACK() {
     let h = Harness::new();
+    let first = h.import(&["--prefix", NAME_A], &[]);
+    assert!(
+        first.status.success(),
+        "seed import: {}",
+        utf8(&first.stderr)
+    );
+
     h.arm_clobber(r#"{"entries":[{"name":"kv/other","ciphertext":"abcdef","meta":{}}]}"#);
-    let out = h.import(&[], &[]);
+    let snap = unique("snap");
+    let out = h.run_tty(
+        &["--overwrite", "--snapshot", snap.to_str().expect("utf8")],
+        &[],
+    );
     assert!(!out.status.success(), "a clobbered write must exit != 0");
+    assert_eq!(
+        snapshot_names(&snap),
+        vec![NAME_A.to_string()],
+        "the pre-image is the vault before the write"
+    );
     let stdout = utf8(&out.stdout);
     assert!(
         !stdout.contains("imported"),
@@ -726,7 +814,11 @@ fn T_IMP_NO_OVERWRITE() {
     assert!(said.contains("--overwrite"), "must name the flag: {said}");
     assert_eq!(h.stored_names(), vec![NAME_A.to_string()]);
 
-    let out = h.import(&["--overwrite"], &[]);
+    let snap = unique("snap");
+    let out = h.run_tty(
+        &["--overwrite", "--snapshot", snap.to_str().expect("utf8")],
+        &[],
+    );
     assert!(
         out.status.success(),
         "--overwrite must be accepted: {}",
@@ -735,6 +827,26 @@ fn T_IMP_NO_OVERWRITE() {
     assert_eq!(
         h.stored_names(),
         vec![NAME_A.to_string(), NAME_B.to_string()]
+    );
+
+    // The pre-image is the vault as the run found it, and it goes back as it is.
+    assert_eq!(
+        snapshot_names(&snap),
+        vec![NAME_A.to_string()],
+        "the pre-image is the state before the run"
+    );
+    let pre = fs::read_to_string(&snap).expect("snapshot utf8");
+    assert!(!pre.contains("version"), "PUT rejects a version key: {pre}");
+    assert_eq!(h.put_body(&pre), 200, "the pre-image must restore");
+    assert_eq!(
+        h.stored_names(),
+        vec![NAME_A.to_string()],
+        "the restore must undo the run"
+    );
+    assert_eq!(
+        h.put_body(&with_version(&pre)),
+        400,
+        "the route takes name, ciphertext and meta only"
     );
 }
 
@@ -854,7 +966,13 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        self._send(200, json.dumps(load()).encode())
+        # The real route returns a version per entry, which PUT then rejects.
+        rows = []
+        for e in load().get("entries", []):
+            row = dict(e)
+            row["version"] = 1
+            rows.append(row)
+        self._send(200, json.dumps({"entries": rows}).encode())
 
     def do_PUT(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -863,7 +981,13 @@ class H(BaseHTTPRequestHandler):
             doc = json.loads(raw.decode())
         except Exception:
             doc = {}
-        store({"entries": doc.get("entries", [])})
+        entries = doc.get("entries", [])
+        allowed = ("name", "ciphertext", "meta")
+        for e in entries:
+            if not isinstance(e, dict) or any(k not in allowed for k in e):
+                self._send(400, b'{"error":"plaintext"}')
+                return
+        store({"entries": entries})
         with open(PUT_LOG, "ab") as f:
             f.write(b"PUT\n")
         # A whole-vault save landing right after this one. PUT takes no version,
@@ -893,6 +1017,34 @@ class S(HTTPServer):
 httpd = S(("127.0.0.1", 0), H)
 print(httpd.server_address[1], flush=True)
 httpd.serve_forever()
+"#;
+
+const RESTORE_PY: &str = r#"
+import socket, ssl, sys
+
+ca, port = sys.argv[1], int(sys.argv[2])
+body = sys.stdin.buffer.read()
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+ctx.load_verify_locations(ca)
+raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+sock = ctx.wrap_socket(raw, server_hostname="secd.imabee.com")
+head = (
+    "PUT /api/v1/vault HTTP/1.1\r\n"
+    "Host: secd.imabee.com\r\n"
+    "Authorization: Bearer t9-token\r\n"
+    "Content-Type: application/json\r\n"
+    f"Content-Length: {len(body)}\r\n"
+    "Connection: close\r\n\r\n"
+).encode()
+sock.sendall(head + body)
+buf = b""
+while True:
+    chunk = sock.recv(65536)
+    if not chunk:
+        break
+    buf += chunk
+print(buf.split(b"\r\n", 1)[0].decode().split(" ")[1])
 "#;
 
 const PTY_PY: &str = r#"
