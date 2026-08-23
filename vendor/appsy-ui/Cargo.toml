@@ -1,3 +1,9 @@
+# Its own workspace root. This crate is `exclude`d from the repo workspace, so cargo keeps
+# walking upward from here looking for one -- and an agent worktree lives under
+# .claude/worktrees/, inside the primary checkout, where it finds the outer Cargo.toml and
+# fails. `cargo fmt --all` reaches this manifest as a path dependency of secd-ui.
+[workspace]
+
 [package]
 name = "appsy-ui"
 description = "AppSynergy design system: tokens, components, behavior, fonts, icons — one crate, consumed by Leptos apps."
