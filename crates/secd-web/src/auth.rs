@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
+use anyhow::Context;
 use rand::RngCore;
 use secd_core::{unwrap_password, wrap_password, Factor, Wrap};
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,6 @@ use webauthn_rs::prelude::{
     DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration,
     PublicKeyCredential, RegisterPublicKeyCredential, Webauthn, WebauthnBuilder,
 };
-
-use crate::state::{ORIGIN, RP_ID};
 
 const HANDLE_TTL: Duration = Duration::from_secs(5 * 60);
 const EMAIL_MAX: usize = 254;
@@ -306,13 +305,25 @@ fn sweep(map: &mut HashMap<String, PendingEntry>) {
     map.retain(|_, e| !expired(e));
 }
 
-pub fn webauthn() -> Webauthn {
-    let origin = Url::parse(ORIGIN).expect("invariant: locked origin");
-    WebauthnBuilder::new(RP_ID, &origin)
-        .expect("invariant: rp_id matches origin")
+/// Builds the WebAuthn config for `rp_id`/`origin`. Both come from the
+/// operator-supplied `--hostname` flag (or the compiled-in default), so
+/// every failure here is returned rather than panicked: called once, at
+/// startup, from `AppState::open_with_hostname`, so a bad `--hostname`
+/// fails the process before it binds a socket instead of panicking on the
+/// first WebAuthn request.
+pub(crate) fn webauthn(rp_id: &str, origin: &str) -> anyhow::Result<Webauthn> {
+    let url = Url::parse(origin)
+        .with_context(|| format!("--hostname {rp_id}: {origin} is not a valid origin"))?;
+    WebauthnBuilder::new(rp_id, &url)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "--hostname {rp_id} is not a registrable domain of {origin} \
+                 (no port, path, scheme, or IP literal)"
+            )
+        })?
         .rp_name("secd")
         .build()
-        .expect("invariant: webauthn config")
+        .context("webauthn config")
 }
 
 pub fn normalize_email(raw: &str) -> Option<String> {

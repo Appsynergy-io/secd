@@ -235,16 +235,28 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{fragment}</body></html>"
     );
     std::fs::write(&path, page).expect("write dump-dom fixture");
-    let data = std::env::temp_dir().join(format!(
-        "secd-t6-chrome-{}-{}-{n}",
-        std::process::id(),
-        width_px
-    ));
+    // Chromium's SingletonSocket is a unix socket (sockaddr_un ~108 bytes).
+    // Cargo TMPDIR under an agent worktree is longer than that.
+    let data = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("secd-t6-{}-{}-{n}", std::process::id(), width_px));
     let _ = std::fs::create_dir_all(&data);
     let url = format!("file://{}", path.display());
+    // Thorium SIGTRAPs if TMPDIR is the worktree cargo scratch, and if it
+    // falls through to a full /tmp. Runtime dir / shm are the working temps.
+    let chrome_tmp = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("/dev/shm"));
     let out = Command::new(timeout)
+        .env("TMPDIR", &chrome_tmp)
+        .env("TMP", &chrome_tmp)
         .args(["--kill-after=2s", "20s"])
         .arg(&bin)
+        .env("TMPDIR", &data)
+        .env("TMP", &data)
         .args([
             "--headless=new",
             "--disable-gpu",

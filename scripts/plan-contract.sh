@@ -129,7 +129,17 @@ for path in src_rs:
 # needs no YAML parsing -- which would be the wrong tool for structural
 # properties, where a false pass is invisible -- and it fails in about a
 # second, offline.
-PIPELINE_ROOTS = (".github/", "scripts/", "deploy/", ".githooks/", ".claude/")
+PIPELINE_ROOTS = (
+    ".github/",
+    "scripts/",
+    "deploy/",
+    ".githooks/",
+    ".claude/",
+    # The secret scan's rule set. An allow-list entry added here is a rule the
+    # `secrets` lane stops applying, which is exactly the kind of edit that
+    # should not pass unremarked.
+    ".gitleaks.toml",
+)
 
 
 def tracked_pipeline_files() -> list[str]:
@@ -236,6 +246,8 @@ for rel in found_pipeline:
 VERSION_SITES = (
     "crates/secd-ui/Cargo.toml",
     "crates/secd-web/Cargo.toml",
+    "crates/secd-core/Cargo.toml",
+    "tools/import-legacy/Cargo.toml",
 )
 
 
@@ -282,8 +294,7 @@ else:
 # release.yml used to set contents: write and packages: write at workflow level
 # and pass COSIGN_KEY into the job that runs `cargo build` -- so build.rs from
 # every transitive dependency executed with the signing key and a token that
-# could force-push to main. Jobs are found by their two-space indent, which is
-# reliable because [pipeline] makes every change to these files deliberate.
+# could force-push to main.
 # `cargo install` belongs here: .github/workflows/audit.yml used to run
 # `cargo install cargo-audit` in a job holding issues: write, which builds that
 # crate's whole dependency tree -- build.rs included -- beside a token that can
@@ -294,36 +305,55 @@ COMPILES = re.compile(
     r"|check\.sh\s+(?:ui|clippy|test|test-release|compile-fail)\b"
     r"|release\.sh[^\n]*--build-only\b"
 )
-# Any write scope, not an enumeration of the ones seen so far.
+# Any write scope and any secret, not an enumeration of the ones seen so far.
+# secrets.GITHUB_TOKEN is the exception: its power is exactly the job's
+# `permissions:` block, which the first two alternatives already read. Every
+# other secret is power the block does not describe -- a GitHub App key mints a
+# token whose scopes come from the installation, so a job can write to this
+# repository with no `permissions:` line naming write at all.
 POWERFUL = re.compile(
-    r"^\s*[\w-]+:\s*write\s*$|permissions:\s*write-all|secrets\.COSIGN",
+    r"^\s*[\w-]+:\s*write\s*$"
+    r"|permissions:\s*write-all"
+    r"|secrets\.(?!GITHUB_TOKEN\b)[A-Z0-9_]+"
+    r"|create-github-app-token",
     re.MULTILINE,
 )
 
-for rel in found_pipeline:
-    if not rel.startswith(".github/workflows/"):
-        continue
+
+def workflow_jobs(rel: str) -> tuple[str, list[tuple[str, str]]]:
+    """Everything above `jobs:`, then (name, block) for each job under it.
+
+    Jobs are found by their two-space indent, which is reliable because
+    [pipeline] makes every change to these files deliberate. Two-space keys
+    appear under `on:` and `concurrency:` as well, so anchor on the `jobs:`
+    mapping rather than on indentation alone: without this a workflow_dispatch
+    input counts as a job and swallows every real job after it into one block.
+    """
     lines = (root / rel).read_text(encoding="utf-8").splitlines()
-    # Two-space keys appear under `on:` and `concurrency:` as well, so anchor
-    # on the `jobs:` mapping rather than on indentation alone: without this a
-    # workflow_dispatch input counts as a job and swallows every real job after
-    # it into one block.
     try:
         first_job = next(i for i, line in enumerate(lines) if line == "jobs:") + 1
     except StopIteration:
-        continue
-    job_starts = [
+        return "", []
+    starts = [
         (i, re.match(r"^  ([\w.-]+):\s*$", line).group(1))
         for i, line in enumerate(lines[first_job:], start=first_job)
         if re.match(r"^  [\w.-]+:\s*$", line)
     ]
+    jobs = []
+    for n, (start, name) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        jobs.append((name, "\n".join(lines[start:end])))
+    return "\n".join(lines[: first_job - 1]), jobs
+
+
+for rel in found_pipeline:
+    if not rel.startswith(".github/workflows/"):
+        continue
     # A workflow-level permissions block applies to every job in the file, so
     # a compiling job can hold a write scope it never names itself.
-    head = "\n".join(lines[: first_job - 1])
+    head, jobs = workflow_jobs(rel)
     top_is_powerful = bool(POWERFUL.search(head))
-    for n, (start, job) in enumerate(job_starts):
-        end = job_starts[n + 1][0] if n + 1 < len(job_starts) else len(lines)
-        block = "\n".join(lines[start:end])
+    for job, block in jobs:
         if COMPILES.search(block) and (POWERFUL.search(block) or top_is_powerful):
             errors.append(
                 f"{rel}: job `{job}` both compiles and holds a write scope or a "
@@ -396,6 +426,61 @@ for rel in found_pipeline:
             errors.append(
                 f"{rel}:{i + 1}: actions/checkout without persist-credentials: false"
             )
+
+# 13. every job that reports on a pull request reaches the gate.
+#
+# Rule 11 proves a lane is named by some job. It says nothing about whether
+# that job's result is one the gate reads, and `gate` is the only context the
+# ruleset requires -- so a job left out of its `needs` can fail red while the
+# gate reports success and the pull request merges. That is how a required
+# check silently becomes advisory, without anyone editing the ruleset.
+#
+# `warm` is exempt: it runs only on push to main, after the merge, so there is
+# no pull request for it to gate.
+GATE_EXEMPT = {"gate", "warm"}
+
+
+def job_needs(block: str) -> set[str]:
+    inline = re.search(r"^    needs:\s*\[([^\]]*)\]\s*$", block, re.MULTILINE)
+    if inline:
+        return {n.strip() for n in inline.group(1).split(",") if n.strip()}
+    single = re.search(r"^    needs:\s*([\w.-]+)\s*$", block, re.MULTILINE)
+    if single:
+        return {single.group(1)}
+    listed = re.search(r"^    needs:\s*$", block, re.MULTILINE)
+    if not listed:
+        return set()
+    out: set[str] = set()
+    for line in block[listed.end():].splitlines():
+        item = re.match(r"^      -\s+([\w.-]+)\s*$", line)
+        if item:
+            out.add(item.group(1))
+        elif line.strip():
+            break
+    return out
+
+
+for rel in found_pipeline:
+    if not rel.startswith(".github/workflows/"):
+        continue
+    _, jobs = workflow_jobs(rel)
+    names = {name for name, _ in jobs}
+    if "gate" not in names:
+        continue
+    gate_block = next(block for name, block in jobs if name == "gate")
+    needs = job_needs(gate_block)
+    unreached = sorted(names - GATE_EXEMPT - needs)
+    if unreached:
+        errors.append(
+            f"{rel}: job `gate` does not depend on "
+            + ", ".join(unreached)
+            + "; a job outside gate.needs can fail while the gate reports success"
+        )
+    phantom = sorted(needs - names)
+    if phantom:
+        errors.append(
+            f"{rel}: job `gate` depends on " + ", ".join(phantom) + ", which is not a job"
+        )
 
 if errors:
     sys.stderr.write("plan-contract:\n")

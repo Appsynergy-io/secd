@@ -12,6 +12,12 @@ ExecStart=/opt/secd/deploy/agent/secd-agent.sh --once
 # The agent needs kubectl and the cluster's kubeconfig, nothing else. It holds
 # no GitHub credential: the digest it reads is a public release asset.
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# k3s-apply.sh verifies the image signature and refuses to apply without
+# cosign, which scripts/ensure-cosign.sh fetches pinned and checksummed. It
+# needs somewhere to install it: ProtectHome=yes makes the default unwritable,
+# so give it the unit's own state directory.
+StateDirectory=secd
+Environment=CARGO_HOME=/var/lib/secd/cargo
 TimeoutStartSec=600
 Nice=10
 

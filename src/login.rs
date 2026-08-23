@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -184,63 +184,16 @@ pub fn finish(flow: DeviceFlow, token: String, sealed: Value) -> anyhow::Result<
     Ok(Unlocked { token, dek })
 }
 
-pub fn load_snapshot(token: &str, dek: &Secret) -> Vec<(String, Secret, Value)> {
-    let Ok((200, v)) = request("GET", "/api/v1/vault", None, Some(token)) else {
-        return Vec::new();
-    };
-    let Some(entries) = v.get("entries").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for e in entries {
-        let Some(name) = e.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        if check_name_ok(name).is_err() {
-            continue;
-        }
-        let Some(ct) = e.get("ciphertext").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(blob) = hex::decode(ct) else {
-            continue;
-        };
-        let Ok(plain) = secd_core::open(dek.as_bytes(), name, &blob) else {
-            continue;
-        };
-        let meta = e.get("meta").cloned().unwrap_or_else(|| json!({}));
-        out.push((name.to_string(), plain, meta));
-    }
-    out
-}
-
+/// The register as the vault takes it: a whole-vault replace, checked against
+/// `before` and read back. Returns the vault as written, the caller's `before`
+/// for its next save.
 pub fn save_snapshot(
     token: &str,
     dek: &Secret,
-    names: &[String],
-    values: &HashMap<String, Secret>,
-    meta: &HashMap<String, Value>,
-) -> anyhow::Result<()> {
-    let mut entries = Vec::new();
-    for name in names {
-        let Some(secret) = values.get(name) else {
-            continue;
-        };
-        let blob = secd_core::seal(dek.as_bytes(), name, secret.as_bytes())
-            .map_err(|e| anyhow!("seal {name}: {e}"))?;
-        let m = meta.get(name).cloned().unwrap_or_else(|| json!({}));
-        entries.push(json!({
-            "name": name,
-            "ciphertext": hex::encode(blob),
-            "meta": m,
-        }));
-    }
-    let body = json!({ "entries": entries });
-    let (status, v) = request("PUT", "/api/v1/vault", Some(&body), Some(token))?;
-    if status != 200 {
-        anyhow::bail!("snapshot put {status}: {}", err_of(&v));
-    }
-    Ok(())
+    rows: &[crate::policy::Row<'_>],
+    before: &BTreeMap<String, String>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    crate::policy::save_entries_read_back(token, dek, rows, before)
 }
 
 pub fn save_session(token: &str) -> anyhow::Result<()> {
@@ -520,8 +473,4 @@ fn err_of(v: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-fn check_name_ok(name: &str) -> Result<(), secd_core::NameError> {
-    secd_core::check_name(name)
 }

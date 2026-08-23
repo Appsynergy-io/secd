@@ -9,6 +9,7 @@ use crate::headers::json_status;
 pub mod audit;
 pub mod auth;
 pub mod auth_routes;
+pub(crate) mod db;
 pub mod device;
 pub mod headers;
 pub mod providers_api;

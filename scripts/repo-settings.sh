@@ -76,11 +76,78 @@ RULESET=$(
     { "type": "required_status_checks", "parameters": {
         "do_not_enforce_on_create": false,
         "strict_required_status_checks_policy": false,
-        "required_status_checks": [ { "context": "gate" } ] } }
+        "required_status_checks": [ { "context": "gate" } ] } },
+    { "type": "merge_queue", "parameters": {
+        "check_response_timeout_minutes": 60,
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 5,
+        "max_entries_to_merge": 5,
+        "merge_method": "SQUASH",
+        "min_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 5 } }
   ]
 }
 JSON
 )
+
+# ci.yml has triggered on merge_group since it was written, and until this rule
+# exists that trigger fires for nothing. Without a queue -- or
+# strict_required_status_checks_policy, which costs a manual branch update per
+# merge -- a pull request that went green against a base two merges ago still
+# merges, and the gate never sees the tree that results. The queue is the
+# stronger of the two: it runs the gate against the actual merge result.
+
+# The Actions policy. sha_pinning_required is the server-side half of contract
+# rule 8: the contract refuses an unpinned `uses:` in this repository's own
+# files, and this refuses one at run time, including from a reusable workflow
+# the contract never reads. Only GitHub's own actions and the two third-party
+# ones this repo pins are allowed to run at all.
+ACTIONS_POLICY='{"enabled": true, "allowed_actions": "selected", "sha_pinning_required": true}'
+SELECTED_ACTIONS=$(
+  cat <<'JSON'
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": ["Swatinem/rust-cache@*", "dependabot/fetch-metadata@*"]
+}
+JSON
+)
+WORKFLOW_PERMS='{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
+
+# Secret scanning, and push protection with it. This repository is a secrets
+# manager; the `secrets` lane catches a value that reached a commit, and push
+# protection is the half that refuses the push instead of reporting it
+# afterwards. Non-provider patterns and validity checks are the two that turn
+# "a string that looks like a credential" and "a credential that still works"
+# into findings.
+SECURITY_ANALYSIS=$(
+  cat <<'JSON'
+{
+  "security_and_analysis": {
+    "secret_scanning": { "status": "enabled" },
+    "secret_scanning_push_protection": { "status": "enabled" },
+    "secret_scanning_non_provider_patterns": { "status": "enabled" },
+    "secret_scanning_validity_checks": { "status": "enabled" }
+  }
+}
+JSON
+)
+
+# CodeQL default setup. `actions` scans the workflows themselves, which is the
+# language most of this repository's supply-chain surface is written in.
+CODEQL='{"state": "configured", "languages": ["actions", "rust"]}'
+
+# A fork pull request runs this repository's workflows. Public repo, so this
+# applies: nobody outside gets a runner without a maintainer saying so.
+FORK_PR='{"approval_policy": "all_external_contributors"}'
+
+# COSIGN_KEY lives in the `release` environment, and a workflow_dispatch can
+# name any ref. Without a branch policy, a workflow on an arbitrary branch can
+# reach the signing key; with it, only a v* tag can.
+ENV_POLICY='{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}'
+ENV_TAG_RULE='{"name": "v*", "type": "tag"}'
+
+REPO_FLAGS='{"allow_auto_merge": true, "allow_squash_merge": true, "delete_branch_on_merge": true}'
 
 say() { printf '%s\n' "$*"; }
 
@@ -94,7 +161,33 @@ if [[ "$apply" -eq 0 ]]; then
   say ""
   say "  PUT  /repos/${REPO}/vulnerability-alerts"
   say ""
-  say "  PATCH /repos/${REPO}   {\"allow_auto_merge\": true}"
+  say "  PUT  /repos/${REPO}/automated-security-fixes"
+  say ""
+  say "  PATCH /repos/${REPO}"
+  printf '%s\n' "$REPO_FLAGS" | sed 's/^/    /'
+  say ""
+  say "  PUT  /repos/${REPO}/actions/permissions"
+  printf '%s\n' "$ACTIONS_POLICY" | sed 's/^/    /'
+  say ""
+  say "  PUT  /repos/${REPO}/actions/permissions/selected-actions"
+  printf '%s\n' "$SELECTED_ACTIONS" | sed 's/^/    /'
+  say ""
+  say "  PUT  /repos/${REPO}/actions/permissions/workflow"
+  printf '%s\n' "$WORKFLOW_PERMS" | sed 's/^/    /'
+  say ""
+  say "  PUT  /repos/${REPO}/actions/permissions/fork-pr-contributor-approval"
+  printf '%s\n' "$FORK_PR" | sed 's/^/    /'
+  say ""
+  say "  PATCH /repos/${REPO}   (secret scanning and push protection)"
+  printf '%s\n' "$SECURITY_ANALYSIS" | sed 's/^/    /'
+  say ""
+  say "  PATCH /repos/${REPO}/code-scanning/default-setup"
+  printf '%s\n' "$CODEQL" | sed 's/^/    /'
+  say ""
+  say "  PUT  /repos/${REPO}/environments/release"
+  printf '%s\n' "$ENV_POLICY" | sed 's/^/    /'
+  say "  POST /repos/${REPO}/environments/release/deployment-branch-policies"
+  printf '%s\n' "$ENV_TAG_RULE" | sed 's/^/    /'
   say ""
   say "Re-run with --apply to perform them, then --apply --enforce once a pull"
   say "request has been seen reporting the 'gate' check."
@@ -106,6 +199,12 @@ if [[ "$apply" -eq 0 ]]; then
   say "     because release.yml declares environment: release"
   say "  2. Settings > Environments > release > add both secrets, then delete"
   say "     them from Settings > Secrets and variables > Actions"
+  say ""
+  say "Also not doable by API: the GitHub App the ci 'dependabot' job signs in"
+  say "as. A dependabot-triggered run reads Dependabot secrets, not Actions"
+  say "secrets, so DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY go under"
+  say "Settings > Secrets and variables > Dependabot. The app needs contents:"
+  say "write and pull-requests: write on this repository and nothing else."
   exit 0
 fi
 
@@ -150,13 +249,89 @@ gh api "repos/${REPO}/vulnerability-alerts" --silent >/dev/null 2>&1 \
   || secd_die "dependency alerts and the dependency graph are still disabled"
 say "repo-settings: dependency alerts and the dependency graph enabled"
 
-# Without this the pipeline cannot merge: auto-merge is what waits for the gate
+# Alerts say a dependency is vulnerable; this opens the pull request that fixes
+# it. Without it the alert waits for someone to read it.
+gh api --method PUT "repos/${REPO}/automated-security-fixes" --silent
+asf="$(gh api "repos/${REPO}/automated-security-fixes" --jq '.enabled' 2>/dev/null || true)"
+[[ "$asf" == "true" ]] || secd_die "automated security fixes are ${asf:-<unknown>}"
+say "repo-settings: automated security fixes enabled"
+
+# Without auto-merge the pipeline cannot merge: it is what waits for the gate
 # and merges when it goes green, instead of a human coming back to press a
 # button. It needs the ruleset above to have something to wait on.
-gh api --method PATCH "repos/${REPO}" -F allow_auto_merge=true --silent
-am="$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null || true)"
-[[ "$am" == "true" ]] || secd_die "auto-merge is ${am:-<unknown>}"
-say "repo-settings: auto-merge enabled"
+# delete_branch_on_merge keeps dev-{8hex} branches from accumulating one per
+# merge; squash is the merge method the queue rule names.
+printf '%s' "$REPO_FLAGS" | gh api --method PATCH "repos/${REPO}" --input - --silent
+flags="$(gh api "repos/${REPO}" \
+  --jq '[.allow_auto_merge, .allow_squash_merge, .delete_branch_on_merge] | join(",")' 2>/dev/null || true)"
+[[ "$flags" == "true,true,true" ]] \
+  || secd_die "auto-merge, squash and delete-on-merge are ${flags:-<unknown>}"
+say "repo-settings: auto-merge, squash merge and delete-branch-on-merge enabled"
+
+# Which actions may run at all, and what the token they get can do. A workflow
+# in this repository is pinned by contract rule 8; this is the half that holds
+# for anything the contract does not read.
+printf '%s' "$ACTIONS_POLICY" | gh api --method PUT "repos/${REPO}/actions/permissions" --input - --silent
+printf '%s' "$SELECTED_ACTIONS" \
+  | gh api --method PUT "repos/${REPO}/actions/permissions/selected-actions" --input - --silent
+pol="$(gh api "repos/${REPO}/actions/permissions" \
+  --jq '[.allowed_actions, (.sha_pinning_required | tostring)] | join(",")' 2>/dev/null || true)"
+[[ "$pol" == "selected,true" ]] || secd_die "the Actions policy is ${pol:-<unknown>}"
+say "repo-settings: Actions restricted to selected, sha pinning required"
+
+printf '%s' "$WORKFLOW_PERMS" \
+  | gh api --method PUT "repos/${REPO}/actions/permissions/workflow" --input - --silent
+wf="$(gh api "repos/${REPO}/actions/permissions/workflow" \
+  --jq '[.default_workflow_permissions, (.can_approve_pull_request_reviews | tostring)] | join(",")' 2>/dev/null || true)"
+[[ "$wf" == "read,false" ]] || secd_die "the default workflow token is ${wf:-<unknown>}"
+say "repo-settings: default GITHUB_TOKEN is read-only and cannot approve"
+
+# Public repository, so a fork pull request would otherwise get a runner on
+# arrival.
+printf '%s' "$FORK_PR" \
+  | gh api --method PUT "repos/${REPO}/actions/permissions/fork-pr-contributor-approval" --input - --silent
+fork="$(gh api "repos/${REPO}/actions/permissions/fork-pr-contributor-approval" \
+  --jq '.approval_policy' 2>/dev/null || true)"
+[[ "$fork" == "all_external_contributors" ]] \
+  || secd_die "fork pull request approval is ${fork:-<unknown>}"
+say "repo-settings: fork pull requests need approval from a maintainer"
+
+# Push protection is the only control here that refuses a secret rather than
+# reporting one. Everything else in this repository catches a value after it
+# was written down.
+printf '%s' "$SECURITY_ANALYSIS" | gh api --method PATCH "repos/${REPO}" --input - --silent
+scan="$(gh api "repos/${REPO}" --jq '
+  .security_and_analysis
+  | [ .secret_scanning.status,
+      .secret_scanning_push_protection.status,
+      .secret_scanning_non_provider_patterns.status,
+      .secret_scanning_validity_checks.status ] | join(",")' 2>/dev/null || true)"
+[[ "$scan" == "enabled,enabled,enabled,enabled" ]] \
+  || secd_die "secret scanning reads ${scan:-<unknown>}, expected all four enabled"
+say "repo-settings: secret scanning, push protection, non-provider patterns, validity checks"
+
+# CodeQL default setup. The API answers 202 and runs the first scan itself.
+printf '%s' "$CODEQL" \
+  | gh api --method PATCH "repos/${REPO}/code-scanning/default-setup" --input - --silent
+ql="$(gh api "repos/${REPO}/code-scanning/default-setup" --jq '.state' 2>/dev/null || true)"
+[[ "$ql" == "configured" ]] || secd_die "CodeQL default setup is ${ql:-<unknown>}"
+say "repo-settings: CodeQL default setup configured for rust and actions"
+
+# The signing key lives in this environment. A workflow_dispatch names a ref,
+# so without this any branch could reach it.
+printf '%s' "$ENV_POLICY" | gh api --method PUT "repos/${REPO}/environments/release" --input - --silent
+existing_policy="$(gh api "repos/${REPO}/environments/release/deployment-branch-policies" \
+  --jq '[.branch_policies[].name] | join(",")' 2>/dev/null || true)"
+if [[ "$existing_policy" != *'v*'* ]]; then
+  printf '%s' "$ENV_TAG_RULE" \
+    | gh api --method POST "repos/${REPO}/environments/release/deployment-branch-policies" \
+      --input - --silent
+fi
+envpol="$(gh api "repos/${REPO}/environments/release/deployment-branch-policies" \
+  --jq '[.branch_policies[] | select(.type == "tag") | .name] | join(",")' 2>/dev/null || true)"
+[[ "$envpol" == *'v*'* ]] \
+  || secd_die "the release environment allows ${envpol:-<no tag policy>}, expected v*"
+say "repo-settings: the release environment is restricted to v* tags"
 
 if [[ "$enforcement" != "active" ]]; then
   say ""

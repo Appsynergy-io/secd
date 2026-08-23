@@ -13,8 +13,8 @@ use zeroize::Zeroize;
 
 use crate::auth::{
     from_stored, normalize_email, now_rfc3339, parse_client_wrap, parse_login_cred,
-    parse_register_cred, password_ok, webauthn, wrap_json_list, PendingEntry, PendingErr,
-    StoredPasskey, User, WrapErr,
+    parse_register_cred, password_ok, wrap_json_list, PendingEntry, PendingErr, StoredPasskey,
+    User, WrapErr,
 };
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::sessions::{clear_cookie, with_cookie};
@@ -114,7 +114,7 @@ async fn pk_reg_start(
             .map(|p| p.passkey.cred_id().clone())
             .collect()
     });
-    let wa = webauthn();
+    let wa = state.webauthn.clone();
     let (ccr, reg) = match wa.start_passkey_registration(user_id, &email, &email, exclude) {
         Ok(v) => v,
         Err(_) => return json_status(StatusCode::BAD_REQUEST, "webauthn"),
@@ -164,7 +164,7 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
     let Some(cred) = parse_register_cred(&body.credential) else {
         return json_status(StatusCode::BAD_REQUEST, "credential");
     };
-    let wa = webauthn();
+    let wa = state.webauthn.clone();
     let passkey = match wa.finish_passkey_registration(&cred, &reg_state) {
         Ok(p) => p,
         Err(_) => return fail_auth(),
@@ -202,12 +202,14 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
     if state.users.put(user).is_err() {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(json_value(StatusCode::OK, json!({ "ok": true })), &token)
 }
 
 async fn pk_login_start(State(state): State<AppState>, Json(body): Json<EmailBody>) -> Response {
-    let wa = webauthn();
+    let wa = state.webauthn.clone();
     let email = match body.email.as_deref() {
         None => None,
         Some("") => None,
@@ -279,7 +281,7 @@ async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishB
     let Some(cred) = parse_login_cred(&body.credential) else {
         return fail_auth();
     };
-    let wa = webauthn();
+    let wa = state.webauthn.clone();
     let email = match entry {
         PendingEntry::LoginSpecific {
             email, state: ast, ..
@@ -308,7 +310,9 @@ async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishB
         return fail_auth();
     };
     let wraps = wrap_json_list(&user.wraps());
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(
         json_value(StatusCode::OK, json!({ "wraps": wraps })),
         &token,
@@ -367,7 +371,9 @@ async fn pw_register(
         if state.users.put(user).is_err() {
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
         }
-        let (_id, token) = state.sessions.create_console(&email);
+        let Ok((_id, token)) = state.sessions.create_console(&email) else {
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+        };
         return with_cookie(
             json_value(StatusCode::OK, json!({ "wraps": wraps })),
             &token,
@@ -430,7 +436,9 @@ async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBo
     }
     let user = user.expect("invariant: verified user exists");
     let wraps = wrap_json_list(&user.wraps());
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(
         json_value(StatusCode::OK, json!({ "wraps": wraps })),
         &token,
@@ -439,7 +447,9 @@ async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBo
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = crate::sessions::cookie_token(&headers) {
-        state.sessions.revoke_token(&token);
+        if state.sessions.revoke_token(&token).is_err() {
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+        }
     }
     let mut res = json_value(StatusCode::OK, json!({ "ok": true }));
     res.headers_mut()

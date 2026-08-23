@@ -5,6 +5,7 @@
 #
 #   scripts/check.sh                 every lane
 #   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
+#   scripts/check.sh secrets         gitleaks over the tree and the history
 #   scripts/check.sh ui              build crates/secd-ui/dist
 #   scripts/check.sh clippy test     one or more named lanes
 #   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
@@ -27,11 +28,13 @@ export SECD_ROOT SECD_TOOL_TAG
 . "$root/scripts/tools.sh"
 
 ACTIONLINT_PINNED="1.7.7"
+ZIZMOR_PINNED="1.29.0"
+GITLEAKS_PINNED="8.30.1"
 
 # Cheapest first: a formatting slip should not cost a full test run. `ui` is a
 # prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
 # refuses to build without a fresh crates/secd-ui/dist.
-ALL_LANES=(contract shell workflow fmt ui clippy test test-release compile-fail release-dry)
+ALL_LANES=(contract shell workflow secrets fmt ui clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -80,12 +83,90 @@ ensure_actionlint() {
     "$sha" actionlint actionlint
 }
 
+ensure_zizmor() {
+  if command -v zizmor >/dev/null 2>&1; then
+    return 0
+  fi
+  local asset sha
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+      asset="zizmor-x86_64-unknown-linux-gnu"
+      sha="dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839"
+      ;;
+    Darwin:arm64 | Darwin:aarch64)
+      asset="zizmor-aarch64-apple-darwin"
+      sha="720322fade9e83a9c7953944c438f2ba942636b86b96a8f0e6b15ce94c8a6b6f"
+      ;;
+    *) return 1 ;;
+  esac
+  secd_fetch_tool \
+    "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_PINNED}/${asset}.tar.gz" \
+    "$sha" zizmor zizmor
+}
+
+# actionlint reads the schema; zizmor reads the security properties -- token
+# scope, untrusted interpolation, unpinned uses, credential persistence. They
+# overlap nowhere, so both run and both are required.
 lane_workflow() {
   if ! ensure_actionlint; then
     secd_missing_linter actionlint
+  else
+    actionlint -color
+  fi
+  if ! ensure_zizmor; then
+    secd_missing_linter zizmor
     return 0
   fi
-  actionlint -color
+  # --offline: the online audits want a GitHub token, and a lane that behaves
+  # differently with one is a lane whose result depends on who ran it.
+  local args=(--offline --no-progress)
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    args+=(--format=github)
+  fi
+  zizmor "${args[@]}" .github
+}
+
+ensure_gitleaks() {
+  if command -v gitleaks >/dev/null 2>&1; then
+    return 0
+  fi
+  local asset sha
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64)
+      asset="gitleaks_${GITLEAKS_PINNED}_linux_x64"
+      sha="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      ;;
+    Darwin:arm64 | Darwin:aarch64)
+      asset="gitleaks_${GITLEAKS_PINNED}_darwin_arm64"
+      sha="b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      ;;
+    *) return 1 ;;
+  esac
+  secd_fetch_tool \
+    "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_PINNED}/${asset}.tar.gz" \
+    "$sha" gitleaks gitleaks
+}
+
+# This repository is a secrets manager. A value that reaches a commit is
+# compromised whether or not anyone notices, so the scan covers both the tree
+# as it stands and every commit that produced it -- deleting a leaked line in a
+# later commit does not unpublish it. --redact keeps the finding out of the
+# log: the report says which file and which rule, never the value.
+#
+# In CI this needs fetch-depth: 0. A shallow clone has no history to scan.
+lane_secrets() {
+  if ! ensure_gitleaks; then
+    secd_missing_linter gitleaks
+    return 0
+  fi
+  local args=(--config "$root/.gitleaks.toml" --redact --no-banner --exit-code 1)
+  gitleaks dir . "${args[@]}"
+  # Refuse rather than report a pass over one commit: a shallow clone narrows
+  # this scan to nothing and says so nowhere.
+  if [[ "$(git -C "$root" rev-parse --is-shallow-repository)" == "true" ]]; then
+    secd_die "the history scan needs a full clone (in CI: fetch-depth: 0)"
+  fi
+  gitleaks git . "${args[@]}"
 }
 
 lane_fmt() {
@@ -134,6 +215,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# mktemp follows TMPDIR. When that is under this repo (usrquota on /tmp),
+# cargo otherwise treats the probe as a workspace member.
+[workspace]
+
 [dependencies]
 secd-core = { path = "$root/crates/secd-core" }
 serde = "=${serde_ver}"
@@ -159,13 +244,13 @@ EOF
 
 # ---------------------------------------------------------------- dispatch
 
-run_lane() {
+dispatch_lane() {
   local lane="$1"
-  echo "check: ${lane}" >&2
   case "$lane" in
     contract | pipeline) lane_contract ;;
     shell) lane_shell ;;
     workflow) lane_workflow ;;
+    secrets) lane_secrets ;;
     fmt) lane_fmt ;;
     ui) lane_ui ;;
     clippy) lane_clippy ;;
@@ -178,6 +263,25 @@ run_lane() {
       usage
       ;;
   esac
+}
+
+# One foldable block per lane. GitHub collapses ::group::, and a local run gets
+# the same delimiters, so the output of a failing lane starts where its marker
+# does instead of somewhere in the scrollback.
+#
+# The lane is never the operand of `||`, `&&`, `!` or an `if`: bash turns
+# errexit off for the whole call chain of a function whose status is tested, so
+# a lane invoked that way reports its last command's status and every command
+# before it becomes advisory -- `actionlint` and `gitleaks dir` are both ahead
+# of one. The closing marker comes from an EXIT trap, which fires on the path
+# errexit takes out of the script.
+run_lane() {
+  local lane="$1"
+  echo "::group::check: ${lane}" >&2
+  trap 'echo "::endgroup::" >&2' EXIT
+  dispatch_lane "$lane"
+  trap - EXIT
+  echo "::endgroup::" >&2
 }
 
 lanes=()

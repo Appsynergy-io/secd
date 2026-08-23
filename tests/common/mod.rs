@@ -141,6 +141,15 @@ pub fn isolated_secd(args: &[&str]) -> Command {
 
 impl Harness {
     pub fn new(entries: &[(&str, Vec<u8>)]) -> Self {
+        let with_meta: Vec<(&str, Vec<u8>, Value)> = entries
+            .iter()
+            .map(|(name, plain)| (*name, plain.clone(), json!({})))
+            .collect();
+        Self::new_with_meta(&with_meta)
+    }
+
+    /// Like `new`, but seeds each entry with the given `meta` instead of `{}`.
+    pub fn new_with_meta(entries: &[(&str, Vec<u8>, Value)]) -> Self {
         let a = assets();
         let home = unique("home");
         let runtime = unique("run");
@@ -150,7 +159,10 @@ impl Harness {
         fs::create_dir_all(&data).expect("data");
 
         let state = AppState::open(&data).expect("appstate");
-        let (_id, token) = state.sessions.create_device("t7@secd.test", "t7host");
+        let (_id, token) = state
+            .sessions
+            .create_device("t7@secd.test", "t7host")
+            .expect("device session");
         let mut dek = [0u8; 32];
         File::open("/dev/urandom")
             .expect("urandom")
@@ -158,12 +170,12 @@ impl Harness {
             .expect("dek");
 
         let mut body_entries = Vec::new();
-        for (name, plain) in entries {
+        for (name, plain, meta) in entries {
             let blob = seal(&dek, name, plain).expect("seal");
             body_entries.push(json!({
                 "name": name,
                 "ciphertext": hex::encode(blob),
-                "meta": {},
+                "meta": meta,
             }));
         }
         let app = secd_web::app(state.clone());

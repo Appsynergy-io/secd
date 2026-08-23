@@ -4,6 +4,7 @@ version = "0.1.10"
 edition = "2021"
 publish = false
 description = "LAN secrets store TLS API"
+license = "Apache-2.0"
 
 [lib]
 name = "secd_web"
