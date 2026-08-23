@@ -244,7 +244,15 @@ fn dump_dom(fragment: &str, width_px: u32) -> Option<String> {
         .join(format!("secd-t6-{}-{}-{n}", std::process::id(), width_px));
     let _ = std::fs::create_dir_all(&data);
     let url = format!("file://{}", path.display());
+    // Thorium SIGTRAPs if TMPDIR is the worktree cargo scratch, and if it
+    // falls through to a full /tmp. Runtime dir / shm are the working temps.
+    let chrome_tmp = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("/dev/shm"));
     let out = Command::new(timeout)
+        .env("TMPDIR", &chrome_tmp)
+        .env("TMP", &chrome_tmp)
         .args(["--kill-after=2s", "20s"])
         .arg(&bin)
         .env("TMPDIR", &data)

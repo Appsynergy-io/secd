@@ -4,6 +4,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -12,9 +13,9 @@ use axum::Router;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::db::{Db, RawConn, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
-use crate::vault::{insert_audit, last_audit_hash, list_audit, zero_hash, Db};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AuditEvent {
@@ -38,14 +39,18 @@ pub struct AuditLog {
 
 impl AuditLog {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        let db = Db::open(dir)?;
+        Self::from_db(Db::open(dir)?, dir)
+    }
+
+    pub(crate) fn from_db(db: Db, dir: &Path) -> anyhow::Result<Self> {
         let path = dir.join("audit.jsonl");
-        let mut events = Vec::new();
-        if let Ok(rows) = list_audit(&db) {
-            for row in &rows {
-                events.push(row_to_event(row));
-            }
-        }
+        // A read that fails is not an empty chain: importing the jsonl on top
+        // of rows we could not see would append the whole log twice.
+        let mut events: Vec<AuditEvent> = list_audit(&db)
+            .context("read the audit chain")?
+            .iter()
+            .map(row_to_event)
+            .collect();
         if events.is_empty() && path.exists() {
             if let Ok(imported) = import_jsonl(&path, &db) {
                 events = imported;
@@ -58,34 +63,47 @@ impl AuditLog {
         })
     }
 
-    pub fn record(&self, action: &str, session_id: Option<&str>) {
-        self.record_names(action, session_id, &[]);
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
     }
 
-    pub fn record_names(&self, action: &str, session_id: Option<&str>, names: &[&str]) {
-        let names_owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-        let names_json = serde_json::to_string(&names_owned).unwrap_or_else(|_| "[]".into());
-        let prev = last_audit_hash(&self.db).unwrap_or_else(|_| zero_hash());
-        let hash = event_hash(&prev, action, session_id, &names_json);
-        let _ = insert_audit(&self.db, action, session_id, &names_json, &prev, &hash);
-        let event = AuditEvent {
-            action: action.to_string(),
-            session_id: session_id.map(str::to_string),
-            names: names_owned,
-            prev,
-            hash,
-        };
-        if let Ok(line) = serde_json::to_string(&event) {
+    /// Sqlite is the chain: a failed INSERT or an unreadable head fails the
+    /// record. jsonl is a replica written after COMMIT.
+    pub fn record(&self, action: &str, session_id: Option<&str>) -> anyhow::Result<()> {
+        self.record_names(action, session_id, &[])
+    }
+
+    pub fn record_names(
+        &self,
+        action: &str,
+        session_id: Option<&str>,
+        names: &[&str],
+    ) -> anyhow::Result<()> {
+        let event = self
+            .db
+            .with(|conn| conn.immediate(|| append_on(conn, action, session_id, names)))
+            .context("append to the audit chain")?;
+        self.db.tighten();
+        self.journal(&event);
+        Ok(())
+    }
+
+    /// Sqlite is the chain. A journal miss must not fail the request or
+    /// roll back a committed row.
+    pub(crate) fn journal(&self, event: &AuditEvent) {
+        if let Ok(line) = serde_json::to_string(event) {
             if let Ok(mut f) = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
                 .open(&self.path)
             {
-                let _ = writeln!(f, "{line}");
+                if writeln!(f, "{line}").is_ok() {
+                    let _ = f.sync_all();
+                }
             }
         }
-        lock(&self.events).push(event);
+        lock(&self.events).push(event.clone());
     }
 
     pub fn events(&self) -> Vec<AuditEvent> {
@@ -93,11 +111,14 @@ impl AuditLog {
     }
 
     pub fn verify(&self) -> bool {
-        verify_rows(list_audit(&self.db).unwrap_or_default()) && verify_jsonl(&self.path)
+        let Ok(rows) = list_audit(&self.db) else {
+            return false;
+        };
+        verify_rows(rows) && verify_jsonl(&self.path)
     }
 }
 
-fn row_to_event(row: &crate::vault::AuditRow) -> AuditEvent {
+fn row_to_event(row: &AuditRow) -> AuditEvent {
     let names: Vec<String> = serde_json::from_str(&row.names).unwrap_or_default();
     AuditEvent {
         action: row.action.clone(),
@@ -135,14 +156,16 @@ fn import_jsonl(path: &Path, db: &Db) -> anyhow::Result<Vec<AuditEvent>> {
             .unwrap_or_default();
         let names_json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".into());
         let hash = event_hash(&prev, &action, session_id.as_deref(), &names_json);
-        insert_audit(
-            db,
-            &action,
-            session_id.as_deref(),
-            &names_json,
-            &prev,
-            &hash,
-        )?;
+        db.with(|conn| {
+            insert_on(
+                conn,
+                &action,
+                session_id.as_deref(),
+                &names_json,
+                &prev,
+                &hash,
+            )
+        })?;
         events.push(AuditEvent {
             action,
             session_id,
@@ -155,7 +178,7 @@ fn import_jsonl(path: &Path, db: &Db) -> anyhow::Result<Vec<AuditEvent>> {
     Ok(events)
 }
 
-fn verify_rows(rows: Vec<crate::vault::AuditRow>) -> bool {
+fn verify_rows(rows: Vec<AuditRow>) -> bool {
     let mut prev = zero_hash();
     for row in rows {
         if row.prev_hash != prev {
@@ -239,6 +262,96 @@ pub(crate) fn event_hash(
     hex::encode(sha256(&buf))
 }
 
+/// SELECT the head and INSERT the next row. Caller holds BEGIN IMMEDIATE.
+/// The hash is computed from the head read here, not from a previous with().
+pub(crate) fn append_on(
+    conn: &RawConn,
+    action: &str,
+    session_id: Option<&str>,
+    names: &[&str],
+) -> anyhow::Result<AuditEvent> {
+    let names_owned: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+    let names_json = serde_json::to_string(&names_owned).context("audit names json")?;
+    let prev = head_hash(conn).context("read the audit head")?;
+    let hash = event_hash(&prev, action, session_id, &names_json);
+    insert_on(conn, action, session_id, &names_json, &prev, &hash)
+        .context("append to the audit chain")?;
+    Ok(AuditEvent {
+        action: action.to_string(),
+        session_id: session_id.map(str::to_string),
+        names: names_owned,
+        prev,
+        hash,
+    })
+}
+
+fn head_hash(conn: &RawConn) -> anyhow::Result<String> {
+    let stmt = conn.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1")?;
+    match stmt.step()? {
+        Step::Row => Ok(stmt.text(0).unwrap_or_else(zero_hash)),
+        Step::Done => Ok(zero_hash()),
+    }
+}
+
+fn insert_on(
+    conn: &RawConn,
+    action: &str,
+    session_id: Option<&str>,
+    names_json: &str,
+    prev_hash: &str,
+    hash: &str,
+) -> anyhow::Result<()> {
+    let stmt = conn.prepare(
+        "INSERT INTO audit (action, session_id, names, prev_hash, hash) VALUES (?, ?, ?, ?, ?)",
+    )?;
+    stmt.bind_text(1, action)?;
+    stmt.bind_opt(2, session_id)?;
+    stmt.bind_text(3, names_json)?;
+    stmt.bind_text(4, prev_hash)?;
+    stmt.bind_text(5, hash)?;
+    stmt.run()
+}
+
+#[cfg(test)]
+pub(crate) fn last_audit_hash(db: &Db) -> anyhow::Result<String> {
+    db.with(head_hash)
+}
+
+pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
+    db.with(|conn| {
+        let stmt = conn
+            .prepare("SELECT action, session_id, names, prev_hash, hash FROM audit ORDER BY seq")?;
+        let mut out = Vec::new();
+        loop {
+            match stmt.step()? {
+                Step::Done => break,
+                Step::Row => {
+                    out.push(AuditRow {
+                        action: stmt.text(0).unwrap_or_default(),
+                        session_id: stmt.text(1),
+                        names: stmt.text(2).unwrap_or_else(|| "[]".into()),
+                        prev_hash: stmt.text(3).unwrap_or_default(),
+                        hash: stmt.text(4).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
+pub(crate) struct AuditRow {
+    pub action: String,
+    pub session_id: Option<String>,
+    pub names: String,
+    pub prev_hash: String,
+    pub hash: String,
+}
+
+pub(crate) fn zero_hash() -> String {
+    "0".repeat(64)
+}
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/audit", get(get_audit))
 }
@@ -247,7 +360,7 @@ async fn get_audit(State(state): State<AppState>, headers: HeaderMap) -> Respons
     if state.sessions.vault_from_headers(&headers).is_none() {
         return fail_auth();
     }
-    let rows = match list_audit(state.vault.db()) {
+    let rows = match list_audit(state.audit.db()) {
         Ok(r) => r,
         Err(_) => return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     };
@@ -271,7 +384,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn sha256(input: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -355,4 +468,74 @@ fn sha256(input: &[u8]) -> [u8; 32] {
         out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use crate::db::Step;
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "secd-u-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("test dir");
+        p
+    }
+
+    fn audit_rows(db: &Db) -> i64 {
+        db.with(|conn| {
+            let stmt = conn.prepare("SELECT COUNT(*) FROM audit")?;
+            match stmt.step()? {
+                Step::Row => Ok(stmt.i64_at(0)),
+                Step::Done => Ok(0),
+            }
+        })
+        .expect("count")
+    }
+
+    /// A head the chain cannot read is an error, never a chain that starts
+    /// again from zero.
+    #[test]
+    fn T_AUDIT_READ_FAILS_CLOSED() {
+        let dir = fresh_dir("audit-read");
+        let log = AuditLog::open(&dir).expect("open");
+        log.record("session.revoke", Some("first")).expect("record");
+
+        // Inserts still land; the head cannot be read, because the ordering
+        // column the read names is gone.
+        let db = Db::open(&dir).expect("db");
+        db.with(|conn| {
+            conn.exec(
+                "DROP TABLE audit;
+                 CREATE TABLE audit (
+                   action TEXT NOT NULL,
+                   session_id TEXT,
+                   names TEXT NOT NULL,
+                   prev_hash TEXT NOT NULL,
+                   hash TEXT NOT NULL
+                 );",
+            )
+        })
+        .expect("break the audit read");
+
+        assert!(
+            last_audit_hash(&db).is_err(),
+            "an unreadable chain must not report a head"
+        );
+        assert!(
+            log.record("session.revoke", Some("second")).is_err(),
+            "a failed head read must fail the record"
+        );
+        assert_eq!(
+            audit_rows(&db),
+            0,
+            "a failed head read must not restart the chain from zero"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

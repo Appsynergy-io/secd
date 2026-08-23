@@ -82,6 +82,8 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - A released binary carries no path from the machine that built it. The release refuses one that does.
 - Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
 - DEK: kernel keyring, else `$XDG_RUNTIME_DIR/secd/` (tmpfs). `store` keeps a kernel write only if `load` reads it back.
+- Sessions are rows in `secd.db`, holding a token hash and a stored deadline: a restart signs nobody out, and expiry and revocation outlive the process that set them.
+- The audit chain fails closed. A write it cannot make, or a head it cannot read, fails the request being recorded; the chain never restarts from zero on an error.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
 - Toolchain, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.

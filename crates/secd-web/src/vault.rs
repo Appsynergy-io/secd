@@ -1,9 +1,4 @@
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context};
 use axum::extract::State;
@@ -15,337 +10,10 @@ use axum::Router;
 use secd_core::{check_name, CustomProvider, Field};
 use serde_json::{json, Value};
 
+use crate::audit::AuditLog;
+use crate::db::{Db, Step};
 use crate::headers::{fail_auth, json_status, json_value};
 use crate::state::AppState;
-
-const SQLITE_OK: c_int = 0;
-const SQLITE_ROW: c_int = 100;
-const SQLITE_DONE: c_int = 101;
-const SQLITE_NULL: c_int = 5;
-const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
-const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
-const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
-
-const DB_NAME: &str = "secd.db";
-
-#[repr(C)]
-struct sqlite3 {
-    _private: [u8; 0],
-}
-
-#[repr(C)]
-struct sqlite3_stmt {
-    _private: [u8; 0],
-}
-
-use libsqlite3_sys as _;
-
-extern "C" {
-    fn sqlite3_open_v2(
-        filename: *const c_char,
-        pp_db: *mut *mut sqlite3,
-        flags: c_int,
-        z_vfs: *const c_char,
-    ) -> c_int;
-    fn sqlite3_close(db: *mut sqlite3) -> c_int;
-    fn sqlite3_exec(
-        db: *mut sqlite3,
-        sql: *const c_char,
-        cb: Option<
-            unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int,
-        >,
-        arg: *mut c_void,
-        errmsg: *mut *mut c_char,
-    ) -> c_int;
-    fn sqlite3_prepare_v2(
-        db: *mut sqlite3,
-        z_sql: *const c_char,
-        n_byte: c_int,
-        pp_stmt: *mut *mut sqlite3_stmt,
-        pz_tail: *mut *const c_char,
-    ) -> c_int;
-    fn sqlite3_bind_text(
-        stmt: *mut sqlite3_stmt,
-        i: c_int,
-        text: *const c_char,
-        n: c_int,
-        destructor: Option<unsafe extern "C" fn(*mut c_void)>,
-    ) -> c_int;
-    fn sqlite3_bind_null(stmt: *mut sqlite3_stmt, i: c_int) -> c_int;
-    fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int;
-    fn sqlite3_column_text(stmt: *mut sqlite3_stmt, i: c_int) -> *const u8;
-    fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i: c_int) -> c_int;
-    fn sqlite3_column_type(stmt: *mut sqlite3_stmt, i: c_int) -> c_int;
-    fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int;
-    fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int;
-    fn sqlite3_errmsg(db: *mut sqlite3) -> *const c_char;
-    fn sqlite3_free(p: *mut c_void);
-    fn sqlite3_busy_timeout(db: *mut sqlite3, ms: c_int) -> c_int;
-    fn sqlite3_changes(db: *mut sqlite3) -> c_int;
-}
-
-fn sqlite_transient() -> Option<unsafe extern "C" fn(*mut c_void)> {
-    // SQLITE_TRANSIENT: sqlite copies the buffer.
-    Some(unsafe { std::mem::transmute::<isize, unsafe extern "C" fn(*mut c_void)>(-1isize) })
-}
-
-struct RawConn {
-    ptr: *mut sqlite3,
-}
-
-// Connection is used only while the Mutex is held.
-unsafe impl Send for RawConn {}
-
-impl Drop for RawConn {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            // SAFETY: ptr is the handle from sqlite3_open_v2; we own it.
-            unsafe {
-                sqlite3_close(self.ptr);
-            }
-            self.ptr = ptr::null_mut();
-        }
-    }
-}
-
-impl RawConn {
-    fn errmsg(&self) -> String {
-        // SAFETY: ptr is a live sqlite3 opened by us.
-        unsafe {
-            let p = sqlite3_errmsg(self.ptr);
-            if p.is_null() {
-                return "sqlite error".into();
-            }
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    }
-
-    fn exec(&self, sql: &str) -> anyhow::Result<()> {
-        let c = CString::new(sql).context("sql nul")?;
-        let mut err = ptr::null_mut();
-        // SAFETY: c lives for the call; errmsg is freed on the error path.
-        let rc = unsafe { sqlite3_exec(self.ptr, c.as_ptr(), None, ptr::null_mut(), &mut err) };
-        if rc != SQLITE_OK {
-            let msg = if err.is_null() {
-                self.errmsg()
-            } else {
-                // SAFETY: err is a sqlite-allocated string when non-null.
-                let s = unsafe { CStr::from_ptr(err) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { sqlite3_free(err.cast()) };
-                s
-            };
-            return Err(anyhow!("sqlite exec: {msg}"));
-        }
-        if !err.is_null() {
-            // SAFETY: unused errmsg still owned by us.
-            unsafe { sqlite3_free(err.cast()) };
-        }
-        Ok(())
-    }
-
-    fn prepare(&self, sql: &str) -> anyhow::Result<Stmt> {
-        let c = CString::new(sql).context("sql nul")?;
-        let mut stmt = ptr::null_mut();
-        // SAFETY: c lives for the call; stmt is written on SQLITE_OK.
-        let rc =
-            unsafe { sqlite3_prepare_v2(self.ptr, c.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-        if rc != SQLITE_OK || stmt.is_null() {
-            return Err(anyhow!("sqlite prepare: {}", self.errmsg()));
-        }
-        Ok(Stmt { ptr: stmt })
-    }
-}
-
-struct Stmt {
-    ptr: *mut sqlite3_stmt,
-}
-
-impl Drop for Stmt {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            // SAFETY: ptr is a statement from sqlite3_prepare_v2.
-            unsafe {
-                sqlite3_finalize(self.ptr);
-            }
-            self.ptr = ptr::null_mut();
-        }
-    }
-}
-
-impl Stmt {
-    fn bind_text(&self, i: c_int, v: &str) -> anyhow::Result<()> {
-        // SAFETY: SQLITE_TRANSIENT copies v; i is a 1-based parameter index.
-        let rc = unsafe {
-            sqlite3_bind_text(
-                self.ptr,
-                i,
-                v.as_ptr().cast(),
-                v.len() as c_int,
-                sqlite_transient(),
-            )
-        };
-        if rc != SQLITE_OK {
-            return Err(anyhow!("sqlite bind"));
-        }
-        Ok(())
-    }
-
-    fn bind_null(&self, i: c_int) -> anyhow::Result<()> {
-        // SAFETY: i is a 1-based parameter index on this statement.
-        let rc = unsafe { sqlite3_bind_null(self.ptr, i) };
-        if rc != SQLITE_OK {
-            return Err(anyhow!("sqlite bind"));
-        }
-        Ok(())
-    }
-
-    fn bind_opt(&self, i: c_int, v: Option<&str>) -> anyhow::Result<()> {
-        match v {
-            Some(s) => self.bind_text(i, s),
-            None => self.bind_null(i),
-        }
-    }
-
-    fn step(&self) -> anyhow::Result<Step> {
-        // SAFETY: ptr is a live prepared statement.
-        let rc = unsafe { sqlite3_step(self.ptr) };
-        match rc {
-            SQLITE_ROW => Ok(Step::Row),
-            SQLITE_DONE => Ok(Step::Done),
-            _ => Err(anyhow!("sqlite step {rc}")),
-        }
-    }
-
-    fn reset(&self) -> anyhow::Result<()> {
-        // SAFETY: ptr is a live prepared statement.
-        let rc = unsafe { sqlite3_reset(self.ptr) };
-        if rc != SQLITE_OK {
-            return Err(anyhow!("sqlite reset"));
-        }
-        Ok(())
-    }
-
-    fn text(&self, i: c_int) -> Option<String> {
-        // SAFETY: only valid after SQLITE_ROW; bytes are copied immediately.
-        unsafe {
-            if sqlite3_column_type(self.ptr, i) == SQLITE_NULL {
-                return None;
-            }
-            let p = sqlite3_column_text(self.ptr, i);
-            if p.is_null() {
-                return None;
-            }
-            let n = sqlite3_column_bytes(self.ptr, i) as usize;
-            let sl = std::slice::from_raw_parts(p, n);
-            Some(String::from_utf8_lossy(sl).into_owned())
-        }
-    }
-}
-
-enum Step {
-    Row,
-    Done,
-}
-
-#[derive(Clone)]
-pub(crate) struct Db {
-    dir: PathBuf,
-    inner: Arc<Mutex<RawConn>>,
-}
-
-impl Db {
-    pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join(DB_NAME);
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow!("db path is not utf-8"))?;
-        let c_path = CString::new(path_str).context("db path nul")?;
-        let mut ptr = ptr::null_mut();
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
-        // SAFETY: c_path lives for the call; ptr is written on SQLITE_OK.
-        let rc = unsafe { sqlite3_open_v2(c_path.as_ptr(), &mut ptr, flags, ptr::null()) };
-        if rc != SQLITE_OK || ptr.is_null() {
-            if !ptr.is_null() {
-                unsafe { sqlite3_close(ptr) };
-            }
-            return Err(anyhow!("sqlite open {rc}"));
-        }
-        // SAFETY: ptr is the handle we just opened.
-        unsafe {
-            sqlite3_busy_timeout(ptr, 5000);
-        }
-        tighten(dir);
-        let raw = RawConn { ptr };
-        raw.exec("PRAGMA journal_mode=WAL;")?;
-        raw.exec("PRAGMA synchronous=NORMAL;")?;
-        raw.exec(SCHEMA)?;
-        tighten(dir);
-        Ok(Self {
-            dir: dir.to_path_buf(),
-            inner: Arc::new(Mutex::new(raw)),
-        })
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, RawConn> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn with<T>(&self, f: impl FnOnce(&RawConn) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        f(&self.lock())
-    }
-
-    fn tighten(&self) {
-        tighten(&self.dir);
-    }
-}
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS entries (
-  name TEXT PRIMARY KEY NOT NULL,
-  ciphertext TEXT NOT NULL,
-  meta TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS versions (
-  name TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  ciphertext TEXT NOT NULL,
-  meta TEXT NOT NULL,
-  created TEXT NOT NULL,
-  PRIMARY KEY (name, seq)
-);
-CREATE TABLE IF NOT EXISTS wraps (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  factor TEXT NOT NULL,
-  cred_id TEXT,
-  salt TEXT,
-  blob TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS custom_providers (
-  name TEXT PRIMARY KEY NOT NULL,
-  title TEXT NOT NULL,
-  fields TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audit (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  action TEXT NOT NULL,
-  session_id TEXT,
-  names TEXT NOT NULL,
-  prev_hash TEXT NOT NULL,
-  hash TEXT NOT NULL
-);
-";
-
-fn tighten(dir: &Path) {
-    for name in [DB_NAME, "secd.db-wal", "secd.db-shm"] {
-        let p = dir.join(name);
-        if p.exists() {
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct VaultEntry {
@@ -370,17 +38,16 @@ pub struct VaultStore {
 
 impl VaultStore {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        let db = Db::open(dir)?;
+        Ok(Self::from_db(Db::open(dir)?, dir))
+    }
+
+    pub(crate) fn from_db(db: Db, dir: &Path) -> Self {
         let store = Self {
             db,
             dir: dir.to_path_buf(),
         };
         store.sync_wraps();
-        Ok(store)
-    }
-
-    pub(crate) fn db(&self) -> &Db {
-        &self.db
+        store
     }
 
     pub fn entries(&self) -> anyhow::Result<Vec<VaultEntry>> {
@@ -417,70 +84,71 @@ impl VaultStore {
         })
     }
 
-    pub fn replace_entries(&self, entries: &[VaultEntry]) -> anyhow::Result<()> {
+    pub fn replace_entries(
+        &self,
+        entries: &[VaultEntry],
+        audit: &AuditLog,
+        session_id: Option<&str>,
+        names: &[&str],
+    ) -> anyhow::Result<()> {
         let created = crate::auth::now_rfc3339();
-        self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
-                // Names whose ciphertext changes (or appears) in this snapshot
-                // get a new version row; unchanged names keep their history.
-                let mut before: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-                let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
-                loop {
-                    match sel.step()? {
-                        Step::Done => break,
-                        Step::Row => {
-                            before.insert(
-                                sel.text(0).unwrap_or_default(),
-                                sel.text(1).unwrap_or_default(),
-                            );
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    // Names whose ciphertext changes (or appears) in this snapshot
+                    // get a new version row; unchanged names keep their history.
+                    let mut before: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
+                    let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
+                    loop {
+                        match sel.step()? {
+                            Step::Done => break,
+                            Step::Row => {
+                                before.insert(
+                                    sel.text(0).unwrap_or_default(),
+                                    sel.text(1).unwrap_or_default(),
+                                );
+                            }
                         }
                     }
-                }
-                conn.exec("DELETE FROM entries")?;
-                let stmt =
-                    conn.prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)")?;
-                let ver = conn.prepare(
-                    "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
-                     (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
-                )?;
-                for e in entries {
-                    let ct = e.ciphertext.to_string();
-                    let meta = e.meta.to_string();
-                    stmt.reset()?;
-                    stmt.bind_text(1, &e.name)?;
-                    stmt.bind_text(2, &ct)?;
-                    stmt.bind_text(3, &meta)?;
-                    match stmt.step()? {
-                        Step::Done => {}
-                        Step::Row => return Err(anyhow!("insert returned a row")),
-                    }
-                    if before.get(&e.name).map(String::as_str) != Some(ct.as_str()) {
-                        ver.reset()?;
-                        ver.bind_text(1, &e.name)?;
-                        ver.bind_text(2, &e.name)?;
-                        ver.bind_text(3, &ct)?;
-                        ver.bind_text(4, &meta)?;
-                        ver.bind_text(5, &created)?;
-                        match ver.step()? {
+                    conn.exec("DELETE FROM entries")?;
+                    let stmt = conn
+                        .prepare("INSERT INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)")?;
+                    let ver = conn.prepare(
+                        "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
+                    )?;
+                    for e in entries {
+                        let ct = e.ciphertext.to_string();
+                        let meta = e.meta.to_string();
+                        stmt.reset()?;
+                        stmt.bind_text(1, &e.name)?;
+                        stmt.bind_text(2, &ct)?;
+                        stmt.bind_text(3, &meta)?;
+                        match stmt.step()? {
                             Step::Done => {}
                             Step::Row => return Err(anyhow!("insert returned a row")),
                         }
+                        if before.get(&e.name).map(String::as_str) != Some(ct.as_str()) {
+                            ver.reset()?;
+                            ver.bind_text(1, &e.name)?;
+                            ver.bind_text(2, &e.name)?;
+                            ver.bind_text(3, &ct)?;
+                            ver.bind_text(4, &meta)?;
+                            ver.bind_text(5, &created)?;
+                            match ver.step()? {
+                                Step::Done => {}
+                                Step::Row => return Err(anyhow!("insert returned a row")),
+                            }
+                        }
                     }
                 }
-                Ok(())
-            })();
-            match tx {
-                Ok(()) => conn.exec("COMMIT"),
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+                crate::audit::append_on(conn, "vault.put", session_id, names)
+            })
         })?;
         self.db.tighten();
         self.sync_wraps();
+        audit.journal(&event);
         Ok(())
     }
 
@@ -512,22 +180,28 @@ impl VaultStore {
     /// Restores version `seq` of `name` as the current entry and appends the
     /// restored ciphertext as a new version. Returns false when no such
     /// version exists.
-    pub fn rollback(&self, name: &str, seq: i64) -> anyhow::Result<bool> {
+    pub fn rollback(
+        &self,
+        name: &str,
+        seq: i64,
+        audit: &AuditLog,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let created = crate::auth::now_rfc3339();
-        let hit = self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
+        let (hit, event) = self.db.with(|conn| {
+            conn.immediate(|| {
                 let sel = conn
                     .prepare("SELECT ciphertext, meta FROM versions WHERE name = ? AND seq = ?")?;
                 sel.bind_text(1, name)?;
                 sel.bind_text(2, &seq.to_string())?;
                 let (ct, meta) = match sel.step()? {
-                    Step::Done => return Ok(false),
+                    Step::Done => return Ok((false, None)),
                     Step::Row => (
                         sel.text(0).unwrap_or_default(),
                         sel.text(1).unwrap_or_else(|| "{}".into()),
                     ),
                 };
+                drop(sel);
                 let up = conn.prepare(
                     "INSERT OR REPLACE INTO entries (name, ciphertext, meta) VALUES (?, ?, ?)",
                 )?;
@@ -538,6 +212,7 @@ impl VaultStore {
                     Step::Done => {}
                     Step::Row => return Err(anyhow!("insert returned a row")),
                 }
+                drop(up);
                 let ver = conn.prepare(
                     "INSERT INTO versions (name, seq, ciphertext, meta, created) VALUES (?, \
                      (SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE name = ?), ?, ?, ?)",
@@ -548,22 +223,18 @@ impl VaultStore {
                 ver.bind_text(4, &meta)?;
                 ver.bind_text(5, &created)?;
                 match ver.step()? {
-                    Step::Done => Ok(true),
-                    Step::Row => Err(anyhow!("insert returned a row")),
+                    Step::Done => {}
+                    Step::Row => return Err(anyhow!("insert returned a row")),
                 }
-            })();
-            match tx {
-                Ok(hit) => {
-                    conn.exec("COMMIT")?;
-                    Ok(hit)
-                }
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+                drop(ver);
+                let event = crate::audit::append_on(conn, "vault.rollback", session_id, &[name])?;
+                Ok((true, Some(event)))
+            })
         })?;
         self.db.tighten();
+        if let Some(event) = event {
+            audit.journal(&event);
+        }
         Ok(hit)
     }
 
@@ -592,37 +263,54 @@ impl VaultStore {
         })
     }
 
-    pub fn put_custom_provider(&self, p: &CustomProvider) -> anyhow::Result<()> {
+    pub fn put_custom_provider(&self, p: &CustomProvider, audit: &AuditLog) -> anyhow::Result<()> {
         let fields = serde_json::to_string(&fields_json(&p.fields)).context("fields json")?;
-        self.db.with(|conn| {
-            let stmt = conn.prepare(
-                "INSERT INTO custom_providers (name, title, fields) VALUES (?, ?, ?)
-                 ON CONFLICT(name) DO UPDATE SET title=excluded.title, fields=excluded.fields",
-            )?;
-            stmt.bind_text(1, &p.name)?;
-            stmt.bind_text(2, &p.title)?;
-            stmt.bind_text(3, &fields)?;
-            match stmt.step()? {
-                Step::Done => Ok(()),
-                Step::Row => Err(anyhow!("upsert returned a row")),
-            }
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    let stmt = conn.prepare(
+                        "INSERT INTO custom_providers (name, title, fields) VALUES (?, ?, ?)
+                         ON CONFLICT(name) DO UPDATE SET title=excluded.title, fields=excluded.fields",
+                    )?;
+                    stmt.bind_text(1, &p.name)?;
+                    stmt.bind_text(2, &p.title)?;
+                    stmt.bind_text(3, &fields)?;
+                    stmt.run()?;
+                }
+                crate::audit::append_on(conn, "provider.put", None, &[p.name.as_str()])
+            })
         })?;
         self.db.tighten();
+        audit.journal(&event);
         Ok(())
     }
 
-    pub fn delete_custom_provider(&self, name: &str) -> anyhow::Result<bool> {
-        let n = self.db.with(|conn| {
-            let stmt = conn.prepare("DELETE FROM custom_providers WHERE name = ?")?;
-            stmt.bind_text(1, name)?;
-            match stmt.step()? {
-                // SAFETY: conn.ptr is the live handle that just ran DELETE.
-                Step::Done => Ok(unsafe { sqlite3_changes(conn.ptr) }),
-                Step::Row => Err(anyhow!("delete returned a row")),
-            }
+    pub fn delete_custom_provider(&self, name: &str, audit: &AuditLog) -> anyhow::Result<bool> {
+        let event = self.db.with(|conn| {
+            conn.immediate(|| {
+                {
+                    let stmt = conn.prepare("DELETE FROM custom_providers WHERE name = ?")?;
+                    stmt.bind_text(1, name)?;
+                    stmt.run()?;
+                }
+                if conn.changes() == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(crate::audit::append_on(
+                    conn,
+                    "provider.delete",
+                    None,
+                    &[name],
+                )?))
+            })
         })?;
         self.db.tighten();
-        Ok(n > 0)
+        if let Some(event) = event {
+            audit.journal(&event);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn sync_wraps(&self) {
@@ -642,8 +330,7 @@ impl VaultStore {
 
     fn replace_wraps(&self, rows: &[WrapRow]) -> anyhow::Result<()> {
         self.db.with(|conn| {
-            conn.exec("BEGIN IMMEDIATE")?;
-            let tx = (|| {
+            conn.immediate(|| {
                 conn.exec("DELETE FROM wraps")?;
                 let stmt = conn.prepare(
                     "INSERT INTO wraps (factor, cred_id, salt, blob) VALUES (?, ?, ?, ?)",
@@ -660,14 +347,7 @@ impl VaultStore {
                     }
                 }
                 Ok(())
-            })();
-            match tx {
-                Ok(()) => conn.exec("COMMIT"),
-                Err(e) => {
-                    let _ = conn.exec("ROLLBACK");
-                    Err(e)
-                }
-            }
+            })
         })
     }
 }
@@ -769,77 +449,6 @@ pub(crate) fn has_forbidden(v: &Value) -> bool {
     }
 }
 
-pub(crate) fn last_audit_hash(db: &Db) -> anyhow::Result<String> {
-    db.with(|conn| {
-        let stmt = conn.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1")?;
-        match stmt.step()? {
-            Step::Row => Ok(stmt.text(0).unwrap_or_else(zero_hash)),
-            Step::Done => Ok(zero_hash()),
-        }
-    })
-}
-
-pub(crate) fn insert_audit(
-    db: &Db,
-    action: &str,
-    session_id: Option<&str>,
-    names_json: &str,
-    prev_hash: &str,
-    hash: &str,
-) -> anyhow::Result<()> {
-    db.with(|conn| {
-        let stmt = conn.prepare(
-            "INSERT INTO audit (action, session_id, names, prev_hash, hash) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        stmt.bind_text(1, action)?;
-        stmt.bind_opt(2, session_id)?;
-        stmt.bind_text(3, names_json)?;
-        stmt.bind_text(4, prev_hash)?;
-        stmt.bind_text(5, hash)?;
-        match stmt.step()? {
-            Step::Done => Ok(()),
-            Step::Row => Err(anyhow!("insert returned a row")),
-        }
-    })?;
-    db.tighten();
-    Ok(())
-}
-
-pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
-    db.with(|conn| {
-        let stmt = conn
-            .prepare("SELECT action, session_id, names, prev_hash, hash FROM audit ORDER BY seq")?;
-        let mut out = Vec::new();
-        loop {
-            match stmt.step()? {
-                Step::Done => break,
-                Step::Row => {
-                    out.push(AuditRow {
-                        action: stmt.text(0).unwrap_or_default(),
-                        session_id: stmt.text(1),
-                        names: stmt.text(2).unwrap_or_else(|| "[]".into()),
-                        prev_hash: stmt.text(3).unwrap_or_default(),
-                        hash: stmt.text(4).unwrap_or_default(),
-                    });
-                }
-            }
-        }
-        Ok(out)
-    })
-}
-
-pub(crate) struct AuditRow {
-    pub action: String,
-    pub session_id: Option<String>,
-    pub names: String,
-    pub prev_hash: String,
-    pub hash: String,
-}
-
-pub(crate) fn zero_hash() -> String {
-    "0".repeat(64)
-}
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/vault", get(get_vault).put(put_vault))
@@ -930,13 +539,14 @@ async fn put_vault(
             version: 0,
         });
     }
-    if state.vault.replace_entries(&entries).is_err() {
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    if state
+        .vault
+        .replace_entries(&entries, &state.audit, Some(&session.id), &name_refs)
+        .is_err()
+    {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    state
-        .audit
-        .record_names("vault.put", Some(&session.id), &name_refs);
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
 
@@ -998,13 +608,11 @@ async fn post_rollback(
     if version < 1 {
         return json_status(StatusCode::BAD_REQUEST, "version");
     }
-    match state.vault.rollback(name, version) {
-        Ok(true) => {
-            state
-                .audit
-                .record_names("vault.rollback", Some(&session.id), &[name]);
-            json_value(StatusCode::OK, json!({ "ok": true }))
-        }
+    match state
+        .vault
+        .rollback(name, version, &state.audit, Some(&session.id))
+    {
+        Ok(true) => json_value(StatusCode::OK, json!({ "ok": true })),
         Ok(false) => json_status(StatusCode::NOT_FOUND, "version"),
         Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     }

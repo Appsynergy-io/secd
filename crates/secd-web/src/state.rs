@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::audit::AuditLog;
 use crate::auth::{Pending, UserStore};
+use crate::db::Db;
 use crate::device::DevicePending;
 use crate::sessions::SessionStore;
 use crate::vault::VaultStore;
@@ -26,13 +27,14 @@ impl AppState {
     pub fn open(data: impl AsRef<Path>) -> anyhow::Result<Self> {
         let db = data.as_ref().to_path_buf();
         std::fs::create_dir_all(&db)?;
+        let handle = Db::open(&db)?;
         Ok(Self {
             pending: Pending::new(),
             devices: DevicePending::new(),
             users: UserStore::open(&db)?,
-            sessions: SessionStore::new(),
-            vault: VaultStore::open(&db)?,
-            audit: AuditLog::open(&db)?,
+            sessions: SessionStore::from_db(handle.clone()),
+            vault: VaultStore::from_db(handle.clone(), &db),
+            audit: AuditLog::from_db(handle, &db)?,
             db,
             rp_id: RP_ID,
             origin: ORIGIN,

@@ -196,7 +196,10 @@ fn put_user(state: &AppState, email: &str, password: Option<&str>, creds: &[&[u8
         passkeys,
     };
     state.users.put(user).expect("put");
-    let (_id, token) = state.sessions.create_console(email);
+    let (_id, token) = state
+        .sessions
+        .create_console(email)
+        .expect("console session");
     token
 }
 

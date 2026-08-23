@@ -202,7 +202,9 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
     if state.users.put(user).is_err() {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(json_value(StatusCode::OK, json!({ "ok": true })), &token)
 }
 
@@ -308,7 +310,9 @@ async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishB
         return fail_auth();
     };
     let wraps = wrap_json_list(&user.wraps());
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(
         json_value(StatusCode::OK, json!({ "wraps": wraps })),
         &token,
@@ -367,7 +371,9 @@ async fn pw_register(
         if state.users.put(user).is_err() {
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
         }
-        let (_id, token) = state.sessions.create_console(&email);
+        let Ok((_id, token)) = state.sessions.create_console(&email) else {
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+        };
         return with_cookie(
             json_value(StatusCode::OK, json!({ "wraps": wraps })),
             &token,
@@ -430,7 +436,9 @@ async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBo
     }
     let user = user.expect("invariant: verified user exists");
     let wraps = wrap_json_list(&user.wraps());
-    let (_id, token) = state.sessions.create_console(&email);
+    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    };
     with_cookie(
         json_value(StatusCode::OK, json!({ "wraps": wraps })),
         &token,
@@ -439,7 +447,9 @@ async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBo
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = crate::sessions::cookie_token(&headers) {
-        state.sessions.revoke_token(&token);
+        if state.sessions.revoke_token(&token).is_err() {
+            return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+        }
     }
     let mut res = json_value(StatusCode::OK, json!({ "ok": true }));
     res.headers_mut()
