@@ -10,12 +10,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use secd_import_legacy::{buffer_is_zeroed, ImportError, AFTER_EACH_WIPE};
+use secd_import_legacy::{buffer_is_zeroed, ImportError, Options, AFTER_EACH_WIPE};
+use serde_json::Value;
 
 const FIXTURE: &str = "t9-fix-IMP-val-do-not-print-c4e1";
+const FIXTURE_ALT: &str = "t9-fix-IMP-alt-do-not-print-9b2d";
 const NAME_A: &str = "kv/alpha";
 const NAME_B: &str = "kv/beta";
+const NAME_JSON: &str = "js/one";
 const NO_SDXD: &str = "old secrets CLI not on PATH";
+const EMPTY_VAULT: &str = r#"{"entries":[]}"#;
 const ROOT_PEM: &[u8] = include_bytes!("../../../keys/appsynergy-root.pem");
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -37,6 +41,8 @@ struct Harness {
     home: PathBuf,
     runtime: PathBuf,
     put_log: PathBuf,
+    state: PathBuf,
+    clobber: PathBuf,
     server: Child,
     port: u16,
 }
@@ -79,7 +85,7 @@ fn utf8(bytes: &[u8]) -> String {
 }
 
 fn leaked(hay: &str) -> bool {
-    hay.contains(FIXTURE)
+    hay.contains(FIXTURE) || hay.contains(FIXTURE_ALT)
 }
 
 fn chmod_exec(path: &Path) {
@@ -279,22 +285,32 @@ fn build_assets() -> Assets {
 
 impl Harness {
     fn new() -> Self {
+        Self::seeded(EMPTY_VAULT)
+    }
+
+    /// A vault that already holds `state`, the body `GET /api/v1/vault` returns.
+    fn seeded(state: &str) -> Self {
         let a = assets();
         let dir = unique("h");
         let home = dir.join("home");
         let runtime = dir.join("run");
         let put_log = dir.join("put.log");
+        let state_path = dir.join("vault.json");
+        let clobber = dir.join("clobber.json");
         fs::create_dir_all(&home).expect("home");
         fs::create_dir_all(runtime.join("secd")).expect("runtime");
         write_0600(&home.join("login.session"), b"t9-token\n");
         write_0600(&runtime.join("secd").join(dek_desc(&home)), &[0x44; 32]);
         write_0600(&put_log, b"");
+        write_0600(&state_path, state.as_bytes());
 
         let mut server = Command::new("/usr/bin/python3")
             .arg(&a.vault_py)
             .arg(&a.cert)
             .arg(&a.key)
             .arg(&put_log)
+            .arg(&state_path)
+            .arg(&clobber)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -319,6 +335,8 @@ impl Harness {
             home,
             runtime,
             put_log,
+            state: state_path,
+            clobber,
             server,
             port,
         }
@@ -344,23 +362,62 @@ impl Harness {
             .expect("import notty")
     }
 
-    fn run_tty(&self) -> Output {
-        pty_run(&assets().bin, |cmd| self.child_env(cmd))
+    fn run_tty(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        pty_run(&assets().bin, args, |cmd| {
+            self.child_env(cmd);
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+        })
+    }
+
+    /// A writing run, with a snapshot path this test has not used before.
+    fn import(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        let snap = unique("snap");
+        let mut argv = vec!["--snapshot", snap.to_str().expect("utf8 snapshot path")];
+        argv.extend_from_slice(args);
+        self.run_tty(&argv, envs)
     }
 
     fn put_count(&self) -> usize {
         let raw = fs::read_to_string(&self.put_log).unwrap_or_default();
         raw.lines().filter(|l| l.starts_with("PUT")).count()
     }
+
+    /// What the server would return from `GET /api/v1/vault` right now.
+    fn stored(&self) -> Vec<Value> {
+        let raw = fs::read_to_string(&self.state).unwrap_or_default();
+        serde_json::from_str::<Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("entries").and_then(Value::as_array).cloned())
+            .unwrap_or_default()
+    }
+
+    fn stored_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .stored()
+            .iter()
+            .filter_map(|e| e.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Install a whole-vault save that lands right after the importer's PUT.
+    fn arm_clobber(&self, doc: &str) {
+        write_0600(&self.clobber, doc.as_bytes());
+    }
 }
 
-fn pty_run(bin: &Path, env: impl FnOnce(&mut Command)) -> Output {
+fn pty_run(bin: &Path, args: &[&str], env: impl FnOnce(&mut Command)) -> Output {
     let err_path = unique("err");
     let _ = fs::remove_file(&err_path);
     let mut cmd = Command::new("/usr/bin/python3");
     cmd.arg(pty_script())
         .arg(&err_path)
         .arg(bin)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -404,11 +461,20 @@ fn zeroize_worker() {
     let _guard = HookGuard;
     ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *AFTER_EACH_WIPE.lock().unwrap_or_else(|e| e.into_inner()) = Some(wipe_hook);
-    match secd_import_legacy::import() {
+    let snapshot = std::env::var_os("T9_SNAPSHOT")
+        .map(PathBuf::from)
+        .expect("T9_SNAPSHOT");
+    let opts = Options {
+        snapshot: Some(snapshot),
+        ..Options::default()
+    };
+    match secd_import_legacy::import(&opts) {
         Ok(()) => {}
         Err(ImportError::NoSdxd) => panic!("import: NoSdxd"),
         Err(ImportError::SdxdLocked) => panic!("import: SdxdLocked"),
         Err(ImportError::SecdLocked) => panic!("import: SecdLocked"),
+        Err(ImportError::Refused(m)) => panic!("import refused: {m}"),
+        Err(ImportError::Mismatch(m)) => panic!("import: {m}"),
         Err(ImportError::Other(e)) => panic!("import: {e}"),
     }
     let hits = ZERO_HITS.lock().unwrap_or_else(|e| e.into_inner());
@@ -440,7 +506,7 @@ fn T_IMP_NO_SDXD() {
     let empty = unique("nopath");
     fs::create_dir_all(&empty).expect("empty path");
     let bin = Path::new(env!("CARGO_BIN_EXE_secd-import-legacy"));
-    let out = pty_run(bin, |cmd| {
+    let out = pty_run(bin, &[], |cmd| {
         cmd.env("PATH", &empty)
             .env_remove("LD_PRELOAD")
             .env_remove("SECD_TEST_REDIR");
@@ -458,7 +524,8 @@ fn T_IMP_NO_SDXD() {
 #[test]
 fn T_IMP_COUNT() {
     let h = Harness::new();
-    let out = h.run_tty();
+    let snap = unique("snap");
+    let out = h.run_tty(&["--snapshot", snap.to_str().expect("utf8")], &[]);
     assert!(out.status.success(), "import failed: {}", utf8(&out.stderr));
     let stdout = utf8(&out.stdout);
     let stderr = utf8(&out.stderr);
@@ -467,6 +534,12 @@ fn T_IMP_COUNT() {
     assert!(stdout.contains("imported 2"), "must print imported count");
     assert!(!leaked(&stdout), "fixture value leaked on stdout");
     assert!(!leaked(&stderr), "fixture value leaked on stderr");
+
+    let mode = fs::metadata(&snap).expect("snapshot written").permissions();
+    assert_eq!(mode.mode() & 0o777, 0o600, "snapshot must be 0600");
+    let pre = fs::read_to_string(&snap).expect("snapshot utf8");
+    assert!(pre.contains("entries"), "snapshot is not a vault body");
+    assert!(!leaked(&pre), "snapshot holds plaintext");
 }
 
 #[test]
@@ -478,12 +551,14 @@ fn T_IMP_ZEROIZE() {
 
     let h = Harness::new();
     let hits = unique("zero-hits");
+    let snap = unique("snap");
     write_0600(&hits, b"");
     let mut cmd = Command::new(patched_test_exe());
     h.child_env(&mut cmd);
     let out = cmd
         .env("T9_ZEROIZE_WORKER", "1")
         .env("T9_ZEROIZE_OUT", &hits)
+        .env("T9_SNAPSHOT", &snap)
         .args(["--exact", "T_IMP_ZEROIZE"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -507,13 +582,228 @@ fn T_IMP_ZEROIZE() {
     assert!(!leaked(&utf8(&out.stderr)), "fixture leaked on stderr");
 }
 
+/// An entry this DEK cannot open is dropped on load, and the save is a
+/// whole-vault replace, so saving would delete it. Refuse instead.
+#[test]
+fn T_IMP_UNDECODABLE() {
+    let h =
+        Harness::seeded(r#"{"entries":[{"name":"kv/gamma","ciphertext":"deadbeef","meta":{}}]}"#);
+    let out = h.import(&[], &[]);
+    assert!(!out.status.success(), "must refuse an undecodable entry");
+    assert_eq!(h.put_count(), 0, "must not PUT");
+    assert_eq!(
+        h.stored_names(),
+        vec!["kv/gamma".to_string()],
+        "the entry must still be there"
+    );
+    let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
+    assert!(said.contains("did not decode"), "must say why: {said}");
+    assert!(!leaked(&said), "fixture leaked");
+}
+
+/// `PUT /api/v1/vault` replaces the whole vault; without the pre-image there is
+/// nothing to restore from.
+#[test]
+fn T_IMP_SNAPSHOT_REQUIRED() {
+    let h = Harness::new();
+    let out = h.run_tty(&[], &[]);
+    assert_eq!(out.status.code(), Some(2), "no --snapshot must exit 2");
+    assert_eq!(h.put_count(), 0, "must not PUT");
+    let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
+    assert!(said.contains("--snapshot"), "must name the flag: {said}");
+}
+
+#[test]
+fn T_IMP_SNAPSHOT_EXISTS() {
+    let h = Harness::new();
+    let snap = unique("snap");
+    write_0600(&snap, b"earlier pre-image\n");
+    let out = h.run_tty(&["--snapshot", snap.to_str().expect("utf8")], &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an existing snapshot must exit 2"
+    );
+    assert_eq!(h.put_count(), 0, "must not PUT");
+    assert_eq!(
+        fs::read_to_string(&snap).expect("snapshot"),
+        "earlier pre-image\n",
+        "must not overwrite a pre-image"
+    );
+}
+
+/// There is no compare-and-set on the vault, so a save landing right after this
+/// one wins. The read-back cannot prevent that; it must not stay silent.
+#[test]
+fn T_IMP_READ_BACK() {
+    let h = Harness::new();
+    h.arm_clobber(r#"{"entries":[{"name":"kv/other","ciphertext":"abcdef","meta":{}}]}"#);
+    let out = h.import(&[], &[]);
+    assert!(!out.status.success(), "a clobbered write must exit != 0");
+    let stdout = utf8(&out.stdout);
+    assert!(
+        !stdout.contains("imported"),
+        "must not report a write it could not confirm: {stdout}"
+    );
+    let said = format!("{stdout}{}", utf8(&out.stderr));
+    assert!(
+        said.contains("changed under the write"),
+        "must say so: {said}"
+    );
+    assert!(!leaked(&said), "fixture leaked");
+}
+
+#[test]
+fn T_IMP_PREFIX() {
+    let h = Harness::new();
+    let names = format!("{NAME_A} {NAME_B} {NAME_JSON}");
+    let out = h.import(&["--prefix", "kv/"], &[("T9_SDXD_NAMES", names.as_str())]);
+    assert!(out.status.success(), "import failed: {}", utf8(&out.stderr));
+    let stdout = utf8(&out.stdout);
+    assert!(
+        stdout.contains("imported 2"),
+        "must import only kv/: {stdout}"
+    );
+    assert!(!stdout.contains(NAME_JSON), "out of prefix: {stdout}");
+    assert_eq!(
+        h.stored_names(),
+        vec![NAME_A.to_string(), NAME_B.to_string()]
+    );
+    assert!(!leaked(&stdout), "fixture leaked");
+}
+
+#[test]
+fn T_IMP_DRY_RUN() {
+    let h = Harness::new();
+    let first = h.import(&["--prefix", NAME_A], &[]);
+    assert!(
+        first.status.success(),
+        "seed import: {}",
+        utf8(&first.stderr)
+    );
+    assert_eq!(h.put_count(), 1);
+
+    // No --snapshot: a dry run writes nothing, so it needs no pre-image.
+    let out = h.run_tty(&["--dry-run"], &[]);
+    assert!(
+        out.status.success(),
+        "dry run failed: {}",
+        utf8(&out.stderr)
+    );
+    let stdout = utf8(&out.stdout);
+    assert!(
+        stdout.contains(&format!("{NAME_A} overwrite")),
+        "must call the collision an overwrite: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{NAME_B} new")),
+        "must call the new name new: {stdout}"
+    );
+    assert!(
+        stdout.contains("dry-run: 1 new, 1 overwrite"),
+        "must print totals: {stdout}"
+    );
+    assert_eq!(h.put_count(), 1, "a dry run must not PUT");
+    assert_eq!(h.stored_names(), vec![NAME_A.to_string()]);
+    assert!(!leaked(&stdout), "fixture leaked");
+}
+
+#[test]
+fn T_IMP_NO_OVERWRITE() {
+    let h = Harness::new();
+    let first = h.import(&["--prefix", NAME_A], &[]);
+    assert!(
+        first.status.success(),
+        "seed import: {}",
+        utf8(&first.stderr)
+    );
+    assert_eq!(h.put_count(), 1);
+
+    let out = h.import(&[], &[]);
+    assert_eq!(out.status.code(), Some(2), "a collision must exit 2");
+    assert_eq!(h.put_count(), 1, "must not PUT over a name");
+    let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
+    assert!(said.contains("--overwrite"), "must name the flag: {said}");
+    assert_eq!(h.stored_names(), vec![NAME_A.to_string()]);
+
+    let out = h.import(&["--overwrite"], &[]);
+    assert!(
+        out.status.success(),
+        "--overwrite must be accepted: {}",
+        utf8(&out.stderr)
+    );
+    assert_eq!(
+        h.stored_names(),
+        vec![NAME_A.to_string(), NAME_B.to_string()]
+    );
+}
+
+#[test]
+fn T_IMP_VERIFY() {
+    let h = Harness::new();
+    let first = h.import(&[], &[]);
+    assert!(
+        first.status.success(),
+        "seed import: {}",
+        utf8(&first.stderr)
+    );
+
+    let out = h.run_tty(&["--verify"], &[]);
+    assert!(out.status.success(), "verify failed: {}", utf8(&out.stderr));
+    let stdout = utf8(&out.stdout);
+    assert!(stdout.contains(&format!("{NAME_A} ok")), "{stdout}");
+    assert!(stdout.contains(&format!("{NAME_B} ok")), "{stdout}");
+    assert!(!stdout.contains("MISMATCH"), "{stdout}");
+    assert!(!leaked(&stdout), "fixture leaked");
+
+    // Same names, a different value in the old CLI.
+    let out = h.run_tty(&["--verify"], &[("T9_SDXD_VALUE", FIXTURE_ALT)]);
+    assert!(!out.status.success(), "a mismatch must exit != 0");
+    let stdout = utf8(&out.stdout);
+    assert!(stdout.contains(&format!("{NAME_A} MISMATCH")), "{stdout}");
+    assert!(stdout.contains(&format!("{NAME_B} MISMATCH")), "{stdout}");
+    assert_eq!(h.put_count(), 1, "verify must not PUT");
+    assert!(!leaked(&stdout), "fixture leaked");
+    assert!(!leaked(&utf8(&out.stderr)), "fixture leaked on stderr");
+}
+
+/// The console draws one masked row without `meta.fields`.
+#[test]
+fn T_IMP_FIELDS() {
+    let h = Harness::new();
+    let out = h.import(&[], &[("T9_SDXD_NAMES", NAME_JSON)]);
+    assert!(out.status.success(), "import failed: {}", utf8(&out.stderr));
+    let stored = h.stored();
+    let entry = stored
+        .iter()
+        .find(|e| e.get("name").and_then(Value::as_str) == Some(NAME_JSON))
+        .expect("stored entry");
+    let fields: Vec<&str> = entry
+        .get("meta")
+        .and_then(|m| m.get("fields"))
+        .and_then(Value::as_array)
+        .expect("meta.fields")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(fields.contains(&"api_key"), "fields: {fields:?}");
+    assert!(fields.contains(&"url"), "fields: {fields:?}");
+    let raw = serde_json::to_string(entry).expect("entry json");
+    assert!(!leaked(&raw), "fixture leaked into meta");
+}
+
 const SDXD_SH: &str = r#"#!/bin/sh
+names="${T9_SDXD_NAMES:-kv/alpha kv/beta}"
+val="${T9_SDXD_VALUE:-t9-fix-IMP-val-do-not-print-c4e1}"
 case "$1" in
-  ls) printf '%s\n' 'kv/alpha' 'kv/beta' ;;
+  ls) for n in $names; do printf '%s\n' "$n"; done ;;
   info) printf '%s\n' 'note: lab' 'service: xai' ;;
   get)
     if [ "$2" = "--force" ]; then
-      printf '%s\n' 't9-fix-IMP-val-do-not-print-c4e1'
+      case "$3" in
+        js/*) printf '{"api_key":"%s","url":"https://lab.test"}\n' "$val" ;;
+        *) printf '%s\n' "$val" ;;
+      esac
       exit 0
     fi
     exit 1
@@ -523,10 +813,23 @@ esac
 "#;
 
 const VAULT_PY: &str = r#"
-import ssl, sys, traceback
+import json, os, ssl, sys, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-CERT, KEY, PUT_LOG = sys.argv[1], sys.argv[2], sys.argv[3]
+CERT, KEY, PUT_LOG, STATE, CLOBBER = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except Exception:
+        return {"entries": []}
+
+def store(doc):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f)
+    os.replace(tmp, STATE)
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -551,14 +854,23 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        self._send(200, b'{"entries":[]}')
+        self._send(200, json.dumps(load()).encode())
 
     def do_PUT(self):
         n = int(self.headers.get("Content-Length") or 0)
-        if n:
-            self.rfile.read(n)
+        raw = self.rfile.read(n) if n else b""
+        try:
+            doc = json.loads(raw.decode())
+        except Exception:
+            doc = {}
+        store({"entries": doc.get("entries", [])})
         with open(PUT_LOG, "ab") as f:
             f.write(b"PUT\n")
+        # A whole-vault save landing right after this one. PUT takes no version,
+        # so the last writer wins and only a read-back notices.
+        if os.path.exists(CLOBBER):
+            with open(CLOBBER) as f:
+                store(json.load(f))
         self._send(200, b'{"ok":true}')
 
 class S(HTTPServer):

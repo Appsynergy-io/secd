@@ -685,16 +685,43 @@ pending = false
 pending = false
 
 [tests.T_IMP_NOTTY]
-pending = true
+pending = false
 
 [tests.T_IMP_NO_SDXD]
-pending = true
+pending = false
 
 [tests.T_IMP_COUNT]
-pending = true
+pending = false
 
 [tests.T_IMP_ZEROIZE]
-pending = true
+pending = false
+
+[tests.T_IMP_UNDECODABLE]
+pending = false
+
+[tests.T_IMP_SNAPSHOT_REQUIRED]
+pending = false
+
+[tests.T_IMP_SNAPSHOT_EXISTS]
+pending = false
+
+[tests.T_IMP_READ_BACK]
+pending = false
+
+[tests.T_IMP_PREFIX]
+pending = false
+
+[tests.T_IMP_DRY_RUN]
+pending = false
+
+[tests.T_IMP_NO_OVERWRITE]
+pending = false
+
+[tests.T_IMP_VERIFY]
+pending = false
+
+[tests.T_IMP_FIELDS]
+pending = false
 
 [tests.T_ADV_NO_HTTP_CLEAR]
 pending = false
