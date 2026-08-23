@@ -18,3 +18,12 @@ runs:
         cache-on-failure: true
         cache-all-crates: true
         cache-bin: true
+    # PR runs restore only; main is the sole writer, matching rust-cache
+    # save-if. The key is the bun lockfile, so a package bump is a miss.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: bun-${{ runner.os }}-${{ hashFiles('ui/bun.lock') }}
+        restore-keys: |
+          bun-${{ runner.os }}-
+        lookup-only: ${{ github.ref != 'refs/heads/main' }}

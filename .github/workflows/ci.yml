@@ -102,9 +102,11 @@ jobs:
           # skipped `test` could merge those two invariants broken. keys/ and
           # packaging/ for the same reason: keys/cosign.pub is include_str!'d
           # into src/update.rs and tests/release_scripts.rs asserts it matches
-          # the copy embedded in packaging/install.sh.
+          # the copy embedded in packaging/install.sh. ui/ is the bun console;
+          # a change there once would skip ui-bun the same way vendor/ skipped
+          # the wasm console.
           if git diff --name-only "$base" HEAD \
-            | grep -qE '^(src/|crates/|tests/|tools/|vendor/|scripts/|deploy/|packaging/|skills/|keys/|\.github/|contract\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|.*\.md$)'; then
+            | grep -qE '^(src/|crates/|tests/|tools/|vendor/|scripts/|deploy/|packaging/|skills/|keys/|ui/|\.github/|contract\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|.*\.md$)'; then
             echo "code=true" >>"$GITHUB_OUTPUT"
           else
             echo "code=false" >>"$GITHUB_OUTPUT"
@@ -131,6 +133,32 @@ jobs:
           path: crates/secd-ui/dist
           if-no-files-found: error
           retention-days: 1
+
+  ui-bun:
+    name: ui-bun — bun console into ui/dist
+    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    needs: [fast, changes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: scripts/check.sh ui-bun
+
+  bun-audit:
+    name: bun-audit — bun audit against ui/bun.lock
+    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    needs: [fast, changes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: scripts/check.sh bun-audit
 
   clippy:
     name: clippy — workspace, all targets, warnings denied
@@ -474,6 +502,8 @@ jobs:
       - fast
       - secrets
       - ui
+      - ui-bun
+      - bun-audit
       - clippy
       - test
       - test-release

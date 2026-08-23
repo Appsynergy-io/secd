@@ -1,0 +1,14 @@
+{
+  "name": "secd-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./index.html --outdir dist --target browser --production --sourcemap=none --entry-naming [name].[ext] --chunk-naming [name].[ext] --asset-naming [name].[ext]",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "7.0.2"
+  }
+}

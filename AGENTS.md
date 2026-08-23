@@ -46,10 +46,12 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `crates/secd-web` | TLS 1.3 API (later) |
 | `crates/secd-ui` | web console (later) |
 | `contract.toml` | commands, routes, providers, test IDs, file allow-list |
-| `scripts/check.sh` | the gate. Lanes: `contract shell workflow secrets fmt ui clippy test test-release compile-fail release-dry`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
+| `scripts/check.sh` | the gate. Lanes: `contract shell workflow secrets fmt ui ui-bun bun-audit clippy test test-release compile-fail release-dry`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
 | `scripts/tools.sh` | shared helpers: pinned tool fetch, `Cargo.lock` version lookup |
 | `.gitleaks.toml` | the `secrets` lane's rule set: the defaults, plus the two paths git ignores |
 | `scripts/build-ui.sh` | wasm + wasm-bindgen + wasm-opt into `crates/secd-ui/dist` |
+| `scripts/build-ui-bun.sh` | bun console into `ui/dist` |
+| `ui/` | bun web console; `crates/secd-ui` stays until Teardown |
 | `rust-toolchain.toml` | the toolchain, for laptop, agent sandbox and CI alike |
 | `.githooks/pre-push` | fast lanes before a push; refuses `main` |
 | `scripts/release.sh` | phases: `--build-only` compiles, `--sign-only` signs, `--push-image` pushes. `--dry-run` swaps destinations, never steps |
@@ -87,7 +89,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - The audit chain fails closed. A write it cannot make, or a head it cannot read, fails the request being recorded; the chain never restarts from zero on an error.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
-- Toolchain, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.
+- Toolchain, bun 1.4.0, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. bun is never the curl|bash installer. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.
 - `crates/secd-ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes cargo itself; run `scripts/check.sh ui` first.
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.

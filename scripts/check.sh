@@ -7,6 +7,8 @@
 #   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
 #   scripts/check.sh secrets         gitleaks over the tree and the history
 #   scripts/check.sh ui              build crates/secd-ui/dist
+#   scripts/check.sh ui-bun          build ui/dist, tsc, bun test
+#   scripts/check.sh bun-audit       bun audit against ui/bun.lock
 #   scripts/check.sh clippy test     one or more named lanes
 #   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
 set -euo pipefail
@@ -33,8 +35,9 @@ GITLEAKS_PINNED="8.30.1"
 
 # Cheapest first: a formatting slip should not cost a full test run. `ui` is a
 # prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
-# refuses to build without a fresh crates/secd-ui/dist.
-ALL_LANES=(contract shell workflow secrets fmt ui clippy test test-release compile-fail release-dry)
+# refuses to build without a fresh crates/secd-ui/dist. `ui-bun` builds the
+# bun console into ui/dist; both consoles stay until Teardown.
+ALL_LANES=(contract shell workflow secrets fmt ui ui-bun bun-audit clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -184,6 +187,71 @@ lane_ui() {
   "$root/scripts/build-ui.sh"
 }
 
+# JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/fonts, the
+# source tree, so a hashed copy in dist cannot hide a budget breach.
+UI_BUN_JS_CSS_MAX=153600
+UI_BUN_FONTS_MAX=71680
+
+ui_bun_budgets() {
+  python3 - "$root" "$UI_BUN_JS_CSS_MAX" "$UI_BUN_FONTS_MAX" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+js_css_max = int(sys.argv[2])
+fonts_max = int(sys.argv[3])
+dist = root / "ui" / "dist"
+if not dist.is_dir():
+    sys.exit("ui-bun: missing ui/dist")
+js_css = 0
+for path in dist.rglob("*"):
+    if path.is_file() and path.suffix.lower() in {".js", ".css"}:
+        js_css += path.stat().st_size
+if js_css > js_css_max:
+    sys.exit(f"ui-bun: ui/dist JS+CSS {js_css} bytes exceeds {js_css_max}")
+fonts_dir = root / "ui" / "fonts"
+fonts = 0
+if fonts_dir.is_dir():
+    for path in fonts_dir.rglob("*"):
+        if path.is_file():
+            fonts += path.stat().st_size
+if fonts > fonts_max:
+    sys.exit(f"ui-bun: ui/fonts {fonts} bytes exceeds {fonts_max}")
+print(f"ui-bun: JS+CSS {js_css} bytes, fonts {fonts} bytes")
+PY
+}
+
+lane_ui_bun() {
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun x tsc --noEmit
+    bun test
+  )
+  local first second
+  first="$(mktemp -d)"
+  second="$(mktemp -d)"
+  "$root/scripts/build-ui-bun.sh"
+  cp -a "$root/ui/dist/." "$first/"
+  ui_bun_budgets
+  "$root/scripts/build-ui-bun.sh"
+  cp -a "$root/ui/dist/." "$second/"
+  if ! diff -rq "$first" "$second" >/dev/null; then
+    diff -rq "$first" "$second" >&2 || true
+    secd_die "ui/dist is not byte-identical across two builds"
+  fi
+}
+
+lane_bun_audit() {
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun audit
+  )
+}
+
 lane_clippy() {
   cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 }
@@ -253,6 +321,8 @@ dispatch_lane() {
     secrets) lane_secrets ;;
     fmt) lane_fmt ;;
     ui) lane_ui ;;
+    ui-bun) lane_ui_bun ;;
+    bun-audit) lane_bun_audit ;;
     clippy) lane_clippy ;;
     test) lane_test ;;
     test-release) lane_test_release ;;

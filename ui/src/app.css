@@ -1,0 +1,133 @@
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../fonts/martian-mono-latin.woff2") format("woff2");
+  font-display: swap;
+  font-weight: 100 800;
+  font-style: normal;
+}
+
+:root {
+  --space: 8px;
+  --color-bg: #0e0e12;
+  --color-text: #e8e8ef;
+  --color-muted: #7a7a94;
+  --color-accent: #6ed6ba;
+  --color-on-accent: #181825;
+  --color-danger: #f87185;
+  --color-border: #2a2a36;
+  --radius: 8px;
+  --font: "Martian Mono", ui-monospace, monospace;
+  --max: 65ch;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+body {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: calc(var(--space) * 3);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+}
+
+.nav {
+  display: flex;
+  gap: var(--space);
+  flex-wrap: wrap;
+}
+
+.nav a {
+  color: var(--color-accent);
+  text-decoration: none;
+  padding: var(--space);
+}
+
+.nav a[aria-current="page"] {
+  color: var(--color-text);
+  text-decoration: underline;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0 0 var(--space);
+}
+
+p,
+label {
+  color: var(--color-muted);
+  margin: 0;
+}
+
+form,
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+}
+
+input {
+  width: 100%;
+  padding: calc(var(--space) * 1.5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: #181825;
+  color: var(--color-text);
+  font: inherit;
+}
+
+button {
+  font: inherit;
+  border: 0;
+  border-radius: var(--radius);
+  padding: calc(var(--space) * 1.5) calc(var(--space) * 2);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--color-accent);
+  border: 1px solid var(--color-border);
+}
+
+.error {
+  color: var(--color-danger);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 900px) {
+  body {
+    padding: calc(var(--space) * 2);
+  }
+}
