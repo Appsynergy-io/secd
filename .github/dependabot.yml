@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Only github-actions. Full commit-sha pins are where drift is invisible and
+  # github-actions: full commit-sha pins are where drift is invisible and
   # hand-tracking genuinely fails, and dependabot rewrites the pin and its
   # version comment together.
   #
@@ -25,9 +25,10 @@ updates:
         applies-to: version-updates
         update-types: [minor, patch]
 
-  # No npm entry. dependabot resolves `directory:` when the schedule fires and
-  # files a job error, on a tab nobody reads, for one that does not exist --
-  # and the Stage 2 console has no manifest in this repository yet. The npm
-  # ecosystem, security-updates-only via `open-pull-requests-limit: 0`, goes in
-  # the commit that adds `ui/package.json`, so the entry and the directory land
-  # together.
+  # bun.lock in ui/. Version updates stay closed: bun-audit is the PR gate.
+  # Security updates ignore this limit.
+  - package-ecosystem: bun
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
