@@ -421,6 +421,14 @@ impl Harness {
         write_0600(&self.clobber, doc.as_bytes());
     }
 
+    /// Next GET after a PUT answers 401. The PUT itself still lands.
+    fn arm_read_back_401(&self) {
+        write_0600(
+            &PathBuf::from(format!("{}.getfail", self.state.display())),
+            b"",
+        );
+    }
+
     /// `PUT /api/v1/vault` with a body of the caller's choosing, as a hand
     /// restore of a pre-image would. The status the server answered with.
     fn put_body(&self, body: &str) -> u16 {
@@ -655,7 +663,8 @@ fn T_IMP_ZEROIZE() {
 }
 
 /// An entry this DEK cannot open is dropped on load, and the save is a
-/// whole-vault replace, so saving would delete it. Refuse instead.
+/// whole-vault replace, so saving would delete it. Refuse a write; a dry-run
+/// or verify still runs, because those flags write nothing.
 #[test]
 fn T_IMP_UNDECODABLE() {
     let h =
@@ -670,6 +679,34 @@ fn T_IMP_UNDECODABLE() {
     );
     let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
     assert!(said.contains("did not decode"), "must say why: {said}");
+    assert!(
+        said.contains("a save would delete"),
+        "a write must name the loss: {said}"
+    );
+    assert!(!leaked(&said), "fixture leaked");
+
+    let out = h.run_tty(&["--dry-run"], &[]);
+    assert_eq!(out.status.code(), Some(0), "dry-run must exit 0");
+    assert_eq!(h.put_count(), 0, "dry-run must not PUT");
+    let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
+    assert!(
+        !said.contains("a save would delete"),
+        "dry-run writes nothing: {said}"
+    );
+    assert!(!leaked(&said), "fixture leaked");
+
+    let out = h.run_tty(&["--verify"], &[]);
+    let stdout = utf8(&out.stdout);
+    let said = format!("{stdout}{}", utf8(&out.stderr));
+    assert!(
+        stdout.contains("MISMATCH") || stdout.contains(" ok"),
+        "verify must compare: {said}"
+    );
+    assert!(
+        !said.contains("a save would delete"),
+        "verify writes nothing: {said}"
+    );
+    assert_eq!(h.put_count(), 0, "verify must not PUT");
     assert!(!leaked(&said), "fixture leaked");
 }
 
@@ -683,6 +720,19 @@ fn T_IMP_SNAPSHOT_REQUIRED() {
     assert_eq!(h.put_count(), 0, "must not PUT");
     let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
     assert!(said.contains("--snapshot"), "must name the flag: {said}");
+
+    let stray = Path::new("--dry-run");
+    let out = h.run_tty(&["--snapshot", "--dry-run"], &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--snapshot --dry-run must exit 2"
+    );
+    assert_eq!(h.put_count(), 0, "must not PUT");
+    assert!(
+        !stray.exists(),
+        "must not treat --dry-run as a snapshot path"
+    );
 }
 
 #[test]
@@ -737,6 +787,26 @@ fn T_IMP_READ_BACK() {
     assert!(
         said.contains("changed under the write"),
         "must say so: {said}"
+    );
+    assert!(!leaked(&said), "fixture leaked");
+}
+
+/// A GET that fails after PUT is not "locked": the replace landed.
+#[test]
+fn read_back_401_is_vault_written_not_locked() {
+    let h = Harness::new();
+    h.arm_read_back_401();
+    let out = h.import(&[], &[]);
+    assert!(!out.status.success(), "a failed read-back must exit != 0");
+    assert!(h.put_count() >= 1, "the PUT landed");
+    let said = format!("{}{}", utf8(&out.stdout), utf8(&out.stderr));
+    assert!(
+        said.contains("vault written"),
+        "must say the write landed: {said}"
+    );
+    assert!(
+        !said.contains("secd locked") && !said.contains("secd: locked"),
+        "must not look like the write never happened: {said}"
     );
     assert!(!leaked(&said), "fixture leaked");
 }
@@ -945,6 +1015,7 @@ def store(doc):
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    fail_get = None
 
     def log_message(self, fmt, *args):
         return
@@ -966,6 +1037,11 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if H.fail_get is not None:
+            code = H.fail_get
+            H.fail_get = None
+            self._send(code, b'{"error":"unauthorized"}')
+            return
         # The real route returns a version per entry, which PUT then rejects.
         rows = []
         for e in load().get("entries", []):
@@ -995,6 +1071,8 @@ class H(BaseHTTPRequestHandler):
         if os.path.exists(CLOBBER):
             with open(CLOBBER) as f:
                 store(json.load(f))
+        if os.path.exists(STATE + ".getfail"):
+            H.fail_get = 401
         self._send(200, b'{"ok":true}')
 
 class S(HTTPServer):

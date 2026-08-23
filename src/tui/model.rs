@@ -266,6 +266,10 @@ impl Model {
     }
 
     fn begin_add(&mut self) {
+        if let Some(why) = self.save_blocked.clone() {
+            self.note(format!("save refused: {why}"));
+            return;
+        }
         self.mode = Mode::Modal(Modal::Add {
             name: String::new(),
             value: String::new(),
@@ -274,6 +278,10 @@ impl Model {
     }
 
     fn begin_delete(&mut self) {
+        if let Some(why) = self.save_blocked.clone() {
+            self.note(format!("save refused: {why}"));
+            return;
+        }
         let Some(name) = self.selected_name().map(str::to_string) else {
             return;
         };
@@ -299,8 +307,9 @@ impl Model {
             .or_insert_with(|| Value::Object(Default::default()));
         self.mode = Mode::Idle;
         self.sync_detail();
-        self.push_snapshot();
-        self.note("saved");
+        if self.push_snapshot() {
+            self.note("saved");
+        }
     }
 
     fn commit_delete(&mut self, name: &str) {
@@ -312,8 +321,9 @@ impl Model {
         }
         self.mode = Mode::Idle;
         self.sync_detail();
-        self.push_snapshot();
-        self.note("deleted");
+        if self.push_snapshot() {
+            self.note("deleted");
+        }
     }
 
     fn copy_selected(&mut self) {
@@ -358,13 +368,13 @@ impl Model {
         }
     }
 
-    fn push_snapshot(&mut self) {
+    fn push_snapshot(&mut self) -> bool {
         if let Some(why) = self.save_blocked.clone() {
             self.note(format!("save refused: {why}"));
-            return;
+            return false;
         }
         let (Some(token), Some(dek)) = (self.token.as_deref(), self.dek.as_ref()) else {
-            return;
+            return false;
         };
         let saved = login::save_snapshot(
             token,
@@ -375,8 +385,14 @@ impl Model {
             &self.before,
         );
         match saved {
-            Ok(written) => self.before = written,
-            Err(e) => self.note(format!("save failed: {e}")),
+            Ok(written) => {
+                self.before = written;
+                true
+            }
+            Err(e) => {
+                self.note(format!("save failed: {e}"));
+                false
+            }
         }
     }
 
@@ -385,5 +401,55 @@ impl Model {
         while self.activity.len() > 32 {
             self.activity.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocked_register() -> Model {
+        let mut m = Model::new();
+        m.save_blocked =
+            Some("vault: 1 of 2 entries did not decode; a save would delete them".into());
+        m.names.push("kv/alpha".into());
+        m
+    }
+
+    fn claimed_save(lines: &[String]) -> bool {
+        lines.iter().any(|l| l == "saved" || l == "deleted")
+    }
+
+    #[test]
+    fn blocked_register_does_not_claim_a_save() {
+        let mut m = blocked_register();
+        m.handle(Event::Key('a'));
+        assert!(m.is_idle(), "must not open add");
+        assert!(
+            m.activity_lines()
+                .iter()
+                .any(|l| l.starts_with("save refused:")),
+            "must note the refusal"
+        );
+        assert!(!claimed_save(&m.activity_lines()));
+
+        m.handle(Event::Key('d'));
+        assert!(m.is_idle(), "must not open delete");
+        assert!(!claimed_save(&m.activity_lines()));
+
+        m.mode = Mode::Modal(Modal::Add {
+            name: "kv/new".into(),
+            value: "x".into(),
+            focus: AddField::Value,
+        });
+        m.handle(Event::Enter);
+        assert!(!claimed_save(&m.activity_lines()));
+        assert!(m.is_idle());
+
+        m.mode = Mode::Modal(Modal::Delete {
+            name: "kv/alpha".into(),
+        });
+        m.handle(Event::Enter);
+        assert!(!claimed_save(&m.activity_lines()));
     }
 }

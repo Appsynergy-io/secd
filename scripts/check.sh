@@ -134,6 +134,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# mktemp follows TMPDIR. When that is under this repo (usrquota on /tmp),
+# cargo otherwise treats the probe as a workspace member.
+[workspace]
+
 [dependencies]
 secd-core = { path = "$root/crates/secd-core" }
 serde = "=${serde_ver}"

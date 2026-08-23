@@ -391,7 +391,8 @@ pub fn save_entries_read_back(
         return Err(changed_under_write("loaded", before, &now));
     }
     let sent = put_vault(token, dek, rows)?;
-    let back = load_ciphertexts(token)?;
+    let back = load_ciphertexts(token)
+        .context("vault written; read-back failed, the vault now holds what was sent")?;
     if back != sent {
         return Err(changed_under_write("sent", &sent, &back));
     }
@@ -461,9 +462,6 @@ fn put_vault(
 /// The vault as name -> ciphertext, without opening anything.
 fn load_ciphertexts(token: &str) -> anyhow::Result<BTreeMap<String, String>> {
     let (status, v) = request("GET", "/api/v1/vault", None, Some(token))?;
-    if status == 401 {
-        return Err(locked_err());
-    }
     if status != 200 {
         anyhow::bail!("vault {status}");
     }

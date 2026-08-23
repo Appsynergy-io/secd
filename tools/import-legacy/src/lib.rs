@@ -156,7 +156,13 @@ fn take_value(
         return Ok(v);
     }
     match it.next() {
-        Some(v) => v.into_string().map_err(|_| usage()),
+        Some(v) => {
+            let s = v.into_string().map_err(|_| usage())?;
+            if s.starts_with("--") {
+                return Err(usage());
+            }
+            Ok(s)
+        }
         None => Err(usage()),
     }
 }
@@ -169,11 +175,17 @@ pub fn import(opts: &Options) -> Result<(), ImportError> {
     let snapshot = preflight(opts)?;
     let unlocked = require_secd()?;
     let loaded = load_vault(&unlocked)?;
-    // Fail closed. The load drops every entry this DEK cannot open and the save
-    // is a whole-vault replace, so saving now would delete exactly those
-    // entries -- and nothing would say so.
-    if let Some(refusal) = loaded.drop_refusal() {
-        return Err(ImportError::Refused(refusal));
+    // Fail closed on a write. The load drops every entry this DEK cannot open
+    // and the save is a whole-vault replace, so saving now would delete them.
+    // --dry-run and --verify write nothing; they still run.
+    match loaded.drop_refusal() {
+        Some(refusal) if opts.writes() => return Err(ImportError::Refused(refusal)),
+        Some(_) => eprintln!(
+            "vault: {} of {} entries did not decode",
+            loaded.dropped(),
+            loaded.raw
+        ),
+        None => {}
     }
     let VaultLoad {
         mut entries,
@@ -421,9 +433,10 @@ fn save_vault(
 
 fn map_vault_err(e: anyhow::Error) -> ImportError {
     let s = e.to_string();
-    // The clobber sentence names entries, and an entry may be named `locked`,
-    // so it is matched before the locked test rather than after it.
-    if s.contains("changed under the write") {
+    // A landed PUT that we then failed to read back is not "locked": restoring
+    // the snapshot would undo a write that did happen. Match that, and the
+    // clobber sentence (an entry may be named `locked`), before 401/locked.
+    if s.contains("changed under the write") || s.contains("vault written") {
         ImportError::Mismatch(s)
     } else if s.contains("locked") || s.contains("401") {
         ImportError::SecdLocked
@@ -567,6 +580,30 @@ impl ImportError {
                 eprintln!("{e}");
                 1
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_next_token_must_not_be_a_flag() {
+        match parse_args([OsString::from("--snapshot"), OsString::from("--dry-run")]) {
+            Ok(opts) => panic!(
+                "must refuse a flag as --snapshot value (dry_run={})",
+                opts.dry_run
+            ),
+            Err(ImportError::Refused(_)) => {}
+            Err(_) => panic!("must be usage"),
+        }
+        match parse_args([OsString::from("--snapshot=--path")]) {
+            Ok(opts) => {
+                assert_eq!(opts.snapshot.as_deref(), Some(Path::new("--path")));
+                assert!(!opts.dry_run);
+            }
+            Err(_) => panic!("--snapshot=--path must be accepted"),
         }
     }
 }
