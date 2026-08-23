@@ -173,19 +173,31 @@ if [[ -n "$expect_digest" && "$digest" != "$expect_digest" ]]; then
   exit 1
 fi
 
-# The image is what actually runs; verify it was signed by the release key.
-if command -v cosign >/dev/null 2>&1; then
-  img_host="${SECD_REGISTRY_HOST:-ghcr.io}"
-  img_name="${SECD_IMAGE_NAME:-appsynergy-io/secd-web}"
-  if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
-    "${img_host}/${img_name}@${digest}" >/dev/null 2>&1; then
-    echo "k3s-apply: ${digest} is not signed by keys/cosign.pub" >&2
-    exit 1
-  fi
-  echo "k3s-apply: signature ok" >&2
-else
-  echo "k3s-apply: cosign not found; skipping the image signature check" >&2
+# The image is what actually runs, and this is the only signature check between
+# GHCR and the pod. It used to skip when cosign was not on PATH -- and the
+# caller most likely to be missing it is secd-agent.service, which runs on a
+# timer with a minimal PATH and nobody reading its output. A guard that can
+# skip itself is not a guard, so fetch the pinned cosign and fail closed.
+#
+# ensure-cosign.sh installs into CARGO_HOME/bin and decides whether it has
+# anything to do by looking on PATH, so that directory goes on PATH first: on
+# the cluster host it is not there by default, and without this the timer would
+# re-download cosign on every tick.
+PATH="${CARGO_HOME:-${HOME:-}/.cargo}/bin:$PATH"
+export PATH
+"$root/scripts/ensure-cosign.sh"
+if ! command -v cosign >/dev/null 2>&1; then
+  echo "k3s-apply: cosign is required to verify ${digest}" >&2
+  exit 1
 fi
+img_host="${SECD_REGISTRY_HOST:-ghcr.io}"
+img_name="${SECD_IMAGE_NAME:-appsynergy-io/secd-web}"
+if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
+  "${img_host}/${img_name}@${digest}" >/dev/null 2>&1; then
+  echo "k3s-apply: ${digest} is not signed by keys/cosign.pub" >&2
+  exit 1
+fi
+echo "k3s-apply: signature ok" >&2
 
 if [[ -n "${KUBECTL:-}" ]]; then
   kc=("$KUBECTL")

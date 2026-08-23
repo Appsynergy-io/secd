@@ -1,0 +1,17 @@
+# Configuration for the `secrets` lane (scripts/check.sh secrets).
+#
+# The default rule set, plus the two paths git ignores. A directory scan walks
+# the filesystem rather than the index, so without this it reads every object
+# under target/ -- gigabytes of build output on a laptop, and none of it is
+# something a commit can carry.
+#
+# Nothing else is allow-listed. A finding in a tracked file is a finding.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "build output, which git does not track and a commit cannot carry"
+paths = [
+  '''^target/''',
+  '''^crates/secd-ui/dist/''',
+]

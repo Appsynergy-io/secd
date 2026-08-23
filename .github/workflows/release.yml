@@ -25,6 +25,7 @@ env:
 jobs:
   # Cheap refusals before any runner time is spent.
   preflight:
+    name: preflight — tag, version and a green gate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -65,6 +66,7 @@ jobs:
   # Compilation. No secrets, no write permission: build.rs from every
   # transitive dependency runs here, so this job must be powerless.
   build:
+    name: build — ${{ matrix.target }}
     needs: [preflight]
     permissions:
       contents: read
@@ -111,9 +113,15 @@ jobs:
           name: build-${{ matrix.target }}
           path: target/release-dist/
           if-no-files-found: error
+          # These hand one job's output to the next; the release itself is
+          # where the bytes live afterwards. The default of 90 days keeps
+          # signed binaries and the digest sitting in Actions storage for a
+          # quarter for no reason.
+          retention-days: 7
 
   # Signing. Holds the cosign key and compiles nothing.
   sign:
+    name: sign — cosign over both binaries
     needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -143,10 +151,12 @@ jobs:
           name: signed
           path: target/release-dist/
           if-no-files-found: error
+          retention-days: 7
 
   # GHCR. Holds packages: write and compiles nothing. The image is signed
   # here, because it is what actually runs and what the deploy pins.
   image:
+    name: image — push and sign the GHCR manifest
     needs: [build, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -196,9 +206,11 @@ jobs:
           name: image-digest
           path: image-digest.txt
           if-no-files-found: error
+          retention-days: 7
 
   # The only job with contents: write. Draft, upload, verify, then publish.
   publish:
+    name: publish — draft, verify, then release
     needs: [preflight, sign, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 20

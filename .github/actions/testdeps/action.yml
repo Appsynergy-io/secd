@@ -1,5 +1,9 @@
 name: testdeps
 description: System dependencies the test lanes need — kernel keyring and a browser.
+outputs:
+  browser:
+    description: Absolute path to the browser the headless DOM assertions drive.
+    value: ${{ steps.browser.outputs.path }}
 runs:
   using: composite
   steps:
@@ -12,15 +16,21 @@ runs:
         }
     # SECD_REQUIRE_BROWSER turns a missing browser into a test failure, so
     # resolve one here rather than discovering it in the assertion.
-    - shell: bash
+    #
+    # A step output rather than GITHUB_ENV: the environment file is read back
+    # by every later step of the job, so anything that writes it can rewrite a
+    # variable a later step trusts. The one step that needs this reads it by
+    # name.
+    - id: browser
+      shell: bash
       run: |
         set -euo pipefail
         for b in google-chrome-stable google-chrome chromium chromium-browser; do
           if command -v "$b" >/dev/null 2>&1; then
-            echo "SECD_BROWSER=$(command -v "$b")" >>"$GITHUB_ENV"
+            echo "path=$(command -v "$b")" >>"$GITHUB_OUTPUT"
             exit 0
           fi
         done
         sudo apt-get update
         sudo apt-get install -y chromium-browser
-        echo "SECD_BROWSER=$(command -v chromium-browser)" >>"$GITHUB_ENV"
+        echo "path=$(command -v chromium-browser)" >>"$GITHUB_OUTPUT"
