@@ -3,6 +3,7 @@ use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::aead::OsRng;
 use zeroize::Zeroize;
 
+use crate::aead::{seal_with_nonce, NONCE_LEN};
 use crate::{open, seal, Error, Secret};
 
 const DEK_LEN: usize = 32;
@@ -109,6 +110,42 @@ pub fn remove_wrap(wraps: &mut Vec<Wrap>, index: usize) -> Result<Wrap, Error> {
         return Err(Error::Factor);
     }
     Ok(wraps.remove(index))
+}
+
+pub(crate) fn wrap_password_at(
+    dek: &[u8],
+    password: &[u8],
+    salt: &[u8; SALT_LEN],
+    nonce: &[u8; NONCE_LEN],
+) -> Result<Wrap, Error> {
+    check_dek(dek)?;
+    let mut kek = derive_password_kek(password, salt)?;
+    let blob = seal_with_nonce(&kek, FACTOR_PASSWORD, dek, nonce)?;
+    kek.zeroize();
+    Ok(Wrap {
+        factor: Factor::Password,
+        cred_id: None,
+        salt: Some(to_hex(salt)),
+        blob: to_hex(&blob),
+    })
+}
+
+pub(crate) fn wrap_passkey_at(
+    dek: &[u8],
+    prf: &[u8],
+    cred_id: &str,
+    nonce: &[u8; NONCE_LEN],
+) -> Result<Wrap, Error> {
+    check_dek(dek)?;
+    let mut kek = prf_kek(prf)?;
+    let blob = seal_with_nonce(&kek, FACTOR_PASSKEY, dek, nonce)?;
+    kek.zeroize();
+    Ok(Wrap {
+        factor: Factor::Passkey,
+        cred_id: Some(cred_id.to_string()),
+        salt: None,
+        blob: to_hex(&blob),
+    })
 }
 
 fn check_dek(dek: &[u8]) -> Result<(), Error> {

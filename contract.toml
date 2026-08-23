@@ -95,7 +95,7 @@ files = [
 ".github/actions/testdeps/action.yml" = "850e58eedfdfe1986dbf70e78e023c5d75253ea834940090ab2267651106282d"
 ".github/dependabot.yml" = "ccc1b40ab352caf1cb1f51b59e456cc4b99a87c11fd47c958dcef14024675b29"
 ".github/workflows/audit.yml" = "70284dbb3fcce2414aef59310be07f86d86368712575ad8ec82fae797cccbd95"
-".github/workflows/ci.yml" = "45e57c0a99d881e11f9c659e3b4e54b689088343305a2845512bc099335fa174"
+".github/workflows/ci.yml" = "1c43a4b6478c850849622a93308e5cc48b1b5fb9516fb16533c6b6b03e1aab1d"
 ".github/workflows/release.yml" = "7b60880f1f1c8d7faea80b096c9d4826f4dbbe454294496a5a2763836c351113"
 ".gitleaks.toml" = "e618066c2aa8358389d7cb1b1fd93d7e2716ec85c9a8b6415633f9a9c6d6b365"
 "deploy/agent/secd-agent.service" = "877bd4f1d714a37747b4d4674a53a3ce8ccef22e2b9e40f97653d507c86c2eeb"
@@ -104,9 +104,9 @@ files = [
 "deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
-"scripts/build-ui-bun.sh" = "e9e83feeca7297e2b451c059f31ce012257fc9c84b7f7fde2c43285824cbcda5"
+"scripts/build-ui-bun.sh" = "d009df483ca231dfad375575a016b9301d2fcfcfcf7c859d678ce756dc044099"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "99d7fbe534ffd76a3391315fe3fea225355416c7f41ac66f855822b8da76238d"
+"scripts/check.sh" = "740a41a2f70b90bc7f1db318bb5b1e6abc676f54a2eab8704daa4ff9786df1be"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
 "scripts/dev/release-dry.sh" = "62f55ffd879ba3453bd5fdbd3664ea0878966fbd7f080df8a8cda7e0910412ae"
@@ -115,7 +115,7 @@ files = [
 "scripts/k3s-apply.sh" = "65f26c9c0734542988b7f81d3c09d4dbd374157cc9dfb76455c43c822db5ebad"
 "scripts/merge-latest-json.sh" = "6a56449f8494e8f4f2724e6cd93e0d5c9ee96579a698eb08856e769bac472d41"
 "scripts/merge.sh" = "63ccbd79101736458e5e8b4f9305ae9cc64e9429dda1da32abbe0c118feab269"
-"scripts/plan-contract.sh" = "de15bfe603b531ad77f0e777d9d241dcfd62412adef2c43b3194bc0051609634"
+"scripts/plan-contract.sh" = "e3f3847bb4658d777b7d73ec99eb9598f33ae586ac4b44c8655d0521850775ab"
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
 "scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
@@ -123,7 +123,7 @@ files = [
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
 "ui/bunfig.toml" = "52527f820f0de4fc7ca7b3c631c42531383d52288cdec3679e2ecc047220ca14"
-"ui/package.json" = "f67bc0629d6827e08bbfef6755e2d33b02738473ac33603310f0d943c4470322"
+"ui/package.json" = "1f0e64cd3e9e5f3027ec9c55fc8498d6b16edeb752d5287219560081ac0d744d"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 
@@ -161,6 +161,9 @@ pending = false
 pending = false
 
 [tests.T_AEAD_EMPTY]
+pending = false
+
+[tests.T_CRYPTO_PARITY_FIXTURE]
 pending = false
 
 [tests.T_WRAP_PASSWORD]

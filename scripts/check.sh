@@ -9,6 +9,7 @@
 #   scripts/check.sh ui              build crates/secd-ui/dist
 #   scripts/check.sh ui-bun          build ui/dist, tsc, bun test
 #   scripts/check.sh bun-audit       bun audit against ui/bun.lock
+#   scripts/check.sh crypto-parity   secd-core fixture vs ui/dist/crypto.js
 #   scripts/check.sh clippy test     one or more named lanes
 #   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
 set -euo pipefail
@@ -37,7 +38,7 @@ GITLEAKS_PINNED="8.30.1"
 # prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
 # refuses to build without a fresh crates/secd-ui/dist. `ui-bun` builds the
 # bun console into ui/dist; both consoles stay until Teardown.
-ALL_LANES=(contract shell workflow secrets fmt ui ui-bun bun-audit clippy test test-release compile-fail release-dry)
+ALL_LANES=(contract shell workflow secrets fmt ui ui-bun bun-audit crypto-parity clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -254,6 +255,29 @@ lane_bun_audit() {
   )
 }
 
+# ui/dist/crypto.js must open the secd-core fixture. Missing or stale
+# fixture is a failure; the lane does not regenerate it in place.
+lane_crypto_parity() {
+  local fixture="$root/crates/secd-core/tests/fixtures/crypto-parity.json"
+  [[ -f "$fixture" ]] || secd_die "crypto-parity: missing fixture"
+  mkdir -p "${TMPDIR:-$root/.tmp}"
+  local generated="${TMPDIR:-$root/.tmp}/crypto-parity-generated.json"
+  cargo run -p secd-core --example parity_fixture --locked --quiet >"$generated"
+  if ! cmp -s "$fixture" "$generated"; then
+    secd_die "crypto-parity: fixture is stale"
+  fi
+  if [[ ! -f "$root/ui/dist/crypto.js" ]]; then
+    "$root/scripts/build-ui-bun.sh"
+  fi
+  [[ -f "$root/ui/dist/crypto.js" ]] || secd_die "crypto-parity: missing ui/dist/crypto.js"
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun "$root/ui/crypto-parity.ts"
+  )
+}
+
 lane_clippy() {
   cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 }
@@ -325,6 +349,7 @@ dispatch_lane() {
     ui) lane_ui ;;
     ui-bun) lane_ui_bun ;;
     bun-audit) lane_bun_audit ;;
+    crypto-parity) lane_crypto_parity ;;
     clippy) lane_clippy ;;
     test) lane_test ;;
     test-release) lane_test_release ;;

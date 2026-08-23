@@ -14,6 +14,7 @@ import {
   startUrl,
 } from "./lib/api.ts";
 import { copyText } from "./lib/clipboard.ts";
+import { clearDek } from "./lib/crypto.ts";
 import { signal } from "./lib/signal.ts";
 import {
   coercePublicKey,
@@ -448,6 +449,7 @@ function renderAccount(state: AppState, root: HTMLElement): void {
   out.addEventListener("click", () => {
     void (async () => {
       await req("POST", logoutUrl());
+      clearDek();
       state.session.set(undefined);
       navigate(state, "/");
     })();

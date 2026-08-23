@@ -46,7 +46,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `crates/secd-web` | TLS 1.3 API (later) |
 | `crates/secd-ui` | web console (later) |
 | `contract.toml` | commands, routes, providers, test IDs, file allow-list |
-| `scripts/check.sh` | the gate. Lanes: `contract shell workflow secrets fmt ui ui-bun bun-audit clippy test test-release compile-fail release-dry`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
+| `scripts/check.sh` | the gate. Lanes: `contract shell workflow secrets fmt ui ui-bun bun-audit crypto-parity clippy test test-release compile-fail release-dry`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
 | `scripts/tools.sh` | shared helpers: pinned tool fetch, `Cargo.lock` version lookup |
 | `.gitleaks.toml` | the `secrets` lane's rule set: the defaults, plus the two paths git ignores |
 | `scripts/build-ui.sh` | wasm + wasm-bindgen + wasm-opt into `crates/secd-ui/dist` |

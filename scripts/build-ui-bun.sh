@@ -38,4 +38,13 @@ bun build ./index.html \
   --entry-naming "[name].[ext]" \
   --chunk-naming "[name].[ext]" \
   --asset-naming "[name].[ext]"
+bun build ./src/lib/crypto.ts \
+  --outdir dist \
+  --target browser \
+  --format esm \
+  --production \
+  --sourcemap=none \
+  --entry-naming "[name].[ext]" \
+  --chunk-naming "[name].[ext]" \
+  --asset-naming "[name].[ext]"
 echo "build-ui-bun: ui/dist"

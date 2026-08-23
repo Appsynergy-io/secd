@@ -160,6 +160,19 @@ jobs:
       - uses: ./.github/actions/setup
       - run: scripts/check.sh bun-audit
 
+  crypto-parity:
+    name: crypto-parity — bun dist matches secd-core vectors
+    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    needs: [fast, changes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: scripts/check.sh crypto-parity
+
   clippy:
     name: clippy — workspace, all targets, warnings denied
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
@@ -504,6 +517,7 @@ jobs:
       - ui
       - ui-bun
       - bun-audit
+      - crypto-parity
       - clippy
       - test
       - test-release

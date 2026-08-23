@@ -304,7 +304,7 @@ else:
 # looked for three named scopes and three named cargo subcommands.
 COMPILES = re.compile(
     r"cargo\s+(?:build|test|clippy|install|run)\b"
-    r"|check\.sh\s+(?:ui|ui-bun|bun-audit|clippy|test|test-release|compile-fail)\b"
+    r"|check\.sh\s+(?:ui|ui-bun|bun-audit|crypto-parity|clippy|test|test-release|compile-fail)\b"
     r"|release\.sh[^\n]*--build-only\b"
     r"|bun\s+(?:install|ci|add|build|run|test)\b"
     r"|bunx\b"
