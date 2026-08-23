@@ -69,6 +69,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 ## Invariants
 
 - Server stores ciphertext. Disk stores no vault key and no plaintext. DEK lives in the kernel keyring until `secd logout` or reboot.
+- `PUT /api/v1/vault` replaces the whole vault, so every save goes through `policy::save_entries_read_back`: it refuses when the load dropped an entry, checks the vault against the pre-image it loaded, and reads back what it wrote. `VaultLoad.body` is that pre-image, shaped as the route takes it back.
 - `Secret`: no `Display`/`Serialize`/`Deref`; `Debug` redacts bytes; `mlock` + `Zeroize`.
 - Unlock: passkey PRF and/or password (argon2id). Terminal never prompts.
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.

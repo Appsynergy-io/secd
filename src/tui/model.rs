@@ -1,9 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use secd_core::{check_name, Secret};
 use serde_json::Value;
 
 use crate::login::{self, Unlocked};
+use crate::policy;
 
 use super::view::{hit_key, Action, ActionHit};
 
@@ -77,6 +78,10 @@ pub struct Model {
     hits: Vec<ActionHit>,
     token: Option<String>,
     dek: Option<Secret>,
+    /// The vault as this register last saw it, name -> ciphertext.
+    before: BTreeMap<String, String>,
+    /// Why a save would lose data. Set means every save is refused.
+    save_blocked: Option<String>,
 }
 
 impl Default for Model {
@@ -99,22 +104,23 @@ impl Model {
             hits: Vec::new(),
             token: None,
             dek: None,
+            before: BTreeMap::new(),
+            save_blocked: None,
         }
     }
 
     pub fn from_unlocked(unlocked: Unlocked) -> Self {
         let Unlocked { token, dek } = unlocked;
-        let rows = login::load_snapshot(&token, &dek);
         let mut model = Self::new();
         model.token = Some(token);
-        for (name, value, meta) in rows {
-            model.names.push(name.clone());
-            model.values.insert(name.clone(), value);
-            model.meta.insert(name, meta);
-        }
-        model.names.sort();
         model.dek = Some(dek);
+        // A save replaces the whole vault, so a register built from a load that
+        // dropped entries -- or from no load at all -- would delete them.
+        model.load_register();
         model.note(format!("loaded {}", model.names.len()));
+        if let Some(why) = model.save_blocked.clone() {
+            model.note(format!("saves refused: {why}"));
+        }
         model.sync_detail();
         model
     }
@@ -248,6 +254,9 @@ impl Model {
     }
 
     fn begin_add(&mut self) {
+        if self.refuse_if_blocked() {
+            return;
+        }
         self.mode = Mode::Modal(Modal::Add {
             name: String::new(),
             value: String::new(),
@@ -256,6 +265,9 @@ impl Model {
     }
 
     fn begin_delete(&mut self) {
+        if self.refuse_if_blocked() {
+            return;
+        }
         let Some(name) = self.selected_name().map(str::to_string) else {
             return;
         };
@@ -267,35 +279,87 @@ impl Model {
             self.note("bad name");
             return;
         }
-        if !self.names.iter().any(|n| n == &name) {
-            self.names.push(name.clone());
-            self.names.sort();
-        }
-        if let Some(i) = self.names.iter().position(|n| n == &name) {
-            self.selected = i;
-        }
-        self.values
-            .insert(name.clone(), Secret::new(value.into_bytes()));
-        self.meta
-            .entry(name)
-            .or_insert_with(|| Value::Object(Default::default()));
         self.mode = Mode::Idle;
-        self.sync_detail();
-        self.push_snapshot();
-        self.note("saved");
+        if self.refuse_if_blocked() {
+            return;
+        }
+        let extra = Secret::new(value.into_bytes());
+        let extra_meta = Value::Object(Default::default());
+        let empty = Value::Object(Default::default());
+        let mut names = self.names.clone();
+        if !names.iter().any(|n| n == &name) {
+            names.push(name.clone());
+            names.sort();
+        }
+        let saved = {
+            let rows: Vec<policy::Row<'_>> = names
+                .iter()
+                .filter_map(|n| {
+                    if n == &name {
+                        Some((n.as_str(), &extra, self.meta.get(n).unwrap_or(&extra_meta)))
+                    } else {
+                        let v = self.values.get(n)?;
+                        Some((n.as_str(), v, self.meta.get(n).unwrap_or(&empty)))
+                    }
+                })
+                .collect();
+            self.save_rows(&rows)
+        };
+        match saved {
+            Some(Ok(written)) => {
+                self.before = written;
+                self.names = names;
+                if let Some(i) = self.names.iter().position(|n| n == &name) {
+                    self.selected = i;
+                }
+                self.values.insert(name.clone(), extra);
+                self.meta.entry(name).or_insert(extra_meta);
+                self.sync_detail();
+                self.note("saved");
+            }
+            Some(Err(e)) => {
+                self.note(format!("save failed: {e}"));
+                self.reload_from_vault();
+            }
+            None => {}
+        }
     }
 
     fn commit_delete(&mut self, name: &str) {
-        self.names.retain(|n| n != name);
-        self.values.remove(name);
-        self.meta.remove(name);
-        if self.selected >= self.names.len() {
-            self.selected = self.names.len().saturating_sub(1);
-        }
         self.mode = Mode::Idle;
-        self.sync_detail();
-        self.push_snapshot();
-        self.note("deleted");
+        if self.refuse_if_blocked() {
+            return;
+        }
+        let empty = Value::Object(Default::default());
+        let names: Vec<String> = self.names.iter().filter(|n| *n != name).cloned().collect();
+        let saved = {
+            let rows: Vec<policy::Row<'_>> = names
+                .iter()
+                .filter_map(|n| {
+                    let v = self.values.get(n)?;
+                    Some((n.as_str(), v, self.meta.get(n).unwrap_or(&empty)))
+                })
+                .collect();
+            self.save_rows(&rows)
+        };
+        match saved {
+            Some(Ok(written)) => {
+                self.before = written;
+                self.names = names;
+                self.values.remove(name);
+                self.meta.remove(name);
+                if self.selected >= self.names.len() {
+                    self.selected = self.names.len().saturating_sub(1);
+                }
+                self.sync_detail();
+                self.note("deleted");
+            }
+            Some(Err(e)) => {
+                self.note(format!("save failed: {e}"));
+                self.reload_from_vault();
+            }
+            None => {}
+        }
     }
 
     fn copy_selected(&mut self) {
@@ -340,13 +404,58 @@ impl Model {
         }
     }
 
-    fn push_snapshot(&mut self) {
+    fn refuse_if_blocked(&mut self) -> bool {
+        let Some(why) = self.save_blocked.clone() else {
+            return false;
+        };
+        self.note(format!("save refused: {why}"));
+        true
+    }
+
+    /// Prospective rows, not the register: a miss must not leave a ghost name.
+    fn save_rows(
+        &self,
+        rows: &[policy::Row<'_>],
+    ) -> Option<anyhow::Result<BTreeMap<String, String>>> {
+        let (Some(token), Some(dek)) = (self.token.as_deref(), self.dek.as_ref()) else {
+            return None;
+        };
+        Some(login::save_snapshot(token, dek, rows, &self.before))
+    }
+
+    fn apply_loaded(&mut self, loaded: policy::VaultLoad) {
+        self.save_blocked = loaded.drop_refusal();
+        self.before = loaded.before;
+        self.names.clear();
+        self.values.clear();
+        self.meta.clear();
+        for policy::Entry { name, value, meta } in loaded.entries {
+            self.names.push(name.clone());
+            self.values.insert(name.clone(), value);
+            self.meta.insert(name, meta);
+        }
+        self.names.sort();
+        if self.selected >= self.names.len() {
+            self.selected = self.names.len().saturating_sub(1);
+        }
+    }
+
+    fn load_register(&mut self) {
         let (Some(token), Some(dek)) = (self.token.as_deref(), self.dek.as_ref()) else {
             return;
         };
-        if let Err(e) = login::save_snapshot(token, dek, &self.names, &self.values, &self.meta) {
-            self.note(format!("save failed: {e}"));
+        match policy::load_vault(token, dek) {
+            Ok(loaded) => self.apply_loaded(loaded),
+            Err(e) => self.save_blocked = Some(format!("vault: {e}")),
         }
+    }
+
+    fn reload_from_vault(&mut self) {
+        self.load_register();
+        if let Some(why) = self.save_blocked.clone() {
+            self.note(format!("saves refused: {why}"));
+        }
+        self.sync_detail();
     }
 
     fn note(&mut self, msg: impl Into<String>) {
@@ -354,5 +463,123 @@ impl Model {
         while self.activity.len() > 32 {
             self.activity.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocked_register() -> Model {
+        let mut m = Model::new();
+        m.save_blocked =
+            Some("vault: 1 of 2 entries did not decode; a save would delete them".into());
+        m.names.push("kv/alpha".into());
+        m
+    }
+
+    fn claimed_save(lines: &[String]) -> bool {
+        lines.iter().any(|l| l == "saved" || l == "deleted")
+    }
+
+    #[test]
+    fn blocked_register_does_not_claim_a_save() {
+        let mut m = blocked_register();
+        m.handle(Event::Key('a'));
+        assert!(m.is_idle(), "must not open add");
+        assert!(
+            m.activity_lines()
+                .iter()
+                .any(|l| l.starts_with("save refused:")),
+            "must note the refusal"
+        );
+        assert!(!claimed_save(&m.activity_lines()));
+
+        m.handle(Event::Key('d'));
+        assert!(m.is_idle(), "must not open delete");
+        assert!(!claimed_save(&m.activity_lines()));
+
+        m.mode = Mode::Modal(Modal::Add {
+            name: "kv/new".into(),
+            value: "x".into(),
+            focus: AddField::Value,
+        });
+        m.handle(Event::Enter);
+        assert!(!claimed_save(&m.activity_lines()));
+        assert!(m.is_idle());
+        assert_eq!(m.names(), ["kv/alpha"]);
+
+        m.mode = Mode::Modal(Modal::Delete {
+            name: "kv/alpha".into(),
+        });
+        m.handle(Event::Enter);
+        assert!(!claimed_save(&m.activity_lines()));
+        assert_eq!(m.names(), ["kv/alpha"]);
+    }
+
+    #[test]
+    fn failed_save_does_not_leave_a_ghost_row() {
+        let mut m = Model::new();
+        m.mode = Mode::Modal(Modal::Add {
+            name: "kv/new".into(),
+            value: "x".into(),
+            focus: AddField::Value,
+        });
+        m.handle(Event::Enter);
+        assert!(m.is_idle());
+        assert!(
+            m.names().is_empty(),
+            "no session: add must not keep the row"
+        );
+        assert!(!claimed_save(&m.activity_lines()));
+
+        m.names.push("kv/alpha".into());
+        m.values
+            .insert("kv/alpha".into(), Secret::new(b"x".to_vec()));
+        m.mode = Mode::Modal(Modal::Delete {
+            name: "kv/alpha".into(),
+        });
+        m.handle(Event::Enter);
+        assert_eq!(
+            m.names(),
+            ["kv/alpha"],
+            "no session: delete must not drop the row"
+        );
+        assert!(!claimed_save(&m.activity_lines()));
+    }
+
+    #[test]
+    fn apply_loaded_replaces_the_register_and_pre_image() {
+        let mut m = Model::new();
+        m.names.push("kv/ghost".into());
+        m.values
+            .insert("kv/ghost".into(), Secret::new(b"x".to_vec()));
+        m.before.insert("stale".into(), "ct-stale".into());
+        m.selected = 3;
+
+        let mut before = BTreeMap::new();
+        before.insert("kv/alpha".into(), "ct-alpha".into());
+        before.insert("kv/dropped".into(), "ct-dropped".into());
+        m.apply_loaded(policy::VaultLoad {
+            entries: vec![policy::Entry {
+                name: "kv/alpha".into(),
+                value: Secret::new(b"x".to_vec()),
+                meta: Value::Object(Default::default()),
+            }],
+            raw: 2,
+            body: String::new(),
+            before,
+        });
+        assert_eq!(m.names(), ["kv/alpha"]);
+        assert_eq!(m.selected, 0);
+        assert_eq!(
+            m.before.get("kv/alpha").map(String::as_str),
+            Some("ct-alpha")
+        );
+        assert_eq!(
+            m.before.get("kv/dropped").map(String::as_str),
+            Some("ct-dropped")
+        );
+        assert!(m.save_blocked.is_some());
     }
 }
