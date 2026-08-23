@@ -22,13 +22,13 @@ bytes = "=1.11.1"
 hex = "=0.4.3"
 libsqlite3-sys = { version = "=0.38.2", features = ["bundled"] }
 openssl = { version = "=0.10.81", features = ["vendored"] }
-rand = "=0.8.5"
+rand = "=0.8.6"
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws-lc-rs"] }
 rustls-pemfile = "=2.2.0"
 secd-core = { path = "../secd-core" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-time = { version = "=0.3.41", default-features = false, features = ["formatting", "std"] }
+time = { version = "=0.3.47", default-features = false, features = ["formatting", "std"] }
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "net", "time", "fs"] }
 url = "=2.5.4"
 uuid = { version = "=1.24.0", features = ["v4", "serde"] }

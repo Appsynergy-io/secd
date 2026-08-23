@@ -19,7 +19,7 @@ anyhow = "=1.0.104"
 clap = "=4.6.6"
 crossterm = "=0.28.1"
 hex = "=0.4.3"
-ratatui = { version = "=0.29.0", default-features = false, features = ["crossterm"] }
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws-lc-rs"] }
 rustls-pemfile = "=2.2.0"
 secd-core = { path = "crates/secd-core" }
