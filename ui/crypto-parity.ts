@@ -52,7 +52,11 @@ async function loadConsoleCrypto(): Promise<CryptoMod> {
     die("missing console entry");
   }
   const entrySource = await entryFile.text();
-  const dyn = [...entrySource.matchAll(/\bimport\(\s*"(\.\/[^"]+\.js)"\s*\)/g)].map((m) => m[1]);
+  const dyn = [
+    ...new Set(
+      [...entrySource.matchAll(/\bimport\(\s*"(\.\/[^"]+\.js)"\s*\)/g)].map((m) => m[1]),
+    ),
+  ];
   if (dyn.length === 0) {
     die("console entry does not dynamically import a chunk");
   }

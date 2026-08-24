@@ -1,34 +1,37 @@
 import {
   BREAKPOINT_PX,
-  EMAIL_AUTOCOMPLETE,
   FAIL_SENTENCE,
-  LAST_KEY,
-  RATE_SENTENCE,
-  REMEMBER_DAYS,
   deviceQuery,
   layoutMode,
   logoutUrl,
-  passwordLoginUrl,
   removePasskeyEnabled,
   req,
   sessionUrl,
-  startUrl,
   type LayoutMode,
 } from "./lib/api.ts";
 import { signal } from "./lib/signal.ts";
-import {
-  coercePublicKey,
-  getPasskey,
-  serializeCredential,
-} from "./lib/webauthn.ts";
 import {
   bumpLogoutGen,
   currentLogoutGen,
   leaveAccount,
   renderAccount as renderAccountScreen,
 } from "./screens/account.ts";
+import { leaveActivity, renderActivity as renderActivityScreen } from "./screens/activity.ts";
 import { renderDevice } from "./screens/device.ts";
 import { abandonRegister, renderRegister as renderRegisterScreen } from "./screens/register.ts";
+import {
+  loadRemember,
+  renderGate,
+  resolveGate,
+  sentenceFor,
+  type AuthMethod,
+  type GateHost,
+  type GateKind,
+  type GateView,
+  type SessionInfo,
+} from "./screens/gate.ts";
+
+export { resolveGate, type AuthMethod, type GateKind, type GateView, type SessionInfo };
 
 export type Screen = "gate" | "device" | "register" | "activity" | "account";
 
@@ -105,145 +108,11 @@ export function initialPath(path: string, userCode: string): string {
   return userCode === "" ? path : "/device";
 }
 
-type AuthMethod = "register" | "passkey" | "password" | "either";
-
-export type SessionInfo = {
-  email: string;
-  has_passkey: boolean;
-  has_password: boolean;
-  session_id: string;
-};
 
 export type PasskeyRow = {
   id: string;
   created: string;
 };
-
-type Remembered = {
-  email: string;
-  has_passkey: boolean;
-  at: string;
-};
-
-export type GateKind =
-  | "approve-only"
-  | "remembered-passkey"
-  | "remembered-password"
-  | "cold"
-  | "identity";
-
-export type GateView = {
-  kind: GateKind;
-  showEmail: boolean;
-  showPassword: boolean;
-  showPasskey: boolean;
-  showApprove: boolean;
-  emailAutocomplete: string | undefined;
-  emailPrefill: string | undefined;
-  showUseDifferentAccount: boolean;
-  showUsePasswordInstead: boolean;
-  userCode: string | undefined;
-};
-
-function rememberIsFresh(atIso: string, nowMs: number): boolean {
-  const at = Date.parse(atIso);
-  if (Number.isNaN(at)) {
-    return false;
-  }
-  return nowMs - at <= REMEMBER_DAYS * 24 * 60 * 60 * 1000;
-}
-
-export function resolveGate(q: {
-  session?: SessionInfo | undefined;
-  remember?: Remembered | undefined;
-  email?: string | undefined;
-  nowMs?: number | undefined;
-  method?: AuthMethod | undefined;
-  useDifferentAccount?: boolean | undefined;
-  revealPassword?: boolean | undefined;
-  userCode?: string | undefined;
-}): GateView {
-  if (q.session) {
-    return {
-      kind: "approve-only",
-      showEmail: false,
-      showPassword: false,
-      showPasskey: false,
-      showApprove: true,
-      emailAutocomplete: undefined,
-      emailPrefill: undefined,
-      showUseDifferentAccount: false,
-      showUsePasswordInstead: false,
-      userCode: q.userCode,
-    };
-  }
-  const now = q.nowMs ?? Date.now();
-  const remembered =
-    q.remember && !q.useDifferentAccount && rememberIsFresh(q.remember.at, now)
-      ? q.remember
-      : undefined;
-  if (remembered) {
-    if (remembered.has_passkey) {
-      return {
-        kind: "remembered-passkey",
-        showEmail: false,
-        showPassword: false,
-        showPasskey: true,
-        showApprove: false,
-        emailAutocomplete: undefined,
-        emailPrefill: remembered.email,
-        showUseDifferentAccount: true,
-        showUsePasswordInstead: false,
-        userCode: q.userCode,
-      };
-    }
-    return {
-      kind: "remembered-password",
-      showEmail: false,
-      showPassword: true,
-      showPasskey: false,
-      showApprove: false,
-      emailAutocomplete: undefined,
-      emailPrefill: remembered.email,
-      showUseDifferentAccount: true,
-      showUsePasswordInstead: false,
-      userCode: q.userCode,
-    };
-  }
-  if (q.method) {
-    const showPassword =
-      q.method === "password" ||
-      q.method === "register" ||
-      (q.method === "either" && Boolean(q.revealPassword));
-    const showPasskey =
-      q.method === "passkey" || q.method === "register" || q.method === "either";
-    const showUsePassword = q.method === "either" && !q.revealPassword;
-    return {
-      kind: "identity",
-      showEmail: true,
-      showPassword,
-      showPasskey,
-      showApprove: false,
-      emailAutocomplete: EMAIL_AUTOCOMPLETE,
-      emailPrefill: q.email ?? q.remember?.email,
-      showUseDifferentAccount: Boolean(q.remember),
-      showUsePasswordInstead: showUsePassword,
-      userCode: q.userCode,
-    };
-  }
-  return {
-    kind: "cold",
-    showEmail: true,
-    showPassword: false,
-    showPasskey: false,
-    showApprove: false,
-    emailAutocomplete: EMAIL_AUTOCOMPLETE,
-    emailPrefill: q.email ?? q.remember?.email,
-    showUseDifferentAccount: false,
-    showUsePasswordInstead: false,
-    userCode: q.userCode,
-  };
-}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -284,53 +153,19 @@ export type AppState = {
 
 let mounted: HTMLElement | undefined;
 
-function loadRemember(): Remembered | undefined {
-  try {
-    const raw = localStorage.getItem(LAST_KEY);
-    if (!raw) {
-      return undefined;
-    }
-    const v = JSON.parse(raw) as unknown;
-    if (typeof v !== "object" || v === null) {
-      return undefined;
-    }
-    const rec = v as Record<string, unknown>;
-    if (typeof rec["email"] !== "string" || typeof rec["has_passkey"] !== "boolean") {
-      return undefined;
-    }
-    if (typeof rec["at"] !== "string") {
-      return undefined;
-    }
-    return {
-      email: rec["email"],
-      has_passkey: rec["has_passkey"],
-      at: rec["at"],
-    };
-  } catch {
-    return undefined;
-  }
-}
 
-function saveRemember(email: string, hasPasskey: boolean): void {
-  try {
-    localStorage.setItem(
-      LAST_KEY,
-      JSON.stringify({
-        email,
-        has_passkey: hasPasskey,
-        at: new Date().toISOString(),
-      }),
-    );
-  } catch {
-    /* ignore */
-  }
-}
-
-function sentenceFor(status: number): string {
-  if (status === 429) {
-    return RATE_SENTENCE;
-  }
-  return FAIL_SENTENCE;
+function gateHost(state: AppState): GateHost {
+  return {
+    navigate(to) {
+      navigate(state, to);
+    },
+    redraw() {
+      render(state);
+    },
+    loadSession() {
+      return loadSession(state);
+    },
+  };
 }
 
 function nav(state: AppState, screen: Screen): HTMLElement {
@@ -355,111 +190,12 @@ function nav(state: AppState, screen: Screen): HTMLElement {
   );
 }
 
-function renderGate(state: AppState, root: HTMLElement): void {
-  const view = resolveGate({
-    session: state.session.get(),
-    remember: loadRemember(),
-    email: state.email.get() || undefined,
-    method: state.method.get(),
-    useDifferentAccount: state.different.get(),
-    revealPassword: state.revealPassword.get(),
-    userCode: state.userCode.get() || undefined,
-  });
-  const form = el("form", { class: "secd-auth-form" });
-  form.addEventListener("submit", (ev) => {
-    ev.preventDefault();
-    void onContinue(state);
-  });
-  if (view.showEmail) {
-    const input = el("input", {
-      id: "email",
-      type: "email",
-      name: "email",
-      autocomplete: view.emailAutocomplete ?? EMAIL_AUTOCOMPLETE,
-      value: view.emailPrefill ?? state.email.get(),
-    });
-    input.addEventListener("input", () => {
-      state.email.set(input.value);
-    });
-    form.append(el("label", { for: "email" }, ["Email"]), input);
-  }
-  if (view.showPassword) {
-    const input = el("input", {
-      id: "password",
-      type: "password",
-      name: "password",
-      autocomplete: "current-password",
-    });
-    input.value = state.password.get();
-    input.addEventListener("input", () => {
-      state.password.set(input.value);
-    });
-    form.append(el("label", { for: "password" }, ["Password"]), input);
-  }
-  if (view.showApprove) {
-    form.append(
-      el("button", { type: "submit", "data-action": "approve" }, ["Approve"]),
-    );
-  } else {
-    form.append(el("button", { type: "submit" }, ["Continue"]));
-  }
-  if (view.showPasskey) {
-    const pk = el("button", { type: "button", class: "secondary", "data-action": "passkey" }, [
-      "Passkey",
-    ]);
-    pk.addEventListener("click", () => {
-      void onPasskey(state);
-    });
-    form.append(pk);
-  }
-  if (view.showUsePasswordInstead) {
-    const pw = el(
-      "button",
-      { type: "button", class: "secondary", "data-action": "password" },
-      ["Use password instead"],
-    );
-    pw.addEventListener("click", () => {
-      state.revealPassword.set(true);
-      render(state);
-    });
-    form.append(pw);
-  }
-  if (view.showUseDifferentAccount) {
-    const diff = el(
-      "button",
-      { type: "button", class: "secondary", "data-action": "different" },
-      ["Use a different account"],
-    );
-    diff.addEventListener("click", () => {
-      state.different.set(true);
-      render(state);
-    });
-    form.append(diff);
-  }
-  const err = state.error.get();
-  const page = el("div", { class: "app", "data-page": "gate" }, [
-    el("h1", {}, ["secd"]),
-    form,
-    err ? el("p", { class: "error" }, [err]) : "",
-  ]);
-  root.replaceChildren(page);
-}
-
 export function renderRegister(state: AppState, root: HTMLElement): void {
   renderRegisterScreen(state, root);
 }
 
 function renderActivity(state: AppState, root: HTMLElement): void {
-  root.replaceChildren(
-    el("div", { class: "app", "data-page": "activity" }, [
-      nav(state, "activity"),
-      el("h1", {}, ["Activity"]),
-      el("p", {}, ["Audit metadata. Values are never listed."]),
-      el("div", { class: "list", "data-list": "audit" }, [
-        el("p", {}, ["No events"]),
-      ]),
-    ]),
-  );
+  renderActivityScreen(state, root, nav(state, "activity"));
 }
 
 export function renderAccount(state: AppState, root: HTMLElement): void {
@@ -489,10 +225,13 @@ export function render(state: AppState): void {
   if (screen !== "account") {
     leaveAccount(state);
   }
+  if (screen !== "activity") {
+    leaveActivity(state);
+  }
   switch (screen) {
     case "device":
       if (state.session.get() === undefined) {
-        renderGate(state, root);
+        renderGate(state, root, gateHost(state));
       } else {
         renderDevice(state, root, () => {
           navigate(state, "/register");
@@ -509,7 +248,7 @@ export function render(state: AppState): void {
       renderAccount(state, root);
       break;
     default:
-      renderGate(state, root);
+      renderGate(state, root, gateHost(state));
   }
 }
 
@@ -549,98 +288,6 @@ async function wipeDek(): Promise<void> {
     crypto.clearDek();
   } catch {
     /* session is already cleared */
-  }
-}
-
-async function onContinue(state: AppState): Promise<void> {
-  if (state.pending.get()) {
-    return;
-  }
-  state.pending.set(true);
-  state.error.set(undefined);
-  try {
-    if (state.password.get() !== "") {
-      const email = state.email.get();
-      const res = await req("POST", passwordLoginUrl(), {
-        email,
-        password: state.password.get(),
-      });
-      state.password.set("");
-      if (res.status !== 200) {
-        state.error.set(sentenceFor(res.status));
-        return;
-      }
-      await loadSession(state);
-      if (state.session.get() === undefined) {
-        if (state.error.get() === undefined) {
-          state.error.set(FAIL_SENTENCE);
-        }
-        return;
-      }
-      saveRemember(email, false);
-      navigate(state, state.userCode.get() === "" ? "/register" : "/device");
-      return;
-    }
-    const res = await req("POST", startUrl(), { email: state.email.get() });
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-      return;
-    }
-    const data = res.data as { method?: string };
-    const method = data.method;
-    if (method === "passkey" || method === "password" || method === "either" || method === "register") {
-      state.method.set(method);
-    }
-  } catch {
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    state.pending.set(false);
-    render(state);
-  }
-}
-
-async function onPasskey(state: AppState): Promise<void> {
-  if (state.pending.get()) {
-    return;
-  }
-  state.pending.set(true);
-  state.error.set(undefined);
-  try {
-    const start = await req("POST", "/api/auth/passkey/login/start", {
-      email: state.email.get() || undefined,
-    });
-    if (start.status !== 200) {
-      state.error.set(sentenceFor(start.status));
-      return;
-    }
-    const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialRequestOptions;
-    const cred = await getPasskey(pk, false);
-    const handle =
-      typeof (start.data as { handle?: unknown }).handle === "string"
-        ? (start.data as { handle: string }).handle
-        : "";
-    const finish = await req("POST", "/api/auth/passkey/login/finish", {
-      handle,
-      credential: serializeCredential(cred),
-    });
-    if (finish.status !== 200) {
-      state.error.set(sentenceFor(finish.status));
-      return;
-    }
-    await loadSession(state);
-    if (state.session.get() === undefined) {
-      if (state.error.get() === undefined) {
-        state.error.set(FAIL_SENTENCE);
-      }
-      return;
-    }
-    saveRemember(state.email.get(), true);
-    navigate(state, state.userCode.get() === "" ? "/register" : "/device");
-  } catch {
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    state.pending.set(false);
-    render(state);
   }
 }
 
@@ -697,7 +344,7 @@ function boot(root: HTMLElement): void {
   }
   const state: AppState = {
     path: signal(bootPath),
-    email: signal(""),
+    email: signal(loadRemember()?.email ?? ""),
     password: signal(""),
     error: signal(undefined),
     pending: signal(false),
