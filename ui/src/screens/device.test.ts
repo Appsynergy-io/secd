@@ -54,6 +54,7 @@ type FakeNode = {
   querySelector(sel: string): FakeNode | null;
   closest(sel: string): FakeNode | null;
   focus(): void;
+  select(): void;
   setSelectionRange(start: number, end: number): void;
   textContent: string;
 };
@@ -168,6 +169,10 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
     focus() {
       const doc = globalThis.document as unknown as { activeElement?: FakeNode | null };
       doc.activeElement = node;
+    },
+    select() {
+      node.selectionStart = 0;
+      node.selectionEnd = node.value.length;
     },
     setSelectionRange(start: number, end: number) {
       node.selectionStart = start;
@@ -579,7 +584,10 @@ describe("device screen", () => {
     await Bun.sleep(1);
     expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
     expect(root.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
-    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
+    const input = asFake(root.querySelector("#user_code"));
+    expect(activeEl()).toBe(input);
+    expect(input?.selectionStart).toBe(0);
+    expect(input?.selectionEnd).toBe(input?.value.length ?? -1);
   });
 
   test("Approve seals the DEK to the CLI eph and does not put the DEK on the wire", async () => {
@@ -732,6 +740,62 @@ describe("device screen", () => {
       false,
     );
     expect(root.querySelector("[data-reason]")).toBeNull();
+  });
+
+  test("Approve remount restores focus when the control stays enabled", () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    const state = signedState();
+    renderDevice(state, root);
+    asFake(root.querySelector('[data-action="approve"]'))?.focus();
+    renderDevice(state, root);
+    const approve = asFake(root.querySelector('[data-action="approve"]'));
+    expect(approve?.hasAttribute("disabled")).toBe(false);
+    expect(activeEl()).toBe(approve);
+  });
+
+  test("Approve remount focuses the code while the control is pending", async () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    asFake(root.querySelector('[data-action="approve"]'))?.focus();
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
+    finish?.(new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }));
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
+  });
+
+  test("Approve does not paint Device after the page has left", async () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    root.replaceChildren();
+    finish?.(new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }));
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
   });
 
   test("Copy does not paint Device after the page has left", async () => {

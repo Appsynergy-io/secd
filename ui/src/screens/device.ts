@@ -250,7 +250,10 @@ export function renderDevice(
 ): void {
   seedDeviceQuery(state, globalThis.location?.search ?? "");
   const prevInput = asInput(root.querySelector("#user_code"));
+  const prevApprove = asButton(root.querySelector('[data-action="approve"]'));
   const hadCodeFocus = prevInput !== null && document.activeElement === prevInput;
+  const hadApproveFocus =
+    prevApprove !== null && document.activeElement === prevApprove;
   const selStart = prevInput !== null ? prevInput.selectionStart : null;
   const selEnd = prevInput !== null ? prevInput.selectionEnd : null;
   const code = state.userCode.get();
@@ -374,11 +377,25 @@ export function renderDevice(
       ? page.querySelector("#user_code")
       : hint === "copy"
         ? page.querySelector('[data-action="copy"]')
-        : hadCodeFocus
-          ? page.querySelector("#user_code")
-          : null;
+        : hadApproveFocus
+          ? !approve.disabled
+            ? approve
+            : page.querySelector("#user_code")
+          : hadCodeFocus
+            ? page.querySelector("#user_code")
+            : null;
   if (found !== null && typeof (found as HTMLElement).focus === "function") {
     (found as HTMLElement).focus();
+  }
+  if (hint === "code") {
+    const codeInput = asInput(found) ?? restored;
+    if (codeInput !== null) {
+      if (typeof codeInput.select === "function") {
+        codeInput.select();
+      } else if (typeof codeInput.setSelectionRange === "function") {
+        codeInput.setSelectionRange(0, codeInput.value.length);
+      }
+    }
   }
 }
 
@@ -476,6 +493,9 @@ async function onApprove(
       user_code: state.userCode.get(),
       sealed_dek: sealed,
     });
+    if (!stillOnDevice(root)) {
+      return;
+    }
     if (res.status === 200) {
       state.error.set(undefined);
       if (onApproved !== undefined) {
@@ -486,11 +506,17 @@ async function onApprove(
     }
     state.error.set(failSentence(res.status, res.data));
   } catch {
+    if (!stillOnDevice(root)) {
+      return;
+    }
     state.error.set(FAIL_SENTENCE);
   } finally {
     zeroizeBytes(ephBytes);
     state.pending.set(false);
-    if (onApproved === undefined || state.error.get() !== undefined) {
+    if (
+      stillOnDevice(root) &&
+      (onApproved === undefined || state.error.get() !== undefined)
+    ) {
       renderDevice(state, root, onApproved);
     }
   }
