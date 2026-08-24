@@ -481,10 +481,8 @@ export function renderRegister(state: AppState, root: HTMLElement): void {
         el("p", {}, ["No secrets yet."]),
       ]),
     ]),
+    inspectorCard(),
   ]);
-  if (layout === "list-inspector") {
-    workspace.append(inspectorCard());
-  }
   root.replaceChildren(
     el("div", { class: "app", "data-page": "register", "data-layout": layout }, [
       nav(state, "register"),
@@ -516,14 +514,16 @@ export function renderAccount(state: AppState, root: HTMLElement): void {
     has_passkey: session?.has_passkey === true,
     has_password: session?.has_password === true,
   });
-  const last = lastFactor(factors);
   const loaded = state.passkeys.get();
+  const hasPassword = session?.has_password === true;
+  const last =
+    loaded !== undefined && !removePasskeyEnabled(loaded.length, hasPassword);
   const removeId = loaded?.[0]?.id;
   const removeOk =
-    !last &&
+    loaded !== undefined &&
     removeId !== undefined &&
     removeId !== "" &&
-    removePasskeyEnabled(loaded?.length ?? 0, session?.has_password === true);
+    removePasskeyEnabled(loaded.length, hasPassword);
   const links = factors.map((factor) => {
     const label = factor === "passkey" ? "Passkey" : "Password";
     const children: Array<Node | string> = [el("span", { class: "mono" }, [label])];
@@ -752,14 +752,14 @@ async function onRemovePasskey(state: AppState): Promise<void> {
     return;
   }
   const session = state.session.get();
-  const factors = dekFactors({
-    has_passkey: session?.has_passkey === true,
-    has_password: session?.has_password === true,
-  });
-  if (lastFactor(factors)) {
+  const loaded = state.passkeys.get();
+  if (
+    loaded === undefined ||
+    !removePasskeyEnabled(loaded.length, session?.has_password === true)
+  ) {
     return;
   }
-  const id = state.passkeys.get()?.[0]?.id;
+  const id = loaded[0]?.id;
   if (id === undefined || id === "") {
     return;
   }
@@ -775,8 +775,11 @@ async function onRemovePasskey(state: AppState): Promise<void> {
       state.error.set(sentenceFor(res.status));
       return;
     }
-    state.passkeys.set(undefined);
     await loadSession(state);
+    if (state.session.get() === undefined || state.error.get() !== undefined) {
+      return;
+    }
+    state.passkeys.set(undefined);
   } catch {
     if (gen !== logoutGen) {
       return;
@@ -873,8 +876,12 @@ async function loadSession(state: AppState): Promise<void> {
   if (gen !== logoutGen) {
     return;
   }
-  if (res.status !== 200) {
+  if (res.status === 401 || res.status === 403) {
     state.session.set(undefined);
+    return;
+  }
+  if (res.status !== 200) {
+    state.error.set(sentenceFor(res.status));
     return;
   }
   const data = asSession(res.data);
@@ -951,8 +958,17 @@ function boot(root: HTMLElement): void {
   globalThis.addEventListener("popstate", () => {
     state.path.set(globalThis.location.pathname);
   });
-  globalThis.addEventListener("resize", () => {
-    render(state);
+  const mq = globalThis.matchMedia?.(`(min-width: ${BREAKPOINT_PX}px)`);
+  mq?.addEventListener("change", (ev) => {
+    const active = globalThis.document.activeElement;
+    const id = active instanceof HTMLElement && active.id !== "" ? active.id : "";
+    const node = mounted?.querySelector("[data-layout]");
+    if (node) {
+      node.setAttribute("data-layout", ev.matches ? "list-inspector" : "list-only");
+    }
+    if (id !== "") {
+      globalThis.document.getElementById(id)?.focus();
+    }
   });
   void (async () => {
     try {

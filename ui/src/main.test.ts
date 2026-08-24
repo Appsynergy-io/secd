@@ -368,6 +368,46 @@ describe("Account chain", () => {
     await Bun.sleep(1);
   });
 
+  test("two passkeys and no password enable Remove", async () => {
+    const root = document.createElement("div");
+    const fetches: Array<{ method: string; url: string }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      fetches.push({ method: String(init?.method ?? "GET"), url });
+      if (String(init?.method ?? "GET") === "GET" && url === "/api/session") {
+        return new Response(
+          JSON.stringify({
+            email: "a@b.c",
+            session_id: "s1",
+            has_passkey: true,
+            has_password: false,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = accountState({
+      has_passkey: true,
+      has_password: false,
+      passkeys: [
+        { id: "pk-1", created: "2026-01-01T00:00:00Z" },
+        { id: "pk-2", created: "2026-01-02T00:00:00Z" },
+      ],
+    });
+    renderAccount(state, root);
+    expect(root.querySelector('[data-chain="dek"]')?.getAttribute("data-last")).toBe("0");
+    expect(root.querySelector(".chain-reason")).toBeNull();
+    const remove = root.querySelector('[data-action="remove"]');
+    expect(remove?.hasAttribute("disabled")).toBe(false);
+    (remove as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(fetches).toContainEqual({
+      method: "DELETE",
+      url: "/api/auth/passkeys/pk-1",
+    });
+  });
+
   test("two factors enable Remove and DELETE the loaded passkey", async () => {
     const root = document.createElement("div");
     const fetches: Array<{ method: string; url: string }> = [];
@@ -624,6 +664,58 @@ describe("Account chain", () => {
     expect(state.session.get()).toBeUndefined();
     expect(state.passkeys.get()).toBeUndefined();
   });
+
+  test("DELETE then GET /session 5xx keeps the session and surfaces the error", async () => {
+    const root = document.createElement("div");
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "DELETE") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      if (method === "GET" && url === "/api/session") {
+        return Promise.resolve(new Response("{}", { status: 500 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    setDek(mintDek());
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="remove"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()?.session_id).toBe("s1");
+    expect(state.error.get()).toBe(FAIL_SENTENCE);
+    expect(getDek()?.length).toBe(32);
+  });
+
+  test("DELETE then GET /session 401 clears the session", async () => {
+    const root = document.createElement("div");
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "DELETE") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      if (method === "GET" && url === "/api/session") {
+        return Promise.resolve(new Response("{}", { status: 401 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="remove"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    expect(state.error.get()).toBeUndefined();
+  });
 });
 
 describe("Register layout", () => {
@@ -677,7 +769,7 @@ describe("Register layout", () => {
     expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
   });
 
-  test("below 900px is list-only: no inspector, no sheet until a secret is selected", () => {
+  test("below 900px is list-only: inspector stays in the tree, no sheet until a secret is selected", () => {
     Object.defineProperty(globalThis, "innerWidth", {
       configurable: true,
       writable: true,
@@ -687,7 +779,7 @@ describe("Register layout", () => {
     renderRegister(registerState(), root);
     expect(root.querySelector('[data-layout="list-only"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="list"]')).not.toBeNull();
-    expect(root.querySelector('[data-pane="inspector"]')).toBeNull();
+    expect(root.querySelector('[data-pane="inspector"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
   });
 });

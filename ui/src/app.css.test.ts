@@ -28,6 +28,7 @@ describe("token layer", () => {
     expect(css).toContain("--space: 8px");
     expect(css).toContain("--color-bg: oklch(99% 0.012 250)");
     expect(css).toContain("--color-surface: oklch(96% 0.012 250)");
+    expect(css).toContain("--color-focus: oklch(45% 0.12 78)");
   });
 
   test("latin Geist faces are file URLs, not data URIs or Google Fonts", () => {
@@ -44,6 +45,10 @@ describe("token layer", () => {
     expect(css).toContain("150ms");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css).toContain(":focus-visible");
+    expect(css).toContain("outline: 2px solid var(--color-focus)");
+    expect(css).not.toContain("outline: 2px solid var(--color-accent)");
+    expect(css).toContain("border-color: var(--color-focus)");
+    expect(css).not.toContain("box-shadow: 0 0 0 3px var(--color-accent-soft)");
     expect(css).toContain("@media (min-width: 900px)");
     expect(css).toContain('[data-pane="inspector"]');
     expect(css).toContain('[data-pane="sheet"]');
