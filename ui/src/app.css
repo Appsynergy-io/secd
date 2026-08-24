@@ -201,12 +201,23 @@ button:disabled {
   user-select: all;
 }
 
-[data-verified="1"] {
-  color: var(--color-success);
+[data-verified="1"],
+[data-verified="0"] {
+  color: var(--color-text);
 }
 
-[data-verified="0"] {
-  color: var(--color-danger);
+[data-chain-status="verified"],
+span[data-verified="1"],
+p[data-verified="1"] {
+  border-inline-start: 3px solid var(--color-success);
+  padding-inline-start: var(--space);
+}
+
+[data-chain-status="unverified"],
+span[data-verified="0"],
+p[data-verified="0"] {
+  border-inline-start: 3px solid var(--color-danger);
+  padding-inline-start: var(--space);
 }
 
 [data-device],

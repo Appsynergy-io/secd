@@ -47,6 +47,7 @@ type FakeNode = {
   click(): void;
   submit(): void;
   querySelector(sel: string): FakeNode | null;
+  focus(): void;
   textContent: string;
 };
 
@@ -119,6 +120,10 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
       });
       return found[0] ?? null;
     },
+    focus() {
+      const doc = globalThis.document as unknown as { activeElement?: FakeNode };
+      doc.activeElement = node;
+    },
     get textContent() {
       if (node.nodeType === 3) {
         return node.text;
@@ -143,6 +148,9 @@ function walk(node: FakeNode, fn: (n: FakeNode) => void): void {
 }
 
 function matches(node: FakeNode, sel: string): boolean {
+  if (sel.startsWith("#")) {
+    return node.getAttribute("id") === sel.slice(1);
+  }
   const tag = sel.match(/^[a-zA-Z][\w-]*/);
   let rest = sel;
   if (tag) {

@@ -526,4 +526,57 @@ describe("gate screen", () => {
     expect(document.activeElement).toBe(root.querySelector('[data-copy="value"]'));
     root.remove();
   });
+
+  test("typing email enables Continue and submits the typed value", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const posts: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      posts.push({
+        url: reqUrl(input),
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      return new Response(JSON.stringify({ method: "password" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = makeState();
+    renderGate(state, root, hostFor(state, root, []));
+    const email = root.querySelector("#email") as HTMLInputElement | null;
+    const btn = root.querySelector("button[type='submit']") as HTMLButtonElement | null;
+    expect(email).not.toBeNull();
+    expect(btn?.hasAttribute("disabled")).toBe(true);
+    expect(btn?.disabled).toBe(true);
+    email!.value = EMAIL;
+    email!.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(btn?.hasAttribute("disabled")).toBe(false);
+    expect(btn?.disabled).toBe(false);
+    btn!.click();
+    await Bun.sleep(1);
+    expect(posts).toEqual([{ url: "/api/auth/start", body: { email: EMAIL } }]);
+    expect(state.method.get()).toBe("password");
+    root.remove();
+  });
+
+  test("Signing in is painted before the response", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      })) as unknown as typeof fetch;
+    const state = makeState({ email: EMAIL });
+    renderGate(state, root, hostFor(state, root, []));
+    const btn = root.querySelector("button[type='submit']") as HTMLButtonElement | null;
+    expect(btn?.hasAttribute("disabled")).toBe(false);
+    btn!.click();
+    await Bun.sleep(1);
+    expect(root.querySelector("[data-state='loading']")).not.toBeNull();
+    expect(root.querySelector("form")?.getAttribute("aria-busy")).toBe("true");
+    expect(root.querySelector("button[type='submit']")?.hasAttribute("disabled")).toBe(true);
+    expect(root.querySelector("[data-reason]")?.textContent).toBe("Signing in.");
+    finish?.(new Response(JSON.stringify({ method: "password" }), { status: 200 }));
+    await Bun.sleep(1);
+    expect(state.method.get()).toBe("password");
+    root.remove();
+  });
 });

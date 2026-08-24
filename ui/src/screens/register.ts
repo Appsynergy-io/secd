@@ -83,9 +83,13 @@ type Store = {
   rolling: boolean;
 };
 
+type HoldListener = { doc: Document; type: string; fn: EventListener };
+
 const stores = new WeakMap<object, Store>();
 const dekWatches = new WeakMap<object, { unsub: () => void; root: HTMLElement }>();
 const clipTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+const holdListeners = new WeakMap<object, HoldListener[]>();
+const focusHints = new WeakMap<object, "copy" | { key: string }>();
 
 function freshStore(): Store {
   return {
@@ -116,6 +120,7 @@ function storeOf(host: object): Store {
 
 export function abandonRegister(host: object): void {
   const watch = dekWatches.get(host);
+  dropHold(host, watch?.root);
   if (watch) {
     watch.unsub();
     dekWatches.delete(host);
@@ -131,6 +136,7 @@ export function abandonRegister(host: object): void {
     s.opened.clear();
     s.wizardValues = new Map();
     delete s.wizardError;
+    delete s.revealed;
     stores.delete(host);
   }
   blankClipboard();
@@ -155,6 +161,12 @@ function el<K extends keyof HTMLElementTagNameMap>(
     }
     if (v === true) {
       node.setAttribute(k, "");
+      if (k === "disabled" && "disabled" in node) {
+        (node as HTMLButtonElement).disabled = true;
+      }
+      if (k === "readonly" && "readOnly" in node) {
+        (node as HTMLInputElement).readOnly = true;
+      }
     } else {
       node.setAttribute(k, v);
     }
@@ -201,7 +213,106 @@ function scheduleClipboardBlank(host: object): void {
   );
 }
 
-function dropPlaintext(store: Store): void {
+function dropHoldListeners(host: object): void {
+  const list = holdListeners.get(host);
+  if (list === undefined) {
+    return;
+  }
+  for (const { doc, type, fn } of list) {
+    doc.removeEventListener(type, fn);
+  }
+  holdListeners.delete(host);
+}
+
+function remaskLive(root: HTMLElement): void {
+  if (typeof root.querySelectorAll !== "function") {
+    return;
+  }
+  for (const node of root.querySelectorAll("[data-value]")) {
+    node.textContent = MASK;
+  }
+}
+
+function dropHold(host: object, root?: HTMLElement | null): void {
+  dropHoldListeners(host);
+  const s = stores.get(host);
+  if (s !== undefined) {
+    delete s.revealed;
+  }
+  const scope = root ?? dekWatches.get(host)?.root;
+  if (scope !== undefined) {
+    remaskLive(scope);
+  }
+}
+
+function addHoldListener(host: object, doc: Document, type: string, fn: EventListener): void {
+  const list = holdListeners.get(host) ?? [];
+  doc.addEventListener(type, fn);
+  list.push({ doc, type, fn });
+  holdListeners.set(host, list);
+}
+
+function fieldValueNodes(root: HTMLElement, key: string): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  if (typeof root.querySelectorAll !== "function") {
+    return out;
+  }
+  for (const field of root.querySelectorAll("[data-field]")) {
+    if (!(field instanceof HTMLElement)) {
+      continue;
+    }
+    if (field.getAttribute("data-field") !== key) {
+      continue;
+    }
+    const val = field.querySelector("[data-value]");
+    if (val instanceof HTMLElement) {
+      out.push(val);
+    }
+  }
+  return out;
+}
+
+function restoreSelector(root: HTMLElement, active: Element | null): string | undefined {
+  if (!(active instanceof HTMLElement)) {
+    return undefined;
+  }
+  if (typeof root.contains === "function" && !root.contains(active)) {
+    return undefined;
+  }
+  if (active.id !== "") {
+    return `#${active.id}`;
+  }
+  const field = active.closest("[data-field]")?.getAttribute("data-field");
+  if (active.hasAttribute("data-select-copy")) {
+    return field !== null && field !== undefined
+      ? `[data-field="${field}"] [data-select-copy]`
+      : "[data-select-copy]";
+  }
+  const action = active.getAttribute("data-action");
+  if (action !== null && field !== null && field !== undefined) {
+    return `[data-field="${field}"] [data-action="${action}"]`;
+  }
+  if (action !== null) {
+    return `[data-action="${action}"]`;
+  }
+  const name = active.getAttribute("data-name");
+  if (name !== null) {
+    return `[data-name="${name}"]`;
+  }
+  const wizard = active.getAttribute("data-wizard-field");
+  if (wizard !== null) {
+    return `input[data-wizard-field="${wizard}"]`;
+  }
+  return undefined;
+}
+
+function firstControl(scope: ParentNode): HTMLElement | null {
+  const n = scope.querySelector("button, input, select, textarea, a[href]");
+  return n instanceof HTMLElement ? n : null;
+}
+
+function dropPlaintext(host: object, store: Store, root?: HTMLElement): void {
+  dropHold(host, root);
   store.opened.clear();
   store.wizardValues = new Map();
   delete store.wizardError;
@@ -218,7 +329,7 @@ function watchDek(state: RegisterHost, root: HTMLElement): void {
     if (!s) {
       return;
     }
-    dropPlaintext(s);
+    dropPlaintext(state, s, root);
     if (state.path.get() === "/register") {
       paint(state, root);
     }
@@ -404,8 +515,11 @@ export function renderRegister(state: RegisterHost, root: HTMLElement): void {
 
 function paint(state: RegisterHost, root: HTMLElement): void {
   const store = storeOf(state);
+  const prevSel = restoreSelector(root, document.activeElement);
+  const hadSheet = root.querySelector('[data-pane="sheet"]') !== null;
+  const hadWizard = root.querySelector("[data-wizard]") !== null;
   if (getDek() === undefined) {
-    dropPlaintext(store);
+    dropPlaintext(state, store, root);
   }
   const layout = currentLayout();
   const selectedName = store.selected;
@@ -449,6 +563,31 @@ function paint(state: RegisterHost, root: HTMLElement): void {
     page.append(wizardPane(state, root, store));
   }
   root.replaceChildren(page);
+
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
+  let target: HTMLElement | null = null;
+  if (hint === "copy") {
+    const pane = sheet ? page.querySelector('[data-pane="sheet"]') : page.querySelector('[data-pane="inspector"]');
+    const found = (pane ?? page).querySelector("[data-select-copy]");
+    target = found instanceof HTMLElement ? found : null;
+  } else if (hint !== undefined && typeof hint === "object") {
+    const pane = sheet ? page.querySelector('[data-pane="sheet"]') : page.querySelector('[data-pane="inspector"]');
+    const found = (pane ?? page).querySelector(`[data-field="${hint.key}"] [data-action="copy"]`);
+    target = found instanceof HTMLElement ? found : null;
+  } else if (store.wizard && !hadWizard) {
+    const found = page.querySelector("#secret_name");
+    target = found instanceof HTMLElement ? found : null;
+  } else if (sheet && !hadSheet) {
+    const pane = page.querySelector('[data-pane="sheet"]');
+    target = pane !== null ? firstControl(pane) : null;
+  } else if (prevSel !== undefined) {
+    const found = page.querySelector(prevSel);
+    target = found instanceof HTMLElement ? found : null;
+  }
+  if (target !== null && typeof target.focus === "function") {
+    target.focus();
+  }
 }
 
 function listPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLElement {
@@ -579,8 +718,6 @@ function fieldRow(
   opened: Opened | undefined,
 ): HTMLElement {
   const value = opened?.fields[key];
-  const holding = store.revealed?.name === item.name && store.revealed.key === key;
-  const shown = holding && value !== undefined ? value : MASK;
   const copied =
     store.copyState?.name === item.name && store.copyState.key === key
       ? store.copyState.label
@@ -588,7 +725,7 @@ function fieldRow(
   const noDek = getDek() === undefined;
   const noValue = value === undefined;
   const disabled = noDek || noValue || store.saving;
-  const valueEl = el("span", { class: "mono", "data-value": "" }, [shown]);
+  const valueEl = el("span", { class: "mono", "data-value": "" }, [MASK]);
   const copy = el(
     "button",
     {
@@ -616,26 +753,31 @@ function fieldRow(
     if (value === undefined || disabled) {
       return;
     }
+    dropHoldListeners(state);
     store.revealed = { name: item.name, key };
-    valueEl.textContent = value;
+    for (const node of fieldValueNodes(root, key)) {
+      node.textContent = value;
+    }
   };
   const stopHold = (): void => {
-    if (store.revealed?.name === item.name && store.revealed.key === key) {
-      delete store.revealed;
-      valueEl.textContent = MASK;
+    delete store.revealed;
+    for (const node of fieldValueNodes(root, key)) {
+      node.textContent = MASK;
     }
+    dropHoldListeners(state);
   };
   show.addEventListener("pointerdown", (ev) => {
     ev.preventDefault();
+    if (value === undefined || disabled) {
+      return;
+    }
     startHold();
     const doc = show.ownerDocument;
-    const hide = () => {
+    const hide = (): void => {
       stopHold();
-      doc.removeEventListener("pointerup", hide);
-      doc.removeEventListener("pointercancel", hide);
     };
-    doc.addEventListener("pointerup", hide);
-    doc.addEventListener("pointercancel", hide);
+    addHoldListener(state, doc, "pointerup", hide);
+    addHoldListener(state, doc, "pointercancel", hide);
   });
   show.addEventListener("keydown", (ev) => {
     if (ev.repeat) {
@@ -645,17 +787,19 @@ function fieldRow(
       return;
     }
     ev.preventDefault();
+    if (value === undefined || disabled) {
+      return;
+    }
     startHold();
     const doc = show.ownerDocument;
-    const hide = (up: KeyboardEvent) => {
-      if (up.key !== ev.key) {
+    const hide = (up: Event): void => {
+      if (!(up instanceof KeyboardEvent) || up.key !== ev.key) {
         return;
       }
       up.preventDefault();
       stopHold();
-      doc.removeEventListener("keyup", hide);
     };
-    doc.addEventListener("keyup", hide);
+    addHoldListener(state, doc, "keyup", hide);
   });
   const row = el("div", { class: "secd-stack", "data-field": key }, [
     el("p", {}, [key]),
@@ -674,7 +818,9 @@ function fieldRow(
     const fallback = el("input", {
       class: "mono",
       readonly: true,
+      autocomplete: "off",
       "data-select-copy": "",
+      "aria-label": "Secret value",
       value,
     });
     row.append(fallback);
@@ -770,7 +916,9 @@ function wizardPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLE
   if (schema) {
     for (const f of schema.fields) {
       const label = f.optional ? `${f.key} (optional)` : f.key;
+      const fid = `wizard-${f.key}`;
       const input = el("input", {
+        id: fid,
         class: "mono",
         type: f.secret ? "password" : "text",
         autocomplete: "off",
@@ -781,7 +929,10 @@ function wizardPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLE
         store.wizardValues.set(f.key, input.value);
       });
       form.append(
-        el("div", { "data-wizard-field": f.key }, [el("label", {}, [label]), input]),
+        el("div", { "data-wizard-field": f.key }, [
+          el("label", { for: fid }, [label]),
+          input,
+        ]),
       );
     }
   }
@@ -912,9 +1063,11 @@ async function onCopy(
   const clip = globalThis.navigator?.clipboard;
   if (clip === undefined || typeof clip.writeText !== "function") {
     store.copyFail = { name, key, reason: CLIP_MISSING_SENTENCE };
+    focusHints.set(state, "copy");
     paint(state, root);
     return;
   }
+  focusHints.set(state, { key });
   paint(state, root);
   const gen = store.gen;
   if (!stillHere(state, gen, store)) {
@@ -927,6 +1080,7 @@ async function onCopy(
       return;
     }
     store.copyState = { name, key, label: "Copied" };
+    focusHints.set(state, { key });
     paint(state, root);
     scheduleClipboardBlank(state);
   } catch {
@@ -935,6 +1089,7 @@ async function onCopy(
     }
     store.copyFail = { name, key, reason: CLIP_FAIL_SENTENCE };
     store.copyState = { name, key, label: "Copy" };
+    focusHints.set(state, "copy");
     paint(state, root);
   }
 }

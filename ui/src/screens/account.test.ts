@@ -321,7 +321,8 @@ describe("account screen", () => {
     });
     renderAccount(state, root);
     await Bun.sleep(1);
-    (root.querySelector(`[data-passkey-id="${id}"]`) as HTMLElement).click();
+    document.body.append(root);
+    (root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`) as HTMLButtonElement).click();
     const btn = root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement;
     expect(btn.textContent).toBe("Copy");
     btn.click();
@@ -335,6 +336,10 @@ describe("account screen", () => {
         .textContent,
     ).toBe("Copied");
     expect(wrote).toBe(id);
+    expect(document.activeElement).toBe(
+      root.querySelector('[data-pane="inspector"] [data-action="copy"]'),
+    );
+    root.remove();
   });
 
   test("clipboard refusal keeps Copy and offers select-to-copy of the id", async () => {
@@ -351,12 +356,17 @@ describe("account screen", () => {
     });
     renderAccount(state, root);
     await Bun.sleep(1);
-    (root.querySelector(`[data-passkey-id="${id}"]`) as HTMLElement).click();
+    document.body.append(root);
+    (root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`) as HTMLButtonElement).click();
     (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
     await Bun.sleep(1);
     expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
     expect(root.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
-    expect(root.querySelector("[data-copy-fallback]")?.textContent).toBe(id);
+    const fallback = root.querySelector("[data-copy-fallback]") as HTMLInputElement | null;
+    expect(fallback?.value).toBe(id);
+    expect(fallback?.getAttribute("aria-label")).toBe("Identifier");
+    expect(document.activeElement).toBe(fallback);
+    root.remove();
   });
 
   test("list | inspector at 900px; below 900 a selection opens the sheet", async () => {
@@ -384,7 +394,7 @@ describe("account screen", () => {
       value: 899,
     });
     renderAccount(state, root, undefined, undefined, 899);
-    (root.querySelector('[data-passkey-id="pk-1"]') as HTMLElement).click();
+    (root.querySelector('[data-passkey-id="pk-1"] button:not([data-action])') as HTMLButtonElement).click();
     expect(root.querySelector('[data-layout="list-only"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="sheet"][data-sheet="open"]')).not.toBeNull();
   });

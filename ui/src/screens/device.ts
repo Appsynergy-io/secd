@@ -40,6 +40,7 @@ export type DeviceState = {
 
 const copiedAt = new WeakMap<object, Signal<boolean>>();
 const seeded = new WeakSet<object>();
+const focusHints = new WeakMap<object, "copy" | "code">();
 
 function copiedOf(state: object): Signal<boolean> {
   let s = copiedAt.get(state);
@@ -250,6 +251,17 @@ export function renderDevice(
     ],
   );
   root.replaceChildren(page);
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
+  const found =
+    hint === "code"
+      ? page.querySelector("#user_code")
+      : hint === "copy"
+        ? page.querySelector('[data-action="copy"]')
+        : null;
+  if (found !== null && typeof (found as HTMLElement).focus === "function") {
+    (found as HTMLElement).focus();
+  }
 }
 
 function sessionCardEl(session: DeviceSession | undefined): HTMLElement {
@@ -282,9 +294,11 @@ async function onCopy(
   if (ok) {
     copiedOf(state).set(true);
     state.error.set(undefined);
+    focusHints.set(state, "copy");
   } else {
     copiedOf(state).set(false);
     state.error.set(CLIP_FAIL_SENTENCE);
+    focusHints.set(state, "code");
   }
   renderDevice(state, root, onApproved);
 }

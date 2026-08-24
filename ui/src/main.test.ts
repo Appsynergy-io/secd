@@ -15,6 +15,7 @@ import {
   SCREENS,
   type AppState,
 } from "./main.ts";
+import { abandonRegister } from "./screens/register.ts";
 
 describe("router", () => {
   test("five screens with stable hrefs", () => {
@@ -870,12 +871,17 @@ describe("Gate login", () => {
 describe("Register layout", () => {
   const origDocument = globalThis.document;
   const origWidth = globalThis.innerWidth;
+  const hosts: object[] = [];
 
   beforeEach(() => {
     installDom();
+    hosts.length = 0;
   });
 
   afterEach(() => {
+    for (const h of hosts) {
+      abandonRegister(h);
+    }
     Object.defineProperty(globalThis, "document", {
       configurable: true,
       writable: true,
@@ -912,7 +918,9 @@ describe("Register layout", () => {
       value: 900,
     });
     const root = document.createElement("div");
-    renderRegister(registerState(), root);
+    const state = registerState();
+    hosts.push(state);
+    renderRegister(state, root);
     expect(root.querySelector('[data-layout="list-inspector"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="list"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="inspector"]')).not.toBeNull();
@@ -926,7 +934,9 @@ describe("Register layout", () => {
       value: 899,
     });
     const root = document.createElement("div");
-    renderRegister(registerState(), root);
+    const state = registerState();
+    hosts.push(state);
+    renderRegister(state, root);
     expect(root.querySelector('[data-layout="list-only"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="list"]')).not.toBeNull();
     expect(root.querySelector('[data-pane="inspector"]')).not.toBeNull();

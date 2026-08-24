@@ -67,6 +67,7 @@ type Mem = {
 };
 
 const mem = new WeakMap<object, Mem>();
+const focusHints = new WeakMap<object, "copy" | "hash">();
 
 function memOf(state: object): Mem {
   let m = mem.get(state);
@@ -108,10 +109,24 @@ function el<K extends keyof HTMLElementTagNameMap>(
     if (v === undefined || v === false) {
       continue;
     }
+    if ((tag === "input" || tag === "textarea") && k === "value") {
+      continue;
+    }
     if (v === true) {
       node.setAttribute(k, "");
+      if (k === "disabled" && "disabled" in node) {
+        (node as HTMLButtonElement).disabled = true;
+      }
+      if (k === "readonly" && "readOnly" in node) {
+        (node as HTMLInputElement).readOnly = true;
+      }
     } else {
       node.setAttribute(k, v);
+    }
+  }
+  if (tag === "input" || tag === "select" || tag === "textarea") {
+    if (typeof attrs.value === "string") {
+      (node as HTMLInputElement).value = attrs.value;
     }
   }
   for (const child of children) {
@@ -352,6 +367,8 @@ async function loadActivity(state: ActivityHost, root: HTMLElement): Promise<voi
 
 function paint(state: ActivityHost, root: HTMLElement): void {
   const m = memOf(state);
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
   const err = state.error.get();
   const kind = viewKind({ loading: m.loading, error: err, rows: m.rows });
   const layout = layoutFor(m);
@@ -418,6 +435,7 @@ function paint(state: ActivityHost, root: HTMLElement): void {
         m.selected = seq;
         m.copied = false;
         m.clipFail = false;
+        focusHints.set(state, "copy");
         paint(state, root);
       });
       listBody.push(btn);
@@ -437,20 +455,46 @@ function paint(state: ActivityHost, root: HTMLElement): void {
   }
   if (m.clipFail) {
     children.push(el("p", { class: "error", "data-reason": "" }, [CLIP_FAIL_SENTENCE]));
+    if (selected !== undefined) {
+      children.push(
+        el("input", {
+          class: "mono",
+          readonly: true,
+          autocomplete: "off",
+          "data-select-copy": "",
+          "aria-label": "Event hash",
+          value: selected.hash,
+        }),
+      );
+    }
   }
 
-  root.replaceChildren(
-    el(
-      "div",
-      {
-        class: "app",
-        "data-page": "activity",
-        "data-layout": layout,
-        "data-state": kind,
-      },
-      children,
-    ),
+  const page = el(
+    "div",
+    {
+      class: "app",
+      "data-page": "activity",
+      "data-layout": layout,
+      "data-state": kind,
+    },
+    children,
   );
+  root.replaceChildren(page);
+  let target: HTMLElement | null = null;
+  if (hint === "hash" || m.clipFail) {
+    const found = page.querySelector("[data-select-copy]");
+    target = found instanceof HTMLElement ? found : null;
+  } else if (hint === "copy") {
+    const sel =
+      layout === "list-only"
+        ? '[data-pane="sheet"] [data-action="copy"]'
+        : '[data-pane="inspector"] [data-action="copy"]';
+    const found = page.querySelector(sel) ?? page.querySelector('[data-action="copy"]');
+    target = found instanceof HTMLElement ? found : null;
+  }
+  if (target !== null && typeof target.focus === "function") {
+    target.focus();
+  }
 }
 
 function detailsEl(
@@ -544,5 +588,6 @@ async function onCopy(state: ActivityHost, root: HTMLElement): Promise<void> {
   const ok = await copyText(row.hash);
   m.copied = ok;
   m.clipFail = !ok;
+  focusHints.set(state, ok ? "copy" : "hash");
   paint(state, root);
 }

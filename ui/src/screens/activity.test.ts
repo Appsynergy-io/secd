@@ -279,6 +279,7 @@ describe("Activity screen", () => {
     renderActivity(state, root, document.createElement("nav"), 1280);
     await settled();
     (root.querySelector('[data-seq="0"]') as HTMLButtonElement).click();
+    document.body.append(root);
     (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
     await settled();
     expect(root.querySelector('[data-pane="inspector"] [data-action="copy"]')?.textContent).toBe(
@@ -286,6 +287,11 @@ describe("Activity screen", () => {
     );
     expect(root.textContent).toContain(CLIP_FAIL_SENTENCE);
     expect(root.querySelector('[data-field="hash"]')?.textContent).toBe(PUT_HASH);
+    const fallback = root.querySelector("[data-select-copy]") as HTMLInputElement | null;
+    expect(fallback?.value).toBe(PUT_HASH);
+    expect(fallback?.getAttribute("aria-label")).toBe("Event hash");
+    expect(document.activeElement).toBe(fallback);
+    root.remove();
   });
 
   test("list-inspector at 900px; list opens a sheet below", async () => {

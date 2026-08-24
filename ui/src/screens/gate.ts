@@ -276,6 +276,59 @@ function disable(btn: HTMLButtonElement, on: boolean): void {
   }
 }
 
+function refreshGateControls(
+  page: HTMLElement,
+  view: GateView,
+  pending: boolean,
+  email: string,
+  password: string,
+  err: string | undefined,
+): void {
+  const reason = reasonFor({
+    pending,
+    showEmail: view.showEmail,
+    showPassword: view.showPassword,
+    email,
+    password,
+  });
+  const form = page.querySelector("form");
+  if (form instanceof HTMLElement) {
+    if (pending) {
+      form.setAttribute("aria-busy", "true");
+    } else if (typeof form.removeAttribute === "function") {
+      form.removeAttribute("aria-busy");
+    }
+  }
+  if (view.showEmail || view.showPassword) {
+    const cont = page.querySelector('button[type="submit"]');
+    if (cont instanceof HTMLButtonElement) {
+      const blocked =
+        pending ||
+        (view.showEmail && email === "") ||
+        (view.showPassword && password === "");
+      disable(cont, blocked);
+    }
+  }
+  const pk = page.querySelector('[data-action="passkey"]');
+  if (pk instanceof HTMLButtonElement) {
+    disable(pk, pending);
+  }
+  page.setAttribute(
+    "data-state",
+    pending ? "loading" : err ? "error" : reason ? "empty" : "ready",
+  );
+  const existing = page.querySelector("[data-reason]");
+  if (reason) {
+    if (existing) {
+      existing.textContent = reason;
+    } else {
+      page.append(el("p", { "data-reason": "" }, [reason]));
+    }
+  } else if (existing) {
+    existing.remove();
+  }
+}
+
 function afterLoginPath(userCode: string): string {
   return userCode === "" ? "/register" : "/device";
 }
@@ -424,7 +477,15 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
   });
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    if (pending) {
+    const emailInput = form.querySelector("#email");
+    const passwordInput = form.querySelector("#password");
+    if (emailInput instanceof HTMLInputElement) {
+      state.email.set(emailInput.value);
+    }
+    if (passwordInput instanceof HTMLInputElement) {
+      state.password.set(passwordInput.value);
+    }
+    if (state.pending.get()) {
       return;
     }
     if (view.showEmail || view.showPassword) {
@@ -453,6 +514,17 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     });
     input.addEventListener("input", () => {
       state.email.set(input.value);
+      const pageEl = input.closest("[data-page]");
+      if (pageEl instanceof HTMLElement) {
+        refreshGateControls(
+          pageEl,
+          view,
+          state.pending.get(),
+          state.email.get(),
+          state.password.get(),
+          state.error.get(),
+        );
+      }
     });
     form.append(el("label", { for: "email" }, ["Email"]), input);
   }
@@ -467,6 +539,17 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     input.value = state.password.get();
     input.addEventListener("input", () => {
       state.password.set(input.value);
+      const pageEl = input.closest("[data-page]");
+      if (pageEl instanceof HTMLElement) {
+        refreshGateControls(
+          pageEl,
+          view,
+          state.pending.get(),
+          state.email.get(),
+          state.password.get(),
+          state.error.get(),
+        );
+      }
     });
     form.append(el("label", { for: "password" }, ["Password"]), input);
   }
@@ -486,6 +569,10 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
         return;
       }
       ev.preventDefault();
+      const emailInput = form.querySelector("#email");
+      if (emailInput instanceof HTMLInputElement) {
+        state.email.set(emailInput.value);
+      }
       void onPasskey(state, host);
     });
     form.append(pk);
@@ -586,6 +673,7 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
   }
   state.pending.set(true);
   state.error.set(undefined);
+  host.redraw();
   try {
     const crypto = await import("../lib/crypto.ts");
     crypto.clearDek();
@@ -596,10 +684,11 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
       const isRegister = state.method.get() === "register";
       if (isRegister) {
         const fresh = crypto.mintDek();
+        const pwBytes = new TextEncoder().encode(password);
         try {
           let body: Record<string, unknown>;
           try {
-            const wrap = crypto.wrapPassword(fresh, new TextEncoder().encode(password));
+            const wrap = crypto.wrapPassword(fresh, pwBytes);
             body = { email, password, wrap: crypto.wrapToJson(wrap) };
           } catch {
             state.password.set("");
@@ -615,6 +704,7 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
           crypto.setDek(fresh);
         } finally {
           crypto.zeroizeBytes(fresh);
+          crypto.zeroizeBytes(pwBytes);
         }
       } else {
         const res = await req("POST", passwordLoginUrl(), { email, password });
@@ -623,13 +713,18 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
           state.error.set(sentenceFor(res.status));
           return;
         }
-        const opened = crypto.unwrapAny(
-          crypto.wrapsFromJson(res.data),
-          new TextEncoder().encode(password),
-          undefined,
-        );
-        if (opened !== undefined) {
-          crypto.setDek(opened);
+        const pwBytes = new TextEncoder().encode(password);
+        let opened: Uint8Array | undefined;
+        try {
+          opened = crypto.unwrapAny(crypto.wrapsFromJson(res.data), pwBytes, undefined);
+          if (opened !== undefined) {
+            crypto.setDek(opened);
+          }
+        } finally {
+          crypto.zeroizeBytes(pwBytes);
+          if (opened !== undefined) {
+            crypto.zeroizeBytes(opened);
+          }
         }
       }
       await host.loadSession();
@@ -668,6 +763,7 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
   }
   state.pending.set(true);
   state.error.set(undefined);
+  host.redraw();
   try {
     const crypto = await import("../lib/crypto.ts");
     crypto.clearDek();
@@ -705,6 +801,7 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
         crypto.setDek(fresh);
       } finally {
         crypto.zeroizeBytes(fresh);
+        crypto.zeroizeBytes(prf);
       }
     } else {
       const start = await req("POST", passkeyLoginStartUrl(), {
@@ -721,21 +818,32 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
         state.error.set(FAIL_SENTENCE);
         return;
       }
-      const handle =
-        typeof (start.data as { handle?: unknown }).handle === "string"
-          ? (start.data as { handle: string }).handle
-          : "";
-      const finish = await req("POST", passkeyLoginFinishUrl(), {
-        handle,
-        credential: serializeCredential(cred),
-      });
-      if (finish.status !== 200) {
-        state.error.set(sentenceFor(finish.status));
-        return;
-      }
-      const opened = crypto.unwrapAny(crypto.wrapsFromJson(finish.data), undefined, prf);
-      if (opened !== undefined) {
-        crypto.setDek(opened);
+      try {
+        const handle =
+          typeof (start.data as { handle?: unknown }).handle === "string"
+            ? (start.data as { handle: string }).handle
+            : "";
+        const finish = await req("POST", passkeyLoginFinishUrl(), {
+          handle,
+          credential: serializeCredential(cred),
+        });
+        if (finish.status !== 200) {
+          state.error.set(sentenceFor(finish.status));
+          return;
+        }
+        let opened: Uint8Array | undefined;
+        try {
+          opened = crypto.unwrapAny(crypto.wrapsFromJson(finish.data), undefined, prf);
+          if (opened !== undefined) {
+            crypto.setDek(opened);
+          }
+        } finally {
+          if (opened !== undefined) {
+            crypto.zeroizeBytes(opened);
+          }
+        }
+      } finally {
+        crypto.zeroizeBytes(prf);
       }
     }
     await host.loadSession();

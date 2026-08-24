@@ -21,7 +21,7 @@ import {
   type LayoutMode,
 } from "../lib/api.ts";
 import { copyText } from "../lib/clipboard.ts";
-import { getDek, toHex, wrapPasskey, wrapToJson } from "../lib/crypto.ts";
+import { getDek, toHex, wrapPasskey, wrapToJson, zeroizeBytes } from "../lib/crypto.ts";
 import type { Signal } from "../lib/signal.ts";
 import {
   coercePublicKey,
@@ -94,6 +94,7 @@ type Mem = {
 };
 
 const mem = new WeakMap<object, Mem>();
+const focusHints = new WeakMap<object, "copy" | "fallback">();
 let logoutGen = 0;
 let passkeyLoadGen = 0;
 
@@ -169,10 +170,24 @@ function el<K extends keyof HTMLElementTagNameMap>(
     if (v === undefined || v === false) {
       continue;
     }
+    if ((tag === "input" || tag === "textarea") && k === "value") {
+      continue;
+    }
     if (v === true) {
       node.setAttribute(k, "");
+      if (k === "disabled" && "disabled" in node) {
+        (node as HTMLButtonElement).disabled = true;
+      }
+      if (k === "readonly" && "readOnly" in node) {
+        (node as HTMLInputElement).readOnly = true;
+      }
     } else {
       node.setAttribute(k, v);
+    }
+  }
+  if (tag === "input" || tag === "select" || tag === "textarea") {
+    if (typeof attrs.value === "string") {
+      (node as HTMLInputElement).value = attrs.value;
     }
   }
   for (const child of children) {
@@ -638,34 +653,40 @@ async function onAdd(state: AccountHost, root: HTMLElement): Promise<void> {
     const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialCreationOptions;
     const cred = await createPasskey(pk);
     const prf = prfBytes(cred);
-    if (prf === undefined) {
-      state.error.set(FAIL_SENTENCE);
-      return;
-    }
-    const wrap = wrapPasskey(dek, prf, toHex(new Uint8Array(cred.rawId)));
-    const handle =
-      typeof (start.data as { handle?: unknown }).handle === "string"
-        ? (start.data as { handle: string }).handle
-        : "";
-    const finish = await req("POST", passkeyRegisterFinishUrl(), {
-      handle,
-      credential: serializeCredential(cred),
-      wrap: wrapToJson(wrap),
-      email,
-    });
-    if (gen !== logoutGen) {
-      return;
-    }
-    if (finish.status !== 200) {
-      state.error.set(failSentence(finish.status, finish.data));
-      return;
-    }
-    state.passkeys.set(undefined);
-    const m = memOf(state);
-    if (m.actions !== undefined) {
-      await m.actions.loadSession();
-    } else {
-      await loadSessionFallback(state);
+    try {
+      if (prf === undefined) {
+        state.error.set(FAIL_SENTENCE);
+        return;
+      }
+      const wrap = wrapPasskey(dek, prf, toHex(new Uint8Array(cred.rawId)));
+      const handle =
+        typeof (start.data as { handle?: unknown }).handle === "string"
+          ? (start.data as { handle: string }).handle
+          : "";
+      const finish = await req("POST", passkeyRegisterFinishUrl(), {
+        handle,
+        credential: serializeCredential(cred),
+        wrap: wrapToJson(wrap),
+        email,
+      });
+      if (gen !== logoutGen) {
+        return;
+      }
+      if (finish.status !== 200) {
+        state.error.set(failSentence(finish.status, finish.data));
+        return;
+      }
+      state.passkeys.set(undefined);
+      const m = memOf(state);
+      if (m.actions !== undefined) {
+        await m.actions.loadSession();
+      } else {
+        await loadSessionFallback(state);
+      }
+    } finally {
+      if (prf !== undefined) {
+        zeroizeBytes(prf);
+      }
     }
   } catch {
     if (gen !== logoutGen) {
@@ -689,6 +710,7 @@ async function onCopy(state: AccountHost, root: HTMLElement, text: string): Prom
   const ok = await copyText(text);
   m.copied = ok;
   m.clipFail = !ok;
+  focusHints.set(state, ok ? "copy" : "fallback");
   paint(state, root);
 }
 
@@ -702,6 +724,14 @@ function select(state: AccountHost, root: HTMLElement, sel: AccountSel): void {
 
 function paint(state: AccountHost, root: HTMLElement): void {
   const m = memOf(state);
+  const prev = document.activeElement;
+  const prevEl = prev instanceof HTMLElement && root.contains(prev) ? prev : undefined;
+  const prevSessionId = prevEl?.closest("[data-session-id]")?.getAttribute("data-session-id");
+  const prevPasskeyId = prevEl?.closest("[data-passkey-id]")?.getAttribute("data-passkey-id");
+  const prevIdentity =
+    prevEl instanceof HTMLButtonElement && !prevEl.hasAttribute("data-action");
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
   const session = state.session.get();
   const factors = dekFactors({
     has_passkey: session?.has_passkey === true,
@@ -808,7 +838,14 @@ function paint(state: AccountHost, root: HTMLElement): void {
     const copyVal = copyValue(selected);
     if (copyVal !== "") {
       children.push(
-        el("code", { class: "mono", "data-copy-fallback": "", "data-field": "" }, [copyVal]),
+        el("input", {
+          class: "mono",
+          readonly: true,
+          autocomplete: "off",
+          "data-copy-fallback": "",
+          "aria-label": "Identifier",
+          value: copyVal,
+        }),
       );
     }
   }
@@ -816,18 +853,42 @@ function paint(state: AccountHost, root: HTMLElement): void {
     children.push(el("p", { class: "error" }, [err]));
   }
 
-  root.replaceChildren(
-    el(
-      "div",
-      {
-        class: "app",
-        "data-page": "account",
-        "data-layout": layout,
-        "data-last": last ? "1" : "0",
-      },
-      children,
-    ),
+  const page = el(
+    "div",
+    {
+      class: "app",
+      "data-page": "account",
+      "data-layout": layout,
+      "data-last": last ? "1" : "0",
+    },
+    children,
   );
+  root.replaceChildren(page);
+  let target: HTMLElement | null = null;
+  if (hint === "fallback" || m.clipFail) {
+    const found = page.querySelector("[data-copy-fallback]");
+    target = found instanceof HTMLElement ? found : null;
+  } else if (hint === "copy") {
+    const sel =
+      layout === "list-only"
+        ? '[data-pane="sheet"] [data-action="copy"]'
+        : '[data-pane="inspector"] [data-action="copy"]';
+    const found = page.querySelector(sel) ?? page.querySelector('[data-action="copy"]');
+    target = found instanceof HTMLElement ? found : null;
+  } else if (prevIdentity && prevSessionId !== null && prevSessionId !== undefined) {
+    const found = page.querySelector(
+      `[data-session-id="${prevSessionId}"] button:not([data-action])`,
+    );
+    target = found instanceof HTMLElement ? found : null;
+  } else if (prevIdentity && prevPasskeyId !== null && prevPasskeyId !== undefined) {
+    const found = page.querySelector(
+      `[data-passkey-id="${prevPasskeyId}"] button:not([data-action])`,
+    );
+    target = found instanceof HTMLElement ? found : null;
+  }
+  if (target !== null && typeof target.focus === "function") {
+    target.focus();
+  }
 }
 
 type Selected =
@@ -890,13 +951,20 @@ function sessionRowEl(
     class: "row",
     "data-session-id": row.id,
     "data-current": row.current ? "true" : undefined,
-    "aria-current": current ? "true" : undefined,
   });
-  wrap.addEventListener("click", (ev) => {
-    const t = ev.target;
-    if (t instanceof Element && t.closest("[data-action=revoke]")) {
-      return;
-    }
+  const identity = el(
+    "button",
+    {
+      type: "button",
+      class: "secondary",
+      "aria-current": current ? "true" : undefined,
+    },
+    [
+      el("span", { class: "mono", "data-name": "" }, [row.label === "" ? row.id : row.label]),
+      el("span", {}, [`${row.kind} · ${row.last_seen}`]),
+    ],
+  );
+  identity.addEventListener("click", () => {
     select(state, root, { kind: "session", id: row.id });
   });
   const revoke = el(
@@ -909,15 +977,10 @@ function sessionRowEl(
     },
     ["Revoke"],
   );
-  revoke.addEventListener("click", (ev) => {
-    ev.stopPropagation();
+  revoke.addEventListener("click", () => {
     void onRevoke(state, root, row.id);
   });
-  wrap.append(
-    el("span", { class: "mono", "data-name": "" }, [row.label === "" ? row.id : row.label]),
-    el("span", {}, [`${row.kind} · ${row.last_seen}`]),
-    revoke,
-  );
+  wrap.append(identity, revoke);
   return wrap;
 }
 
@@ -958,13 +1021,20 @@ function passkeyRowEl(
   const wrap = el("div", {
     class: "row",
     "data-passkey-id": row.id,
-    "aria-current": current ? "true" : undefined,
   });
-  wrap.addEventListener("click", (ev) => {
-    const t = ev.target;
-    if (t instanceof Element && t.closest("[data-action=remove]")) {
-      return;
-    }
+  const identity = el(
+    "button",
+    {
+      type: "button",
+      class: "secondary",
+      "aria-current": current ? "true" : undefined,
+    },
+    [
+      el("span", { class: "mono", "data-name": "" }, [shortId(row.id)]),
+      el("span", {}, [createdDay(row.created)]),
+    ],
+  );
+  identity.addEventListener("click", () => {
     select(state, root, { kind: "passkey", id: row.id });
   });
   const remove = el(
@@ -977,15 +1047,10 @@ function passkeyRowEl(
     },
     ["Remove"],
   );
-  remove.addEventListener("click", (ev) => {
-    ev.stopPropagation();
+  remove.addEventListener("click", () => {
     void onRemove(state, root, row.id);
   });
-  wrap.append(
-    el("span", { class: "mono", "data-name": "" }, [shortId(row.id)]),
-    el("span", {}, [createdDay(row.created)]),
-    remove,
-  );
+  wrap.append(identity, remove);
   return wrap;
 }
 

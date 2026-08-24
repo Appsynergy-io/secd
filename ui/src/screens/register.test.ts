@@ -268,6 +268,8 @@ describe("Register screen", () => {
     expect(fallback?.value === FIELD).toBe(true);
     expect(fallback?.getAttribute("value") === FIELD).toBe(false);
     expect(fallback?.outerHTML.includes(FIELD)).toBe(false);
+    expect(fallback?.getAttribute("aria-label")).toBe("Secret value");
+    expect(document.activeElement).toBe(fallback);
   });
 
   test("missing clipboard API offers select-to-copy", async () => {
@@ -323,6 +325,32 @@ describe("Register screen", () => {
     expect(valueEl?.textContent === FIELD).toBe(true);
     document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     expect(valueEl?.textContent).toBe(MASK);
+  });
+
+  test("paint during hold remasks and never writes the opened value", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    const show = root.querySelector('[data-action="show"]');
+    show?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    expect(root.querySelector("[data-value]")?.textContent === FIELD).toBe(true);
+    (root.querySelector('[data-action="add"]') as HTMLButtonElement | null)?.click();
+    expect(root.querySelector('[data-field="token"] [data-value]')?.textContent).toBe(MASK);
+    expect(root.querySelector("[data-value]")?.textContent === FIELD).toBe(false);
+    document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    expect(root.querySelector('[data-field="token"] [data-value]')?.textContent).toBe(MASK);
   });
 
   test("Space and Enter hold-to-reveal; repeat is ignored", async () => {
@@ -437,6 +465,7 @@ describe("Register screen", () => {
     renderRegister(state, root);
     await flush();
     (root.querySelector('[data-action="add"]') as HTMLButtonElement | null)?.click();
+    expect(document.activeElement).toBe(root.querySelector("#secret_name"));
     const sel = root.querySelector("#provider") as HTMLSelectElement | null;
     expect(sel).not.toBeNull();
     sel!.value = "github";
@@ -447,6 +476,8 @@ describe("Register screen", () => {
     const token = root.querySelector(
       'input[data-wizard-field="token"]',
     ) as HTMLInputElement | null;
+    expect(token?.id).toBe("wizard-token");
+    expect(root.querySelector('label[for="wizard-token"]')).not.toBeNull();
     token!.value = FIELD;
     token!.dispatchEvent(new Event("input", { bubbles: true }));
     (root.querySelector('[data-action="save"]') as HTMLButtonElement | null)?.click();
