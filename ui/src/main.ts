@@ -630,19 +630,27 @@ async function onLogout(state: AppState): Promise<void> {
   } catch {
     /* POST /logout still signs out; do not paint FAIL_SENTENCE on the gate. */
   } finally {
-    state.passkeys.set(undefined);
-    passkeyLoads.delete(state);
-    state.session.set(undefined);
-    state.pending.set(false);
-    state.error.set(undefined);
-    navigate(state, "/");
-    render(state);
-    try {
-      const crypto = await import("./lib/crypto.ts");
-      crypto.clearDek();
-    } catch {
-      /* session is already cleared */
-    }
+    signOutLocal(state);
+    await wipeDek();
+  }
+}
+
+function signOutLocal(state: AppState): void {
+  state.passkeys.set(undefined);
+  passkeyLoads.delete(state);
+  state.session.set(undefined);
+  state.pending.set(false);
+  state.error.set(undefined);
+  navigate(state, "/");
+  render(state);
+}
+
+async function wipeDek(): Promise<void> {
+  try {
+    const crypto = await import("./lib/crypto.ts");
+    crypto.clearDek();
+  } catch {
+    /* session is already cleared */
   }
 }
 
@@ -775,11 +783,11 @@ async function onRemovePasskey(state: AppState): Promise<void> {
       state.error.set(sentenceFor(res.status));
       return;
     }
+    state.passkeys.set(undefined);
     await loadSession(state);
     if (state.session.get() === undefined || state.error.get() !== undefined) {
       return;
     }
-    state.passkeys.set(undefined);
   } catch {
     if (gen !== logoutGen) {
       return;
@@ -877,7 +885,12 @@ async function loadSession(state: AppState): Promise<void> {
     return;
   }
   if (res.status === 401 || res.status === 403) {
-    state.session.set(undefined);
+    if (state.session.get() !== undefined) {
+      signOutLocal(state);
+      await wipeDek();
+    } else {
+      state.session.set(undefined);
+    }
     return;
   }
   if (res.status !== 200) {
@@ -960,14 +973,9 @@ function boot(root: HTMLElement): void {
   });
   const mq = globalThis.matchMedia?.(`(min-width: ${BREAKPOINT_PX}px)`);
   mq?.addEventListener("change", (ev) => {
-    const active = globalThis.document.activeElement;
-    const id = active instanceof HTMLElement && active.id !== "" ? active.id : "";
     const node = mounted?.querySelector("[data-layout]");
     if (node) {
       node.setAttribute("data-layout", ev.matches ? "list-inspector" : "list-only");
-    }
-    if (id !== "") {
-      globalThis.document.getElementById(id)?.focus();
     }
   });
   void (async () => {

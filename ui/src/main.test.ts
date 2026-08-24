@@ -667,6 +667,7 @@ describe("Account chain", () => {
 
   test("DELETE then GET /session 5xx keeps the session and surfaces the error", async () => {
     const root = document.createElement("div");
+    let passkeysGet = 0;
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
       const url = reqUrl(input);
       const method = String(init?.method ?? "GET");
@@ -674,6 +675,10 @@ describe("Account chain", () => {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
       }
       if (method === "GET" && url === "/api/session") {
+        return Promise.resolve(new Response("{}", { status: 500 }));
+      }
+      if (method === "GET" && url.includes("/passkeys")) {
+        passkeysGet += 1;
         return Promise.resolve(new Response("{}", { status: 500 }));
       }
       return Promise.resolve(new Response("{}", { status: 200 }));
@@ -690,6 +695,10 @@ describe("Account chain", () => {
     expect(state.session.get()?.session_id).toBe("s1");
     expect(state.error.get()).toBe(FAIL_SENTENCE);
     expect(getDek()?.length).toBe(32);
+    expect(state.passkeys.get()).toBeUndefined();
+    expect(passkeysGet).toBe(1);
+    expect(root.querySelector('[data-action="remove"]')?.hasAttribute("disabled")).toBe(true);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
   });
 
   test("DELETE then GET /session 401 clears the session", async () => {
@@ -705,6 +714,7 @@ describe("Account chain", () => {
       }
       return Promise.resolve(new Response("{}", { status: 200 }));
     }) as unknown as typeof fetch;
+    setDek(mintDek());
     const state = accountState({
       has_passkey: true,
       has_password: true,
@@ -715,6 +725,8 @@ describe("Account chain", () => {
     await Bun.sleep(1);
     expect(state.session.get()).toBeUndefined();
     expect(state.error.get()).toBeUndefined();
+    expect(getDek()).toBeUndefined();
+    expect(state.path.get()).toBe("/");
   });
 });
 
