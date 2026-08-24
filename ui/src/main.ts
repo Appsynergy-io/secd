@@ -672,8 +672,14 @@ async function onContinue(state: AppState): Promise<void> {
         state.error.set(sentenceFor(res.status));
         return;
       }
-      saveRemember(email, false);
       await loadSession(state);
+      if (state.session.get() === undefined) {
+        if (state.error.get() === undefined) {
+          state.error.set(FAIL_SENTENCE);
+        }
+        return;
+      }
+      saveRemember(email, false);
       navigate(state, "/register");
       return;
     }
@@ -723,8 +729,14 @@ async function onPasskey(state: AppState): Promise<void> {
       state.error.set(sentenceFor(finish.status));
       return;
     }
-    saveRemember(state.email.get(), true);
     await loadSession(state);
+    if (state.session.get() === undefined) {
+      if (state.error.get() === undefined) {
+        state.error.set(FAIL_SENTENCE);
+      }
+      return;
+    }
+    saveRemember(state.email.get(), true);
     navigate(state, "/register");
   } catch {
     state.error.set(FAIL_SENTENCE);
@@ -898,6 +910,10 @@ async function loadSession(state: AppState): Promise<void> {
     return;
   }
   const data = asSession(res.data);
+  if (data === undefined) {
+    state.error.set(FAIL_SENTENCE);
+    return;
+  }
   state.session.set(data);
 }
 

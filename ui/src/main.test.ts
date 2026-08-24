@@ -101,6 +101,7 @@ type FakeNode = {
   replaceChildren(...nodes: Array<FakeNode | string>): void;
   addEventListener(type: string, fn: () => void): void;
   click(): void;
+  submit(): void;
   querySelector(sel: string): FakeNode | null;
   textContent: string;
 };
@@ -153,6 +154,12 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
       }
       for (const fn of node.listeners.get("click") ?? []) {
         fn();
+      }
+    },
+    submit() {
+      const ev = { preventDefault() {} };
+      for (const fn of node.listeners.get("submit") ?? []) {
+        (fn as unknown as (e: { preventDefault(): void }) => void)(ev);
       }
     },
     querySelector(sel: string) {
@@ -728,6 +735,94 @@ describe("Account chain", () => {
     expect(getDek()).toBeUndefined();
     expect(state.path.get()).toBe("/");
   });
+});
+
+describe("Gate login", () => {
+  const origDocument = globalThis.document;
+  const origFetch = globalThis.fetch;
+  const origLocation = globalThis.location;
+  const origHistory = globalThis.history;
+
+  beforeEach(() => {
+    installDom();
+    const loc = { pathname: "/" };
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      writable: true,
+      value: loc,
+    });
+    Object.defineProperty(globalThis, "history", {
+      configurable: true,
+      writable: true,
+      value: {
+        pushState(_s: unknown, _t: unknown, url: string) {
+          loc.pathname = String(url);
+        },
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      writable: true,
+      value: origDocument,
+    });
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      writable: true,
+      value: origLocation,
+    });
+    Object.defineProperty(globalThis, "history", {
+      configurable: true,
+      writable: true,
+      value: origHistory,
+    });
+    globalThis.fetch = origFetch;
+    clearDek();
+  });
+
+  function gateState(): AppState {
+    return {
+      path: signal("/"),
+      email: signal("a@b.c"),
+      password: signal("x"),
+      error: signal(undefined),
+      pending: signal(false),
+      session: signal(undefined),
+      method: signal("password"),
+      different: signal(false),
+      revealPassword: signal(false),
+      userCode: signal(""),
+      passkeys: signal(undefined),
+    };
+  }
+
+  for (const status of [401, 500]) {
+    test(`POST login 200 then GET /session ${status} keeps path /, shows .error, session undefined`, async () => {
+      const root = document.createElement("div");
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = reqUrl(input);
+        const method = String(init?.method ?? "GET");
+        if (method === "POST" && url === "/api/auth/password/login") {
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "GET" && url === "/api/session") {
+          return new Response("{}", { status });
+        }
+        return new Response("{}", { status: 200 });
+      }) as unknown as typeof fetch;
+      const state = gateState();
+      renderAccount(state, root);
+      render(state);
+      (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+      await Bun.sleep(1);
+      expect(state.path.get()).toBe("/");
+      expect(state.session.get()).toBeUndefined();
+      expect(state.error.get()).toBe(FAIL_SENTENCE);
+      expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    });
+  }
 });
 
 describe("Register layout", () => {
