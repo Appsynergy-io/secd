@@ -429,9 +429,19 @@ async function onCopy(
   if (!stillOnDevice(root)) {
     return;
   }
+  if (state.pending.get()) {
+    copiedOf(state).set(ok);
+    const copy = asButton(root.querySelector('[data-action="copy"]'));
+    if (copy !== null) {
+      copy.textContent = ok && code !== "" ? "Copied" : "Copy";
+    }
+    return;
+  }
   if (ok) {
     copiedOf(state).set(true);
-    state.error.set(undefined);
+    if (state.error.get() === CLIP_FAIL_SENTENCE) {
+      state.error.set(undefined);
+    }
     focusHints.set(state, "copy");
   } else {
     copiedOf(state).set(false);

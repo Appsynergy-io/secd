@@ -572,6 +572,125 @@ describe("device screen", () => {
     expect(activeEl()).toBe(copiedBtn);
   });
 
+  test("Copy success leaves painted Approve errors", async () => {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () => Promise.resolve(),
+        },
+      },
+    });
+    setDek(mintDek());
+    for (const painted of [FAIL_SENTENCE, RATE_SENTENCE, "already approved"]) {
+      const root = document.createElement("div");
+      const state = signedState();
+      state.error.set(painted);
+      renderDevice(state, root);
+      (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+      await Bun.sleep(1);
+      expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+      expect(root.querySelector(".error")?.textContent).toBe(painted);
+    }
+  });
+
+  test("Copy success clears CLIP_FAIL_SENTENCE", async () => {
+    const root = document.createElement("div");
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () => Promise.resolve(),
+        },
+      },
+    });
+    setDek(mintDek());
+    const state = signedState();
+    state.error.set(CLIP_FAIL_SENTENCE);
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+    expect(root.querySelector(".error")).toBeNull();
+  });
+
+  test("Copy that finishes while Approve is pending updates Copied in place", async () => {
+    const root = document.createElement("div");
+    let finishCopy: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finishCopy = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    let finishApprove: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finishApprove = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    const page = root.querySelector('[data-page="device"]');
+    const copy = root.querySelector('[data-action="copy"]');
+    expect(copy?.textContent).toBe("Copy");
+    finishCopy?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBe(page);
+    expect(root.querySelector('[data-action="copy"]')).toBe(copy);
+    expect(copy?.textContent).toBe("Copied");
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    expect(root.querySelector(".error")).toBeNull();
+    finishApprove?.(
+      new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }),
+    );
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+  });
+
+  test("Copy that finishes after Approve failure keeps the painted error", async () => {
+    const root = document.createElement("div");
+    let finishCopy: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finishCopy = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: FAIL_SENTENCE }), {
+        status: 401,
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    finishCopy?.();
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+  });
+
   test("clipboard refusal keeps Copy and offers select-to-copy", async () => {
     const root = document.createElement("div");
     Object.defineProperty(globalThis, "navigator", {
