@@ -279,6 +279,7 @@ export type AppState = {
 let mounted: HTMLElement | undefined;
 const passkeyLoads = new WeakSet<object>();
 let logoutGen = 0;
+let passkeyLoadGen = 0;
 
 function loadRemember(): Remembered | undefined {
   try {
@@ -572,7 +573,7 @@ export function renderAccount(state: AppState, root: HTMLElement): void {
   }
 }
 
-function render(state: AppState): void {
+export function render(state: AppState): void {
   const root = mounted ?? document.getElementById("app");
   if (!root) {
     return;
@@ -580,6 +581,7 @@ function render(state: AppState): void {
   mounted = root;
   const screen = screenFromPath(state.path.get());
   if (screen !== "account") {
+    passkeyLoadGen += 1;
     state.passkeys.set(undefined);
     passkeyLoads.delete(state);
   }
@@ -615,16 +617,21 @@ async function onLogout(state: AppState): Promise<void> {
   try {
     await req("POST", logoutUrl());
   } catch {
-    state.error.set(FAIL_SENTENCE);
+    /* POST /logout still signs out; do not paint FAIL_SENTENCE on the gate. */
   } finally {
-    const crypto = await import("./lib/crypto.ts");
-    crypto.clearDek();
     state.passkeys.set(undefined);
     passkeyLoads.delete(state);
     state.session.set(undefined);
     state.pending.set(false);
+    state.error.set(undefined);
     navigate(state, "/");
     render(state);
+    try {
+      const crypto = await import("./lib/crypto.ts");
+      crypto.clearDek();
+    } catch {
+      /* session is already cleared */
+    }
   }
 }
 
@@ -783,10 +790,13 @@ async function loadAccountPasskeys(state: AppState): Promise<void> {
   }
   passkeyLoads.add(state);
   const gen = logoutGen;
+  const loadGen = passkeyLoadGen;
+  state.error.set(undefined);
   try {
     const res = await req("GET", passkeysUrl());
     if (
       gen !== logoutGen ||
+      loadGen !== passkeyLoadGen ||
       state.session.get() === undefined ||
       screenFromPath(state.path.get()) !== "account"
     ) {
@@ -797,9 +807,11 @@ async function loadAccountPasskeys(state: AppState): Promise<void> {
       return;
     }
     state.passkeys.set(parsePasskeys(res.data));
+    state.error.set(undefined);
   } catch {
     if (
       gen !== logoutGen ||
+      loadGen !== passkeyLoadGen ||
       state.session.get() === undefined ||
       screenFromPath(state.path.get()) !== "account"
     ) {
@@ -807,10 +819,10 @@ async function loadAccountPasskeys(state: AppState): Promise<void> {
     }
     state.error.set(FAIL_SENTENCE);
   } finally {
-    const stale = gen !== logoutGen;
+    const stale = gen !== logoutGen || loadGen !== passkeyLoadGen;
     const left =
       state.session.get() === undefined || screenFromPath(state.path.get()) !== "account";
-    if (stale || left || state.passkeys.get() !== undefined) {
+    if (!stale && (left || state.passkeys.get() !== undefined)) {
       passkeyLoads.delete(state);
     }
     if (!stale) {

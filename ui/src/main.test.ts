@@ -7,6 +7,7 @@ import {
   hrefFor,
   initialPath,
   lastFactor,
+  render,
   renderAccount,
   resolveGate,
   screenFromPath,
@@ -422,7 +423,10 @@ describe("Account chain", () => {
       const method = String(init?.method ?? "GET");
       if (method === "GET" && url.includes("/passkeys")) {
         n += 1;
-        return new Response("{}", { status: 500 });
+        if (n === 1) {
+          return new Response("{}", { status: 500 });
+        }
+        return new Response(JSON.stringify({ passkeys: [] }), { status: 200 });
       }
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
@@ -430,6 +434,7 @@ describe("Account chain", () => {
     renderAccount(state, root);
     await Bun.sleep(1);
     expect(n).toBe(1);
+    expect(state.error.get()).toBe(FAIL_SENTENCE);
     (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
     await Bun.sleep(1);
     expect(state.session.get()).toBeUndefined();
@@ -441,10 +446,12 @@ describe("Account chain", () => {
       session_id: "s1",
     });
     state.path.set("/account");
-    state.error.set(undefined);
     renderAccount(state, root);
     await Bun.sleep(1);
     expect(n).toBe(2);
+    expect(state.passkeys.get()).toEqual([]);
+    expect(state.error.get()).toBeUndefined();
+    expect(root.querySelector(".error")).toBeNull();
   });
 
   test("Sign out clears DEK and session when POST throws", async () => {
@@ -471,6 +478,80 @@ describe("Account chain", () => {
     expect(state.session.get()).toBeUndefined();
     expect(state.passkeys.get()).toBeUndefined();
     expect(state.path.get()).toBe("/");
+    expect(state.error.get()).toBeUndefined();
+    expect(root.querySelector(".error")).toBeNull();
+  });
+
+  test("in-flight GET /passkeys is ignored after leaving Account", async () => {
+    const root = document.createElement("div");
+    const finishes: Array<(value: Response) => void> = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url.includes("/passkeys")) {
+        return new Promise<Response>((resolve) => {
+          finishes.push(resolve);
+        });
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const state = accountState({ has_passkey: true, has_password: true });
+    renderAccount(state, root);
+    expect(finishes.length).toBe(1);
+    state.path.set("/activity");
+    render(state);
+    state.path.set("/account");
+    render(state);
+    expect(finishes.length).toBe(2);
+    finishes[0]?.(new Response("{}", { status: 500 }));
+    await Bun.sleep(1);
+    expect(state.error.get()).toBeUndefined();
+    expect(state.passkeys.get()).toBeUndefined();
+    finishes[1]?.(
+      new Response(JSON.stringify({ passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }] }), {
+        status: 200,
+      }),
+    );
+    await Bun.sleep(1);
+    expect(state.error.get()).toBeUndefined();
+    expect(state.passkeys.get()).toEqual([{ id: "pk-1", created: "2026-01-01T00:00:00Z" }]);
+    expect(root.querySelector(".error")).toBeNull();
+  });
+
+  test("retrying GET /passkeys clears a prior error before the response", async () => {
+    const root = document.createElement("div");
+    let n = 0;
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url.includes("/passkeys")) {
+        n += 1;
+        if (n === 1) {
+          return Promise.resolve(new Response("{}", { status: 500 }));
+        }
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const state = accountState({ has_passkey: true, has_password: true });
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    expect(n).toBe(1);
+    expect(state.error.get()).toBe(FAIL_SENTENCE);
+    state.path.set("/activity");
+    render(state);
+    state.path.set("/account");
+    render(state);
+    expect(n).toBe(2);
+    expect(state.error.get()).toBeUndefined();
+    finish?.(new Response(JSON.stringify({ passkeys: [] }), { status: 200 }));
+    await Bun.sleep(1);
+    expect(state.error.get()).toBeUndefined();
+    expect(state.passkeys.get()).toEqual([]);
+    expect(root.querySelector(".error")).toBeNull();
   });
 
   test("in-flight GET /passkeys is ignored after Sign out", async () => {
