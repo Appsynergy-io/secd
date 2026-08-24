@@ -150,7 +150,9 @@ form,
   gap: calc(var(--space) * 2);
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   padding: calc(var(--space) * 1.5);
   border: 1px solid var(--color-border);
@@ -199,9 +201,20 @@ button:disabled {
   user-select: all;
 }
 
+[data-verified="1"] {
+  color: var(--color-success);
+}
+
+[data-verified="0"] {
+  color: var(--color-danger);
+}
+
 [data-device],
 [data-session-email],
-[data-session-id] {
+[data-session-id],
+[data-select-copy],
+[data-field="hash"],
+[data-field="prev"] {
   user-select: all;
 }
 

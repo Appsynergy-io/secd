@@ -447,9 +447,14 @@ describe("Account chain", () => {
   test("GET /passkeys failure sets error and does not record an empty list", async () => {
     const root = document.createElement("div");
     let n = 0;
-    globalThis.fetch = (async () => {
-      n += 1;
-      return new Response("{}", { status: 500 });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url.includes("/passkeys")) {
+        n += 1;
+        return new Response("{}", { status: 500 });
+      }
+      return new Response(JSON.stringify({ sessions: [] }), { status: 200 });
     }) as unknown as typeof fetch;
     const state = accountState({ has_passkey: true, has_password: true });
     renderAccount(state, root);

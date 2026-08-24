@@ -122,8 +122,8 @@ files = [
 "scripts/repo-settings.sh" = "eea8e831a77e98e24739269f5adaf1a46ad8b018fab041103a6ea1160b3e5398"
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
-"ui/bunfig.toml" = "52527f820f0de4fc7ca7b3c631c42531383d52288cdec3679e2ecc047220ca14"
-"ui/package.json" = "a99763e4d441207b0fa30d2c7f44f6fcbebc9aeebc2441966f4f58ee9bf16031"
+"ui/bunfig.toml" = "d7223d78e8a6ea0fce0b51bd8d0f39d9f74a473a356bc6e18bc9dce075e67ef0"
+"ui/package.json" = "23b3fd672cfdb0747548aecd5f0cd816ec20a0da633f21a18c49c17f6cc756d1"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 

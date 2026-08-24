@@ -7,3 +7,6 @@ minimumReleaseAgeExcludes = ["typescript", "@types/bun"]
 exact = true
 ignoreScripts = true
 saveTextLockfile = true
+
+[test]
+preload = ["./happydom.ts"]

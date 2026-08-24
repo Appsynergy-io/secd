@@ -2,15 +2,12 @@ import {
   BREAKPOINT_PX,
   EMAIL_AUTOCOMPLETE,
   FAIL_SENTENCE,
-  LAST_FACTOR_SENTENCE,
   LAST_KEY,
   RATE_SENTENCE,
   REMEMBER_DAYS,
   deviceQuery,
   layoutMode,
   logoutUrl,
-  passkeyDeletePath,
-  passkeysUrl,
   passwordLoginUrl,
   removePasskeyEnabled,
   req,
@@ -18,14 +15,20 @@ import {
   startUrl,
   type LayoutMode,
 } from "./lib/api.ts";
-import { copyText } from "./lib/clipboard.ts";
 import { signal } from "./lib/signal.ts";
 import {
   coercePublicKey,
   getPasskey,
   serializeCredential,
 } from "./lib/webauthn.ts";
+import {
+  bumpLogoutGen,
+  currentLogoutGen,
+  leaveAccount,
+  renderAccount as renderAccountScreen,
+} from "./screens/account.ts";
 import { renderDevice } from "./screens/device.ts";
+import { abandonRegister, renderRegister as renderRegisterScreen } from "./screens/register.ts";
 
 export type Screen = "gate" | "device" | "register" | "activity" | "account";
 
@@ -280,9 +283,6 @@ export type AppState = {
 };
 
 let mounted: HTMLElement | undefined;
-const passkeyLoads = new WeakSet<object>();
-let logoutGen = 0;
-let passkeyLoadGen = 0;
 
 function loadRemember(): Remembered | undefined {
   try {
@@ -445,37 +445,8 @@ function renderGate(state: AppState, root: HTMLElement): void {
   root.replaceChildren(page);
 }
 
-function inspectorCard(): HTMLElement {
-  return el("div", { class: "card", "data-pane": "inspector" }, [
-    el("h2", { class: "mono" }, ["Secret"]),
-    el("p", {}, ["Select a secret"]),
-  ]);
-}
-
 export function renderRegister(state: AppState, root: HTMLElement): void {
-  mounted = root;
-  const copy = el("button", { type: "button", "data-action": "copy" }, ["Copy"]);
-  copy.addEventListener("click", () => {
-    void copyText("••••••••");
-  });
-  const layout = currentLayout();
-  const workspace = el("div", { class: "workspace" }, [
-    el("div", { class: "card", "data-pane": "list" }, [
-      el("div", { class: "list", "data-list": "secrets" }, [
-        el("p", {}, ["No secrets yet."]),
-      ]),
-    ]),
-    inspectorCard(),
-  ]);
-  root.replaceChildren(
-    el("div", { class: "app", "data-page": "register", "data-layout": layout }, [
-      nav(state, "register"),
-      el("h1", {}, ["Register"]),
-      el("p", {}, ["Copy is the default action."]),
-      workspace,
-      copy,
-    ]),
-  );
+  renderRegisterScreen(state, root);
 }
 
 function renderActivity(state: AppState, root: HTMLElement): void {
@@ -493,79 +464,16 @@ function renderActivity(state: AppState, root: HTMLElement): void {
 
 export function renderAccount(state: AppState, root: HTMLElement): void {
   mounted = root;
-  const session = state.session.get();
-  const factors = dekFactors({
-    has_passkey: session?.has_passkey === true,
-    has_password: session?.has_password === true,
-  });
-  const loaded = state.passkeys.get();
-  const hasPassword = session?.has_password === true;
-  const last =
-    loaded !== undefined && !removePasskeyEnabled(loaded.length, hasPassword);
-  const removeId = loaded?.[0]?.id;
-  const removeOk =
-    loaded !== undefined &&
-    removeId !== undefined &&
-    removeId !== "" &&
-    removePasskeyEnabled(loaded.length, hasPassword);
-  const links = factors.map((factor) => {
-    const label = factor === "passkey" ? "Passkey" : "Password";
-    const children: Array<Node | string> = [el("span", { class: "mono" }, [label])];
-    if (factor === "passkey") {
-      const remove = el(
-        "button",
-        {
-          type: "button",
-          class: "danger",
-          "data-action": "remove",
-          disabled: removeOk ? undefined : true,
-        },
-        ["Remove"],
-      );
-      remove.addEventListener("click", () => {
-        void onRemovePasskey(state);
-      });
-      children.push(remove);
-    }
-    return el("li", { class: "chain-link", "data-factor": factor }, children);
-  });
-  const chain = el(
-    "div",
-    {
-      class: "chain",
-      "data-chain": "dek",
-      "data-last": last ? "1" : "0",
+  renderAccountScreen(state, root, nav(state, "account"), {
+    onLogout: () => {
+      void onLogout(state);
     },
-    [
-      el("h2", {}, ["Vault key"]),
-      el("ul", { class: "chain-links" }, links),
-      last ? el("p", { class: "chain-reason" }, [LAST_FACTOR_SENTENCE]) : "",
-    ],
-  );
-  const out = el("button", { type: "button", class: "secondary", "data-action": "logout" }, [
-    "Sign out",
-  ]);
-  out.addEventListener("click", () => {
-    void onLogout(state);
+    loadSession: () => loadSession(state),
+    wipeDek,
+    redraw: () => {
+      render(state);
+    },
   });
-  const err = state.error.get();
-  root.replaceChildren(
-    el("div", { class: "app", "data-page": "account" }, [
-      nav(state, "account"),
-      el("h1", {}, ["Account"]),
-      el("p", {}, [session?.email ?? ""]),
-      chain,
-      el("h2", {}, ["Sessions"]),
-      el("div", { class: "list", "data-list": "sessions" }),
-      el("h2", {}, ["Passkeys"]),
-      el("div", { class: "list", "data-list": "passkeys" }),
-      out,
-      err ? el("p", { class: "error" }, [err]) : "",
-    ]),
-  );
-  if (loaded === undefined) {
-    void loadAccountPasskeys(state);
-  }
 }
 
 export function render(state: AppState): void {
@@ -575,10 +483,11 @@ export function render(state: AppState): void {
   }
   mounted = root;
   const screen = screenFromPath(state.path.get());
+  if (screen !== "register") {
+    abandonRegister(state);
+  }
   if (screen !== "account") {
-    passkeyLoadGen += 1;
-    state.passkeys.set(undefined);
-    passkeyLoads.delete(state);
+    leaveAccount(state);
   }
   switch (screen) {
     case "device":
@@ -614,7 +523,7 @@ export function navigate(state: AppState, to: string): void {
 async function onLogout(state: AppState): Promise<void> {
   state.pending.set(true);
   state.error.set(undefined);
-  logoutGen += 1;
+  bumpLogoutGen();
   try {
     await req("POST", logoutUrl());
   } catch {
@@ -626,8 +535,7 @@ async function onLogout(state: AppState): Promise<void> {
 }
 
 function signOutLocal(state: AppState): void {
-  state.passkeys.set(undefined);
-  passkeyLoads.delete(state);
+  leaveAccount(state);
   state.session.set(undefined);
   state.pending.set(false);
   state.error.set(undefined);
@@ -736,133 +644,10 @@ async function onPasskey(state: AppState): Promise<void> {
   }
 }
 
-async function onRemovePasskey(state: AppState): Promise<void> {
-  if (state.pending.get()) {
-    return;
-  }
-  const session = state.session.get();
-  const loaded = state.passkeys.get();
-  if (
-    loaded === undefined ||
-    !removePasskeyEnabled(loaded.length, session?.has_password === true)
-  ) {
-    return;
-  }
-  const id = loaded[0]?.id;
-  if (id === undefined || id === "") {
-    return;
-  }
-  const gen = logoutGen;
-  state.pending.set(true);
-  state.error.set(undefined);
-  try {
-    const res = await req("DELETE", passkeyDeletePath(id));
-    if (gen !== logoutGen) {
-      return;
-    }
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-      return;
-    }
-    state.passkeys.set(undefined);
-    await loadSession(state);
-    if (state.session.get() === undefined || state.error.get() !== undefined) {
-      return;
-    }
-  } catch {
-    if (gen !== logoutGen) {
-      return;
-    }
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    if (gen !== logoutGen) {
-      return;
-    }
-    state.pending.set(false);
-    render(state);
-  }
-}
-
-async function loadAccountPasskeys(state: AppState): Promise<void> {
-  if (
-    state.passkeys.get() !== undefined ||
-    passkeyLoads.has(state) ||
-    state.session.get() === undefined
-  ) {
-    return;
-  }
-  passkeyLoads.add(state);
-  const gen = logoutGen;
-  const loadGen = passkeyLoadGen;
-  state.error.set(undefined);
-  try {
-    const res = await req("GET", passkeysUrl());
-    if (
-      gen !== logoutGen ||
-      loadGen !== passkeyLoadGen ||
-      state.session.get() === undefined ||
-      screenFromPath(state.path.get()) !== "account"
-    ) {
-      return;
-    }
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-      return;
-    }
-    state.passkeys.set(parsePasskeys(res.data));
-    state.error.set(undefined);
-  } catch {
-    if (
-      gen !== logoutGen ||
-      loadGen !== passkeyLoadGen ||
-      state.session.get() === undefined ||
-      screenFromPath(state.path.get()) !== "account"
-    ) {
-      return;
-    }
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    const stale = gen !== logoutGen || loadGen !== passkeyLoadGen;
-    const left =
-      state.session.get() === undefined || screenFromPath(state.path.get()) !== "account";
-    if (!stale && (left || state.passkeys.get() !== undefined)) {
-      passkeyLoads.delete(state);
-    }
-    if (!stale) {
-      render(state);
-    }
-  }
-}
-
-function parsePasskeys(v: unknown): PasskeyRow[] {
-  const rec = typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
-  const rows = rec?.["passkeys"];
-  if (!Array.isArray(rows)) {
-    return [];
-  }
-  const out: PasskeyRow[] = [];
-  for (const row of rows) {
-    if (typeof row !== "object" || row === null) {
-      continue;
-    }
-    const r = row as Record<string, unknown>;
-    const id = r["id"];
-    if (typeof id !== "string" || id === "") {
-      continue;
-    }
-    const created = r["created"];
-    out.push({
-      id,
-      created: typeof created === "string" ? created : "",
-    });
-  }
-  return out;
-}
-
 async function loadSession(state: AppState): Promise<void> {
-  const gen = logoutGen;
+  const gen = currentLogoutGen();
   const res = await req("GET", sessionUrl());
-  if (gen !== logoutGen) {
+  if (gen !== currentLogoutGen()) {
     return;
   }
   if (res.status === 401 || res.status === 403) {
