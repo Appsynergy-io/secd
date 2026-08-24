@@ -40,6 +40,7 @@ export type DeviceState = {
 
 const copiedAt = new WeakMap<object, Signal<boolean>>();
 const seeded = new WeakSet<object>();
+const focusHints = new WeakMap<object, "copy" | "code">();
 
 function copiedOf(state: object): Signal<boolean> {
   let s = copiedAt.get(state);
@@ -60,16 +61,110 @@ function el<K extends keyof HTMLElementTagNameMap>(
     if (v === undefined || v === false) {
       continue;
     }
+    if ((tag === "input" || tag === "textarea") && k === "value") {
+      continue;
+    }
     if (v === true) {
       node.setAttribute(k, "");
+      if (k === "disabled" && "disabled" in node) {
+        (node as HTMLButtonElement).disabled = true;
+      }
+      if (k === "readonly" && "readOnly" in node) {
+        (node as HTMLInputElement).readOnly = true;
+      }
     } else {
       node.setAttribute(k, v);
     }
   }
+  if (tag === "input" || tag === "select" || tag === "textarea") {
+    if (typeof attrs.value === "string") {
+      (node as HTMLInputElement).value = attrs.value;
+    }
+  }
   for (const child of children) {
+    if (child === "") {
+      continue;
+    }
     node.append(typeof child === "string" ? document.createTextNode(child) : child);
   }
   return node;
+}
+
+function asButton(node: Element | null): HTMLButtonElement | null {
+  return node !== null && node.tagName === "BUTTON" ? (node as HTMLButtonElement) : null;
+}
+
+function asInput(node: Element | null): HTMLInputElement | null {
+  return node !== null && node.tagName === "INPUT" ? (node as HTMLInputElement) : null;
+}
+
+function disable(btn: HTMLButtonElement, on: boolean): void {
+  btn.disabled = on;
+  if (on) {
+    btn.setAttribute("disabled", "");
+    return;
+  }
+  if (typeof btn.removeAttribute === "function") {
+    btn.removeAttribute("disabled");
+  }
+}
+
+function isErrorReason(node: Element): boolean {
+  const cls = node.getAttribute("class") ?? "";
+  return cls.split(/\s+/).includes("error");
+}
+
+function refreshDeviceControls(page: HTMLElement, state: DeviceState): void {
+  const code = state.userCode.get();
+  const eph = state.eph.get();
+  const session = state.session.get();
+  const pending = state.pending.get();
+  const err = state.error.get();
+  const copied = copiedOf(state);
+  const reason = deviceDisabledReason({
+    userCode: code,
+    eph,
+    session,
+    hasDek: getDek() !== undefined,
+  });
+  const disabled = pending || reason !== undefined;
+  const kind = viewKind({ pending, error: err, userCode: code, eph });
+  page.setAttribute("data-state", kind);
+
+  const codeView = page.querySelector("[data-device]");
+  if (codeView !== null) {
+    codeView.textContent = code === "" ? "No device code." : code;
+  }
+
+  const copy = asButton(page.querySelector('[data-action="copy"]'));
+  if (copy !== null) {
+    copy.textContent = copied.get() && code !== "" ? "Copied" : "Copy";
+    disable(copy, code === "" || pending);
+  }
+
+  const approve = asButton(page.querySelector('[data-action="approve"]'));
+  if (approve !== null) {
+    disable(approve, disabled);
+  }
+
+  const firstReason = page.querySelector("[data-reason]");
+  const reasonOnly =
+    firstReason !== null && !isErrorReason(firstReason) ? firstReason : null;
+  const showReason = kind !== "error" ? reason : undefined;
+  if (showReason !== undefined) {
+    if (reasonOnly !== null) {
+      reasonOnly.textContent = showReason;
+    } else {
+      const node = el("p", { "data-reason": "" }, [showReason]);
+      if (firstReason !== null) {
+        page.insertBefore(node, firstReason);
+      } else {
+        page.append(node);
+      }
+    }
+  } else if (reasonOnly !== null) {
+    reasonOnly.remove();
+  }
 }
 
 /** 32-byte X25519 public key as 64 hex chars. */
@@ -144,12 +239,20 @@ function failSentence(status: number, data: unknown): string {
   return errorMessage(data) ?? FAIL_SENTENCE;
 }
 
+function stillOnDevice(root: HTMLElement): boolean {
+  return root.querySelector('[data-page="device"]') !== null;
+}
+
 export function renderDevice(
   state: DeviceState,
   root: HTMLElement,
   onApproved?: () => void,
 ): void {
   seedDeviceQuery(state, globalThis.location?.search ?? "");
+  const prevInput = asInput(root.querySelector("#user_code"));
+  const hadCodeFocus = prevInput !== null && document.activeElement === prevInput;
+  const selStart = prevInput !== null ? prevInput.selectionStart : null;
+  const selEnd = prevInput !== null ? prevInput.selectionEnd : null;
   const code = state.userCode.get();
   const eph = state.eph.get();
   const session = state.session.get();
@@ -213,7 +316,10 @@ export function renderDevice(
   input.addEventListener("input", () => {
     copied.set(false);
     state.userCode.set(input.value);
-    renderDevice(state, root, onApproved);
+    const pageEl = input.closest("[data-page]");
+    if (pageEl !== null) {
+      refreshDeviceControls(pageEl as HTMLElement, state);
+    }
   });
   const approve = el(
     "button",
@@ -250,6 +356,30 @@ export function renderDevice(
     ],
   );
   root.replaceChildren(page);
+  const restored = asInput(page.querySelector("#user_code"));
+  if (restored !== null) {
+    restored.value = code;
+    if (
+      typeof selStart === "number" &&
+      typeof selEnd === "number" &&
+      typeof restored.setSelectionRange === "function"
+    ) {
+      restored.setSelectionRange(selStart, selEnd);
+    }
+  }
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
+  const found =
+    hint === "code"
+      ? page.querySelector("#user_code")
+      : hint === "copy"
+        ? page.querySelector('[data-action="copy"]')
+        : hadCodeFocus
+          ? page.querySelector("#user_code")
+          : null;
+  if (found !== null && typeof (found as HTMLElement).focus === "function") {
+    (found as HTMLElement).focus();
+  }
 }
 
 function sessionCardEl(session: DeviceSession | undefined): HTMLElement {
@@ -279,12 +409,17 @@ async function onCopy(
     return;
   }
   const ok = await copyText(code);
+  if (!stillOnDevice(root)) {
+    return;
+  }
   if (ok) {
     copiedOf(state).set(true);
     state.error.set(undefined);
+    focusHints.set(state, "copy");
   } else {
     copiedOf(state).set(false);
     state.error.set(CLIP_FAIL_SENTENCE);
+    focusHints.set(state, "code");
   }
   renderDevice(state, root, onApproved);
 }

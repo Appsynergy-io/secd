@@ -38,15 +38,23 @@ type FakeNode = {
   listeners: Map<string, Array<(ev?: { preventDefault(): void }) => void>>;
   text: string;
   value: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
+  removeAttribute(name: string): void;
   append(...nodes: Array<FakeNode | string>): void;
+  insertBefore(newNode: FakeNode, ref: FakeNode): void;
   replaceChildren(...nodes: Array<FakeNode | string>): void;
+  remove(): void;
   addEventListener(type: string, fn: (ev?: { preventDefault(): void }) => void): void;
   click(): void;
   submit(): void;
   querySelector(sel: string): FakeNode | null;
+  closest(sel: string): FakeNode | null;
+  focus(): void;
+  setSelectionRange(start: number, end: number): void;
   textContent: string;
 };
 
@@ -65,6 +73,8 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
     listeners: new Map(),
     text,
     value: "",
+    selectionStart: null,
+    selectionEnd: null,
     setAttribute(name: string, value: string) {
       node.attrs.set(name, value);
       if (name === "disabled") {
@@ -80,6 +90,12 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
     hasAttribute(name: string) {
       return node.attrs.has(name);
     },
+    removeAttribute(name: string) {
+      node.attrs.delete(name);
+      if (name === "disabled") {
+        node.disabled = false;
+      }
+    },
     append(...nodes: Array<FakeNode | string>) {
       for (const n of nodes) {
         const child = typeof n === "string" ? fakeText(n) : n;
@@ -87,9 +103,29 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
         node.children.push(child);
       }
     },
+    insertBefore(newNode: FakeNode, ref: FakeNode) {
+      const i = node.children.indexOf(ref);
+      newNode.parent = node;
+      if (i < 0) {
+        node.children.push(newNode);
+        return;
+      }
+      node.children.splice(i, 0, newNode);
+    },
     replaceChildren(...nodes: Array<FakeNode | string>) {
+      for (const child of node.children) {
+        child.parent = null;
+      }
       node.children = [];
       node.append(...nodes);
+    },
+    remove() {
+      const parent = node.parent;
+      if (parent === null) {
+        return;
+      }
+      parent.children = parent.children.filter((c) => c !== node);
+      node.parent = null;
     },
     addEventListener(type: string, fn: (ev?: { preventDefault(): void }) => void) {
       const list = node.listeners.get(type) ?? [];
@@ -119,6 +155,24 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
       });
       return found[0] ?? null;
     },
+    closest(sel: string) {
+      let cur: FakeNode | null = node;
+      while (cur !== null) {
+        if (cur.nodeType === 1 && matches(cur, sel)) {
+          return cur;
+        }
+        cur = cur.parent;
+      }
+      return null;
+    },
+    focus() {
+      const doc = globalThis.document as unknown as { activeElement?: FakeNode | null };
+      doc.activeElement = node;
+    },
+    setSelectionRange(start: number, end: number) {
+      node.selectionStart = start;
+      node.selectionEnd = end;
+    },
     get textContent() {
       if (node.nodeType === 3) {
         return node.text;
@@ -143,6 +197,9 @@ function walk(node: FakeNode, fn: (n: FakeNode) => void): void {
 }
 
 function matches(node: FakeNode, sel: string): boolean {
+  if (sel.startsWith("#")) {
+    return node.getAttribute("id") === sel.slice(1);
+  }
   const tag = sel.match(/^[a-zA-Z][\w-]*/);
   let rest = sel;
   if (tag) {
@@ -183,10 +240,29 @@ function matches(node: FakeNode, sel: string): boolean {
   return true;
 }
 
+function asFake(node: Element | null): FakeNode | null {
+  return node as unknown as FakeNode | null;
+}
+
+function activeEl(): FakeNode | null {
+  return (globalThis.document as unknown as { activeElement?: FakeNode | null }).activeElement ??
+    null;
+}
+
+function typeUserCode(input: FakeNode, value: string, caret: number): void {
+  input.value = value;
+  input.setSelectionRange(caret, caret);
+  input.focus();
+  for (const fn of input.listeners.get("input") ?? []) {
+    fn();
+  }
+}
+
 function installDom(): void {
   const body = fakeEl("body");
   const document = {
     body,
+    activeElement: null as FakeNode | null,
     createElement(tag: string) {
       return fakeEl(tag);
     },
@@ -485,8 +561,10 @@ describe("device screen", () => {
     expect(wrote).toBe("ABCD-EFGH");
     finish?.();
     await Bun.sleep(1);
-    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+    const copiedBtn = asFake(root.querySelector('[data-action="copy"]'));
+    expect(copiedBtn?.textContent).toBe("Copied");
     expect(wrote).toBe("ABCD-EFGH");
+    expect(activeEl()).toBe(copiedBtn);
   });
 
   test("clipboard refusal keeps Copy and offers select-to-copy", async () => {
@@ -501,6 +579,7 @@ describe("device screen", () => {
     await Bun.sleep(1);
     expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
     expect(root.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
+    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
   });
 
   test("Approve seals the DEK to the CLI eph and does not put the DEK on the wire", async () => {
@@ -626,5 +705,89 @@ describe("device screen", () => {
     expect(root.querySelector("[data-device]")?.textContent).toBe("ABCD-EFGH");
     expect(state.eph.get().length).toBe(64);
     expect(ephOk(state.eph.get())).toBe(true);
+  });
+
+  test("typing in #user_code updates the code without remounting the field", () => {
+    const root = document.createElement("div");
+    const state = makeState({
+      eph: deviceEphHex(),
+      session: { email: "a@b.c", session_id: "s1" },
+    });
+    setDek(mintDek());
+    renderDevice(state, root);
+    const input = asFake(root.querySelector("#user_code"));
+    expect(input).not.toBeNull();
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+    typeUserCode(input as FakeNode, "ABCD-EFGH", 4);
+    expect(asFake(root.querySelector("#user_code"))).toBe(input);
+    expect(activeEl()).toBe(input);
+    expect(input?.selectionStart).toBe(4);
+    expect(input?.selectionEnd).toBe(4);
+    expect(state.userCode.get()).toBe("ABCD-EFGH");
+    expect(root.querySelector("[data-device]")?.textContent).toBe("ABCD-EFGH");
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(root.querySelector("[data-reason]")).toBeNull();
+  });
+
+  test("Copy does not paint Device after the page has left", async () => {
+    const root = document.createElement("div");
+    let finish: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    renderDevice(signedState(), root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    root.replaceChildren();
+    finish?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
+  });
+
+  test("Copy then Approve does not paint Device over Register", async () => {
+    const root = document.createElement("div");
+    let finish: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root, () => {
+      const next = document.createElement("div");
+      next.setAttribute("data-page", "register");
+      root.replaceChildren(next);
+    });
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="register"]')).not.toBeNull();
+    finish?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
+    expect(root.querySelector('[data-page="register"]')).not.toBeNull();
   });
 });
