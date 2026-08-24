@@ -79,6 +79,10 @@ export type GateHost = {
   loadSession(): Promise<void>;
 };
 
+export function leaveGate(state: { password: Signal<string> }): void {
+  state.password.set("");
+}
+
 export const CLIP_FAIL_SENTENCE =
   "The browser refused the clipboard. Select the value and copy it.";
 
@@ -761,6 +765,7 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
   if (state.pending.get()) {
     return;
   }
+  state.password.set("");
   state.pending.set(true);
   state.error.set(undefined);
   host.redraw();

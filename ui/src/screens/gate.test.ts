@@ -493,6 +493,46 @@ describe("gate screen", () => {
     expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
   });
 
+  test("passkey path clears the password before WebAuthn", async () => {
+    let started = false;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        credentials: {
+          get: () =>
+            new Promise(() => {
+              started = true;
+            }),
+        },
+      },
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (reqUrl(input) === "/api/auth/passkey/login/start") {
+        return new Response(
+          JSON.stringify({ handle: "h1", publicKey: { challenge: "AQIDBA" } }),
+          { status: 200 },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState({
+      email: EMAIL,
+      password: "twelve-chars!",
+      method: "either",
+      revealPassword: true,
+    });
+    renderGate(state, root, hostFor(state, root, []));
+    expect((root.querySelector("#password") as HTMLInputElement | null)?.value).toBe(
+      "twelve-chars!",
+    );
+    (root.querySelector('[data-action="passkey"]') as HTMLButtonElement | null)?.click();
+    await Bun.sleep(1);
+    expect(state.password.get()).toBe("");
+    expect((root.querySelector("#password") as HTMLInputElement | null)?.value).toBe("");
+    expect(started).toBe(true);
+  });
+
   test("Use a password instead focuses #password", () => {
     const root = document.createElement("div");
     document.body.append(root);

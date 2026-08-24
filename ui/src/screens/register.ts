@@ -89,7 +89,7 @@ const stores = new WeakMap<object, Store>();
 const dekWatches = new WeakMap<object, { unsub: () => void; root: HTMLElement }>();
 const clipTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 const holdListeners = new WeakMap<object, HoldListener[]>();
-const focusHints = new WeakMap<object, "copy" | { key: string }>();
+const focusHints = new WeakMap<object, "copy" | "add" | { key: string } | { row: string }>();
 
 function freshStore(): Store {
   return {
@@ -311,6 +311,74 @@ function firstControl(scope: ParentNode): HTMLElement | null {
   return n instanceof HTMLElement ? n : null;
 }
 
+function inertOthers(page: HTMLElement, overlay: HTMLElement): void {
+  for (const child of Array.from(page.children)) {
+    if (child === overlay || !(child instanceof HTMLElement)) {
+      continue;
+    }
+    child.setAttribute("inert", "");
+    child.inert = true;
+  }
+}
+
+function closeSheet(state: RegisterHost, root: HTMLElement, store: Store, name: string): void {
+  delete store.selected;
+  store.versions = [];
+  store.versionsStatus = "idle";
+  delete store.revealed;
+  delete store.copyFail;
+  focusHints.set(state, { row: name });
+  paint(state, root);
+}
+
+function cancelWizard(state: RegisterHost, root: HTMLElement, store: Store): void {
+  store.wizard = false;
+  store.wizardValues = new Map();
+  delete store.wizardError;
+  focusHints.set(state, "add");
+  paint(state, root);
+}
+
+function armRegisterOverlays(
+  page: HTMLElement,
+  layout: LayoutMode,
+  state: RegisterHost,
+  root: HTMLElement,
+  store: Store,
+): void {
+  const wizard = page.querySelector("[data-wizard]");
+  const sheet = page.querySelector('[data-pane="sheet"]');
+  if (wizard instanceof HTMLElement) {
+    wizard.setAttribute("role", "dialog");
+    wizard.setAttribute("aria-modal", "true");
+    inertOthers(page, wizard);
+    wizard.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") {
+        return;
+      }
+      ev.preventDefault();
+      cancelWizard(state, root, store);
+    });
+    return;
+  }
+  if (layout !== "list-only" || !(sheet instanceof HTMLElement)) {
+    return;
+  }
+  sheet.setAttribute("role", "dialog");
+  sheet.setAttribute("aria-modal", "true");
+  inertOthers(page, sheet);
+  const name = store.selected;
+  sheet.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") {
+      return;
+    }
+    ev.preventDefault();
+    if (name !== undefined) {
+      closeSheet(state, root, store, name);
+    }
+  });
+}
+
 function dropPlaintext(host: object, store: Store, root?: HTMLElement): void {
   dropHold(host, root);
   store.opened.clear();
@@ -527,7 +595,7 @@ function paint(state: RegisterHost, root: HTMLElement): void {
     selectedName === undefined
       ? undefined
       : store.entries.find((e) => e.name === selectedName);
-  const sheet = layout === "list-only" && selected !== undefined;
+  const sheetVisible = layout === "list-only" && selected !== undefined;
   const page = el("div", {
     class: "app",
     "data-page": "register",
@@ -556,29 +624,40 @@ function paint(state: RegisterHost, root: HTMLElement): void {
   workspace.append(listPane(state, root, store));
   workspace.append(inspectorPane(state, root, store, selected));
   page.append(workspace);
-  if (sheet && selected) {
+  if (selected) {
     page.append(sheetPane(state, root, store, selected));
   }
   if (store.wizard) {
     page.append(wizardPane(state, root, store));
   }
+  armRegisterOverlays(page, layout, state, root, store);
   root.replaceChildren(page);
 
   const hint = focusHints.get(state);
   focusHints.delete(state);
   let target: HTMLElement | null = null;
   if (hint === "copy") {
-    const pane = sheet ? page.querySelector('[data-pane="sheet"]') : page.querySelector('[data-pane="inspector"]');
+    const pane = sheetVisible
+      ? page.querySelector('[data-pane="sheet"]')
+      : page.querySelector('[data-pane="inspector"]');
     const found = (pane ?? page).querySelector("[data-select-copy]");
     target = found instanceof HTMLElement ? found : null;
+  } else if (hint === "add") {
+    const found = page.querySelector('[data-action="add"]');
+    target = found instanceof HTMLElement ? found : null;
+  } else if (hint !== undefined && typeof hint === "object" && "row" in hint) {
+    const found = page.querySelector(`[data-name="${hint.row}"]`);
+    target = found instanceof HTMLElement ? found : null;
   } else if (hint !== undefined && typeof hint === "object") {
-    const pane = sheet ? page.querySelector('[data-pane="sheet"]') : page.querySelector('[data-pane="inspector"]');
+    const pane = sheetVisible
+      ? page.querySelector('[data-pane="sheet"]')
+      : page.querySelector('[data-pane="inspector"]');
     const found = (pane ?? page).querySelector(`[data-field="${hint.key}"] [data-action="copy"]`);
     target = found instanceof HTMLElement ? found : null;
   } else if (store.wizard && !hadWizard) {
     const found = page.querySelector("#secret_name");
     target = found instanceof HTMLElement ? found : null;
-  } else if (sheet && !hadSheet) {
+  } else if (sheetVisible && !hadSheet) {
     const pane = page.querySelector('[data-pane="sheet"]');
     target = pane !== null ? firstControl(pane) : null;
   } else if (prevSel !== undefined) {
@@ -697,16 +776,19 @@ function sheetPane(
     ["Close"],
   );
   close.addEventListener("click", () => {
-    delete store.selected;
-    store.versions = [];
-    store.versionsStatus = "idle";
-    delete store.revealed;
-    delete store.copyFail;
-    paint(state, root);
+    closeSheet(state, root, store, item.name);
   });
-  return el("div", { class: "secd-overlay", "data-pane": "sheet", "data-sheet": "open" }, [
-    el("div", { class: "secd-modal" }, [...secretBody(state, root, store, item), close]),
-  ]);
+  return el(
+    "div",
+    {
+      class: "secd-overlay",
+      "data-pane": "sheet",
+      "data-sheet": "open",
+      role: "dialog",
+      "aria-modal": "true",
+    },
+    [el("div", { class: "secd-modal" }, [...secretBody(state, root, store, item), close])],
+  );
 }
 
 function fieldRow(
@@ -780,13 +862,13 @@ function fieldRow(
     addHoldListener(state, doc, "pointercancel", hide);
   });
   show.addEventListener("keydown", (ev) => {
-    if (ev.repeat) {
-      return;
-    }
     if (ev.key !== " " && ev.key !== "Enter") {
       return;
     }
     ev.preventDefault();
+    if (ev.repeat) {
+      return;
+    }
     if (value === undefined || disabled) {
       return;
     }
@@ -884,7 +966,7 @@ function wizardPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLE
   const schema = providerByName(store.wizardProvider) ?? first;
   const noDek = getDek() === undefined;
   const form = el("div", { class: "secd-stack" });
-  form.append(el("h2", {}, ["Add a secret"]));
+  form.append(el("h2", { id: "wizard-title" }, ["Add a secret"]));
   form.append(el("p", {}, ["Name a secret and fill the provider fields."]));
   const sel = el("select", { id: "provider" });
   for (const p of PROVIDERS) {
@@ -960,15 +1042,20 @@ function wizardPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLE
     ["Cancel"],
   );
   cancel.addEventListener("click", () => {
-    store.wizard = false;
-    store.wizardValues = new Map();
-    delete store.wizardError;
-    paint(state, root);
+    cancelWizard(state, root, store);
   });
   form.append(el("div", { class: "secd-row" }, [save, cancel]));
-  return el("div", { class: "secd-overlay", "data-wizard": "open" }, [
-    el("div", { class: "secd-modal" }, [form]),
-  ]);
+  return el(
+    "div",
+    {
+      class: "secd-overlay",
+      "data-wizard": "open",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "wizard-title",
+    },
+    [el("div", { class: "secd-modal" }, [form])],
+  );
 }
 
 async function loadVault(state: RegisterHost, root: HTMLElement): Promise<void> {
@@ -1174,6 +1261,7 @@ async function onSave(state: RegisterHost, root: HTMLElement): Promise<void> {
     store.wizardValues = new Map();
     delete store.wizardError;
     delete store.selected;
+    focusHints.set(state, "add");
     store.status = "idle";
     await loadVault(state, root);
   } catch {

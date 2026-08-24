@@ -376,14 +376,14 @@ describe("Register screen", () => {
       new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
     );
     expect(valueEl?.textContent === FIELD).toBe(true);
-    show?.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: " ",
-        bubbles: true,
-        cancelable: true,
-        repeat: true,
-      }),
-    );
+    const repeat = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+      repeat: true,
+    });
+    show?.dispatchEvent(repeat);
+    expect(repeat.defaultPrevented).toBe(true);
     expect(valueEl?.textContent === FIELD).toBe(true);
     document.dispatchEvent(
       new KeyboardEvent("keyup", { key: " ", bubbles: true, cancelable: true }),
@@ -678,5 +678,82 @@ describe("Register screen", () => {
     ) as HTMLInputElement | null;
     expect(again).not.toBeNull();
     expect(again?.value === "").toBe(true);
+  });
+
+  test("selection at 900px still creates the sheet so a shrink can show it", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    Object.defineProperty(globalThis, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 900,
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    expect(root.querySelector('[data-pane="sheet"][data-sheet="open"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="inspector"] [data-action="copy"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="sheet"] [data-action="copy"]')).not.toBeNull();
+  });
+
+  test("secret sheet is a dialog that inerts the page and restores row focus", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    Object.defineProperty(globalThis, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 899,
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    const overlay = root.querySelector('[data-pane="sheet"]');
+    expect(overlay?.getAttribute("role")).toBe("dialog");
+    expect(overlay?.getAttribute("aria-modal")).toBe("true");
+    expect(root.querySelector("nav")?.hasAttribute("inert")).toBe(true);
+    expect(root.querySelector(".workspace")?.hasAttribute("inert")).toBe(true);
+    overlay?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
+    expect(document.activeElement).toBe(root.querySelector(`[data-name="${NAME}"]`));
+  });
+
+  test("Add wizard is a labelled dialog; Escape cancels and focuses Add", async () => {
+    mockApi({ entries: [] });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector('[data-action="add"]') as HTMLButtonElement | null)?.click();
+    const overlay = root.querySelector("[data-wizard]");
+    expect(overlay?.getAttribute("role")).toBe("dialog");
+    expect(overlay?.getAttribute("aria-modal")).toBe("true");
+    expect(overlay?.getAttribute("aria-labelledby")).toBe("wizard-title");
+    expect(root.querySelector("#wizard-title")?.textContent).toBe("Add a secret");
+    expect(root.querySelector("nav")?.hasAttribute("inert")).toBe(true);
+    overlay?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(root.querySelector("[data-wizard]")).toBeNull();
+    expect(document.activeElement).toBe(root.querySelector('[data-action="add"]'));
   });
 });

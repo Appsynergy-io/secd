@@ -337,4 +337,83 @@ describe("Activity screen", () => {
     expect(root.textContent).toContain(LOADING_SENTENCE);
     expect(root.querySelector('[data-seq="0"]')).toBeNull();
   });
+
+  test("clipboard fallback lives in the inspector next to Copy", async () => {
+    const root = document.createElement("div");
+    const state = host();
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(eventsOk()), { status: 200 })) as unknown as typeof fetch;
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          throw new Error("denied");
+        },
+      },
+    });
+    renderActivity(state, root, document.createElement("nav"), 1280);
+    await settled();
+    (root.querySelector('[data-seq="0"]') as HTMLButtonElement).click();
+    document.body.append(root);
+    (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
+    await settled();
+    const pane = root.querySelector('[data-pane="inspector"]');
+    expect(pane?.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
+    expect((pane?.querySelector("[data-select-copy]") as HTMLInputElement | null)?.value).toBe(
+      PUT_HASH,
+    );
+    expect(root.querySelector(".secd-overlay + .error")).toBeNull();
+    root.remove();
+  });
+
+  test("activity sheet is a dialog that inerts the page and restores row focus", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const state = host();
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(eventsOk()), { status: 200 })) as unknown as typeof fetch;
+    renderActivity(state, root, document.createElement("nav"), 899);
+    await settled();
+    (root.querySelector('[data-seq="0"]') as HTMLButtonElement).click();
+    const overlay = root.querySelector('[data-pane="sheet"]');
+    expect(overlay?.getAttribute("role")).toBe("dialog");
+    expect(overlay?.getAttribute("aria-modal")).toBe("true");
+    expect(root.querySelector("nav")?.hasAttribute("inert")).toBe(true);
+    overlay?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
+    expect(document.activeElement).toBe(root.querySelector('[data-seq="0"]'));
+    root.remove();
+  });
+
+  test("Copy does not paint Activity after leave", async () => {
+    const root = document.createElement("div");
+    const state = host();
+    let finish: ((value: void) => void) | undefined;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(eventsOk()), { status: 200 })) as unknown as typeof fetch;
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      },
+    });
+    renderActivity(state, root, document.createElement("nav"), 1280);
+    await settled();
+    (root.querySelector('[data-seq="0"]') as HTMLButtonElement).click();
+    const hash = root.querySelector('[data-field="hash"]');
+    (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
+    state.path.set("/register");
+    leaveActivity(state);
+    finish?.();
+    await settled();
+    expect(root.querySelector('[data-field="hash"]')).toBe(hash);
+    expect(root.querySelector('[data-pane="inspector"] [data-action="copy"]')?.textContent).toBe(
+      "Copy",
+    );
+  });
 });

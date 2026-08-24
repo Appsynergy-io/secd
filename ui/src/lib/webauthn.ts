@@ -233,5 +233,7 @@ export function prfBytes(cred: unknown): Uint8Array | undefined {
   if (!buf || buf.length < 32) {
     return undefined;
   }
-  return buf.slice(0, 32);
+  const out = buf.slice(0, 32);
+  buf.fill(0);
+  return out;
 }

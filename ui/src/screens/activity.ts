@@ -67,7 +67,7 @@ type Mem = {
 };
 
 const mem = new WeakMap<object, Mem>();
-const focusHints = new WeakMap<object, "copy" | "hash">();
+const focusHints = new WeakMap<object, "copy" | "hash" | number>();
 
 function memOf(state: object): Mem {
   let m = mem.get(state);
@@ -266,6 +266,50 @@ export function chainVerified(rows: readonly ChainRow[]): boolean {
   return rows.every((r) => r.verified);
 }
 
+function inertOthers(page: HTMLElement, overlay: HTMLElement): void {
+  for (const child of Array.from(page.children)) {
+    if (child === overlay || !(child instanceof HTMLElement)) {
+      continue;
+    }
+    child.setAttribute("inert", "");
+    child.inert = true;
+  }
+}
+
+function closeSheet(state: ActivityHost, root: HTMLElement): void {
+  const m = memOf(state);
+  const seq = m.selected;
+  m.selected = undefined;
+  m.copied = false;
+  m.clipFail = false;
+  if (seq !== undefined) {
+    focusHints.set(state, seq);
+  }
+  paint(state, root);
+}
+
+function armActivityOverlay(
+  page: HTMLElement,
+  layout: LayoutMode,
+  state: ActivityHost,
+  root: HTMLElement,
+): void {
+  const overlay = page.querySelector('[data-pane="sheet"]');
+  if (!(overlay instanceof HTMLElement) || layout !== "list-only") {
+    return;
+  }
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  inertOthers(page, overlay);
+  overlay.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") {
+      return;
+    }
+    ev.preventDefault();
+    closeSheet(state, root);
+  });
+}
+
 function failSentence(status: number): string {
   if (status === 429) {
     return RATE_SENTENCE;
@@ -453,21 +497,6 @@ function paint(state: ActivityHost, root: HTMLElement): void {
   if (selected !== undefined) {
     children.push(detailsEl(state, root, selected, kind, true));
   }
-  if (m.clipFail) {
-    children.push(el("p", { class: "error", "data-reason": "" }, [CLIP_FAIL_SENTENCE]));
-    if (selected !== undefined) {
-      children.push(
-        el("input", {
-          class: "mono",
-          readonly: true,
-          autocomplete: "off",
-          "data-select-copy": "",
-          "aria-label": "Event hash",
-          value: selected.hash,
-        }),
-      );
-    }
-  }
 
   const page = el(
     "div",
@@ -479,10 +508,18 @@ function paint(state: ActivityHost, root: HTMLElement): void {
     },
     children,
   );
+  armActivityOverlay(page, layout, state, root);
   root.replaceChildren(page);
   let target: HTMLElement | null = null;
   if (hint === "hash" || m.clipFail) {
-    const found = page.querySelector("[data-select-copy]");
+    const sel =
+      layout === "list-only"
+        ? '[data-pane="sheet"] [data-select-copy]'
+        : '[data-pane="inspector"] [data-select-copy]';
+    const found = page.querySelector(sel) ?? page.querySelector("[data-select-copy]");
+    target = found instanceof HTMLElement ? found : null;
+  } else if (typeof hint === "number") {
+    const found = page.querySelector(`[data-seq="${String(hint)}"]`);
     target = found instanceof HTMLElement ? found : null;
   } else if (hint === "copy") {
     const sel =
@@ -556,20 +593,38 @@ function detailsEl(
     const reason = pending || kind === "loading" ? LOADING_SENTENCE : COPY_NEED_SENTENCE;
     body.push(el("p", { "data-reason": "" }, [reason]));
   }
+  if (m.clipFail && row !== undefined) {
+    body.push(el("p", { class: "error", "data-reason": "" }, [CLIP_FAIL_SENTENCE]));
+    body.push(
+      el("input", {
+        class: "mono",
+        readonly: true,
+        autocomplete: "off",
+        "data-select-copy": "",
+        "aria-label": "Event hash",
+        value: row.hash,
+      }),
+    );
+  }
   if (sheet) {
     const close = el("button", { type: "button", class: "secondary", "data-action": "close" }, [
       "Close",
     ]);
     close.addEventListener("click", () => {
-      m.selected = undefined;
-      m.copied = false;
-      m.clipFail = false;
-      paint(state, root);
+      closeSheet(state, root);
     });
     body.push(close);
-    return el("div", { class: "secd-overlay", "data-pane": "sheet", "data-sheet": "open" }, [
-      el("div", { class: "secd-modal" }, [el("div", { class: "card" }, body)]),
-    ]);
+    return el(
+      "div",
+      {
+        class: "secd-overlay",
+        "data-pane": "sheet",
+        "data-sheet": "open",
+        role: "dialog",
+        "aria-modal": "true",
+      },
+      [el("div", { class: "secd-modal" }, [el("div", { class: "card" }, body)])],
+    );
   }
   return el("div", { class: "card", "data-pane": "inspector" }, body);
 }
@@ -585,7 +640,11 @@ async function onCopy(state: ActivityHost, root: HTMLElement): Promise<void> {
   if (row === undefined) {
     return;
   }
+  const gen = m.gen;
   const ok = await copyText(row.hash);
+  if (gen !== m.gen || state.path.get() !== "/activity") {
+    return;
+  }
   m.copied = ok;
   m.clipFail = !ok;
   focusHints.set(state, ok ? "copy" : "hash");

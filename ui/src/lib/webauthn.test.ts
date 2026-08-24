@@ -6,6 +6,7 @@ import {
   bytesToB64url,
   coercePublicKey,
   createPasskey,
+  prfBytes,
   serializeCredential,
 } from "./webauthn.ts";
 
@@ -48,6 +49,34 @@ describe("webauthn", () => {
     });
     expect(json["type"]).toBe("public-key");
     expect(json["rawId"]).toBe(bytesToB64url(raw));
+  });
+
+  test("prfBytes copies 32 bytes and overwrites the credential buffer", () => {
+    const raw = new Uint8Array(32);
+    raw.fill(7);
+    const got = prfBytes({
+      getClientExtensionResults: () => ({
+        prf: { results: { first: raw.buffer } },
+      }),
+    });
+    expect(got).toBeDefined();
+    expect(got?.length).toBe(32);
+    expect([...got!]).toEqual(Array.from({ length: 32 }, () => 7));
+    expect([...raw]).toEqual(Array.from({ length: 32 }, () => 0));
+  });
+
+  test("prfBytes overwrites a view that aliases the extension result", () => {
+    const raw = new Uint8Array(32);
+    raw.fill(5);
+    const view = new Uint8Array(raw.buffer);
+    const got = prfBytes({
+      getClientExtensionResults: () => ({
+        prf: { results: { first: view } },
+      }),
+    });
+    expect([...got!]).toEqual(Array.from({ length: 32 }, () => 5));
+    expect([...view]).toEqual(Array.from({ length: 32 }, () => 0));
+    expect([...raw]).toEqual(Array.from({ length: 32 }, () => 0));
   });
 
   test("createPasskey fails closed without credentials", async () => {

@@ -420,4 +420,90 @@ describe("account screen", () => {
     expect(root.querySelector('[data-list="sessions"]')?.textContent).not.toContain(EMPTY_SESSIONS);
     expect(root.querySelector('[data-list="passkeys"]')?.textContent).not.toContain(EMPTY_PASSKEYS);
   });
+
+  test("clipboard fallback lives in the inspector next to Copy", async () => {
+    const root = document.createElement("div");
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {},
+    });
+    const id = "pk-select-copy";
+    const state = host({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id, created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    document.body.append(root);
+    (root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`) as HTMLButtonElement).click();
+    (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
+    await Bun.sleep(1);
+    const pane = root.querySelector('[data-pane="inspector"]');
+    expect(pane?.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
+    expect((pane?.querySelector("[data-copy-fallback]") as HTMLInputElement | null)?.value).toBe(id);
+    expect(root.querySelector(".secd-overlay + .error")).toBeNull();
+    root.remove();
+  });
+
+  test("account sheet is a dialog that inerts the page and restores row focus", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const id = "pk-1";
+    const state = host({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id, created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root, undefined, undefined, 899);
+    await Bun.sleep(1);
+    (root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`) as HTMLButtonElement).click();
+    const overlay = root.querySelector('[data-pane="sheet"]');
+    expect(overlay?.getAttribute("role")).toBe("dialog");
+    expect(overlay?.getAttribute("aria-modal")).toBe("true");
+    expect(root.querySelector("nav")?.hasAttribute("inert")).toBe(true);
+    expect(root.querySelector('[data-action="logout"]')?.hasAttribute("inert")).toBe(true);
+    overlay?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
+    expect(document.activeElement).toBe(
+      root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`),
+    );
+    root.remove();
+  });
+
+  test("Copy does not paint Account after leaving the screen", async () => {
+    const root = document.createElement("div");
+    let finish: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    });
+    const id = "pk-copy-leave";
+    const state = host({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id, created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    (root.querySelector(`[data-passkey-id="${id}"] button:not([data-action])`) as HTMLButtonElement).click();
+    const email = root.querySelector('[data-field="email"]');
+    (root.querySelector('[data-pane="inspector"] [data-action="copy"]') as HTMLButtonElement).click();
+    state.path.set("/register");
+    finish?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-field="email"]')).toBe(email);
+    expect(root.querySelector('[data-pane="inspector"] [data-action="copy"]')?.textContent).toBe(
+      "Copy",
+    );
+  });
 });

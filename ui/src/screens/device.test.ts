@@ -636,3 +636,65 @@ describe("device screen", () => {
     expect(ephOk(state.eph.get())).toBe(true);
   });
 });
+
+describe("device input", () => {
+  const origNav = globalThis.navigator;
+
+  afterEach(() => {
+    clearDek();
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: origNav,
+    });
+  });
+
+  test("typing in #user_code updates the code without remounting the field", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const state = makeState({
+      eph: deviceEphHex(),
+      session: { email: "a@b.c", session_id: "s1" },
+    });
+    setDek(mintDek());
+    renderDevice(state, root);
+    const input = root.querySelector("#user_code") as HTMLInputElement | null;
+    expect(input).not.toBeNull();
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(true);
+    input!.focus();
+    input!.value = "ABCD-EFGH";
+    input!.setSelectionRange(4, 4);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector("#user_code")).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input!.selectionStart).toBe(4);
+    expect(state.userCode.get()).toBe("ABCD-EFGH");
+    expect(root.querySelector("[data-device]")?.textContent).toBe("ABCD-EFGH");
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(false);
+    root.remove();
+  });
+
+  test("Copy does not paint Device after the page has left", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    let finish: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    renderDevice(signedState(), root);
+    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    root.replaceChildren();
+    finish?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
+    root.remove();
+  });
+});

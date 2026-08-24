@@ -94,7 +94,7 @@ type Mem = {
 };
 
 const mem = new WeakMap<object, Mem>();
-const focusHints = new WeakMap<object, "copy" | "fallback">();
+const focusHints = new WeakMap<object, "copy" | "fallback" | AccountSel>();
 let logoutGen = 0;
 let passkeyLoadGen = 0;
 
@@ -197,6 +197,50 @@ function el<K extends keyof HTMLElementTagNameMap>(
     node.append(typeof child === "string" ? document.createTextNode(child) : child);
   }
   return node;
+}
+
+function inertOthers(page: HTMLElement, overlay: HTMLElement): void {
+  for (const child of Array.from(page.children)) {
+    if (child === overlay || !(child instanceof HTMLElement)) {
+      continue;
+    }
+    child.setAttribute("inert", "");
+    child.inert = true;
+  }
+}
+
+function closeSheet(state: AccountHost, root: HTMLElement): void {
+  const m = memOf(state);
+  const sel = m.selected;
+  m.selected = undefined;
+  m.copied = false;
+  m.clipFail = false;
+  if (sel !== undefined) {
+    focusHints.set(state, sel);
+  }
+  paint(state, root);
+}
+
+function armAccountOverlay(
+  page: HTMLElement,
+  layout: LayoutMode,
+  state: AccountHost,
+  root: HTMLElement,
+): void {
+  const overlay = page.querySelector('[data-pane="sheet"]');
+  if (!(overlay instanceof HTMLElement) || layout !== "list-only") {
+    return;
+  }
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  inertOthers(page, overlay);
+  overlay.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") {
+      return;
+    }
+    ev.preventDefault();
+    closeSheet(state, root);
+  });
 }
 
 function failSentence(status: number, data?: unknown): string {
@@ -400,7 +444,12 @@ async function loadPasskeys(state: AccountHost, root: HTMLElement): Promise<void
 
 async function loadSessions(state: AccountHost, root: HTMLElement): Promise<void> {
   const m = memOf(state);
-  if (m.sessions !== undefined || m.sessionLoads || state.session.get() === undefined) {
+  if (
+    m.sessions !== undefined ||
+    m.sessionLoads ||
+    m.sessionsError !== undefined ||
+    state.session.get() === undefined
+  ) {
     return;
   }
   m.sessionLoads = true;
@@ -435,8 +484,11 @@ async function loadSessions(state: AccountHost, root: HTMLElement): Promise<void
     m.sessionsError = FAIL_SENTENCE;
   } finally {
     const stale = gen !== logoutGen || loadGen !== passkeyLoadGen;
-    if (!stale) {
+    const left = state.session.get() === undefined || state.path.get() !== "/account";
+    if (!stale && (left || m.sessions !== undefined)) {
       m.sessionLoads = false;
+    }
+    if (!stale) {
       redraw(state, root);
     }
   }
@@ -631,8 +683,7 @@ async function onAdd(state: AccountHost, root: HTMLElement): Promise<void> {
   if (email === undefined || email === "") {
     return;
   }
-  const dek = getDek();
-  if (dek === undefined) {
+  if (getDek() === undefined) {
     state.error.set(NO_DEK_SENTENCE);
     paint(state, root);
     return;
@@ -654,11 +705,19 @@ async function onAdd(state: AccountHost, root: HTMLElement): Promise<void> {
     const cred = await createPasskey(pk);
     const prf = prfBytes(cred);
     try {
+      if (gen !== logoutGen) {
+        return;
+      }
       if (prf === undefined) {
         state.error.set(FAIL_SENTENCE);
         return;
       }
-      const wrap = wrapPasskey(dek, prf, toHex(new Uint8Array(cred.rawId)));
+      const held = getDek();
+      if (held === undefined) {
+        state.error.set(NO_DEK_SENTENCE);
+        return;
+      }
+      const wrap = wrapPasskey(held, prf, toHex(new Uint8Array(cred.rawId)));
       const handle =
         typeof (start.data as { handle?: unknown }).handle === "string"
           ? (start.data as { handle: string }).handle
@@ -707,7 +766,11 @@ async function onCopy(state: AccountHost, root: HTMLElement, text: string): Prom
   if (state.pending.get() || text === "") {
     return;
   }
+  const path = state.path.get();
   const ok = await copyText(text);
+  if (path !== "/account" || state.path.get() !== "/account") {
+    return;
+  }
   m.copied = ok;
   m.clipFail = !ok;
   focusHints.set(state, ok ? "copy" : "fallback");
@@ -833,22 +896,6 @@ function paint(state: AccountHost, root: HTMLElement): void {
     children.push(detailsEl(state, root, selected, true, pending));
   }
   children.push(out);
-  if (m.clipFail) {
-    children.push(el("p", { class: "error", "data-reason": "" }, [CLIP_FAIL_SENTENCE]));
-    const copyVal = copyValue(selected);
-    if (copyVal !== "") {
-      children.push(
-        el("input", {
-          class: "mono",
-          readonly: true,
-          autocomplete: "off",
-          "data-copy-fallback": "",
-          "aria-label": "Identifier",
-          value: copyVal,
-        }),
-      );
-    }
-  }
   if (err) {
     children.push(el("p", { class: "error" }, [err]));
   }
@@ -863,10 +910,15 @@ function paint(state: AccountHost, root: HTMLElement): void {
     },
     children,
   );
+  armAccountOverlay(page, layout, state, root);
   root.replaceChildren(page);
   let target: HTMLElement | null = null;
   if (hint === "fallback" || m.clipFail) {
-    const found = page.querySelector("[data-copy-fallback]");
+    const sel =
+      layout === "list-only"
+        ? '[data-pane="sheet"] [data-copy-fallback]'
+        : '[data-pane="inspector"] [data-copy-fallback]';
+    const found = page.querySelector(sel) ?? page.querySelector("[data-copy-fallback]");
     target = found instanceof HTMLElement ? found : null;
   } else if (hint === "copy") {
     const sel =
@@ -874,6 +926,13 @@ function paint(state: AccountHost, root: HTMLElement): void {
         ? '[data-pane="sheet"] [data-action="copy"]'
         : '[data-pane="inspector"] [data-action="copy"]';
     const found = page.querySelector(sel) ?? page.querySelector('[data-action="copy"]');
+    target = found instanceof HTMLElement ? found : null;
+  } else if (hint !== undefined && typeof hint === "object") {
+    const sel =
+      hint.kind === "session"
+        ? `[data-session-id="${hint.id}"] button:not([data-action])`
+        : `[data-passkey-id="${hint.id}"] button:not([data-action])`;
+    const found = page.querySelector(sel);
     target = found instanceof HTMLElement ? found : null;
   } else if (prevIdentity && prevSessionId !== null && prevSessionId !== undefined) {
     const found = page.querySelector(
@@ -1134,20 +1193,36 @@ function detailsEl(
   if (copyDisabled) {
     body.push(el("p", { "data-reason": "" }, [SELECT_BODY]));
   }
+  if (m.clipFail && value !== "") {
+    body.push(el("p", { class: "error", "data-reason": "" }, [CLIP_FAIL_SENTENCE]));
+    body.push(
+      el("input", {
+        class: "mono",
+        readonly: true,
+        autocomplete: "off",
+        "data-copy-fallback": "",
+        "aria-label": "Identifier",
+        value,
+      }),
+    );
+  }
   if (sheet) {
     const close = el("button", { type: "button", class: "secondary", "data-action": "close" }, [
       "Close",
     ]);
     close.addEventListener("click", () => {
-      m.selected = undefined;
-      m.copied = false;
-      m.clipFail = false;
-      paint(state, root);
+      closeSheet(state, root);
     });
     body.push(close);
     return el(
       "div",
-      { class: "secd-overlay", "data-pane": "sheet", "data-sheet": "open" },
+      {
+        class: "secd-overlay",
+        "data-pane": "sheet",
+        "data-sheet": "open",
+        role: "dialog",
+        "aria-modal": "true",
+      },
       [el("div", { class: "secd-modal" }, [el("div", { class: "card" }, body)])],
     );
   }

@@ -20,6 +20,7 @@ import { leaveActivity, renderActivity as renderActivityScreen } from "./screens
 import { renderDevice } from "./screens/device.ts";
 import { abandonRegister, renderRegister as renderRegisterScreen } from "./screens/register.ts";
 import {
+  leaveGate,
   loadRemember,
   renderGate,
   resolveGate,
@@ -219,6 +220,9 @@ export function render(state: AppState): void {
   }
   mounted = root;
   const screen = screenFromPath(state.path.get());
+  if (screen !== "gate") {
+    leaveGate(state);
+  }
   if (screen !== "register") {
     abandonRegister(state);
   }
@@ -275,6 +279,7 @@ async function onLogout(state: AppState): Promise<void> {
 
 function signOutLocal(state: AppState): void {
   leaveAccount(state);
+  leaveGate(state);
   state.session.set(undefined);
   state.pending.set(false);
   state.error.set(undefined);

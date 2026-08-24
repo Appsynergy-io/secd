@@ -742,6 +742,96 @@ describe("Account chain", () => {
     expect(getDek()).toBeUndefined();
     expect(state.path.get()).toBe("/");
   });
+
+  test("GET /sessions failure does not retry through render", async () => {
+    const root = document.createElement("div");
+    let n = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url === "/api/v1/sessions") {
+        n += 1;
+        return new Response("{}", { status: 429 });
+      }
+      if (method === "GET" && url.includes("/passkeys")) {
+        return new Response(JSON.stringify({ passkeys: [] }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    await Bun.sleep(20);
+    expect(n).toBe(1);
+    renderAccount(state, root);
+    await Bun.sleep(20);
+    expect(n).toBe(1);
+  });
+
+  test("Add passkey does not POST finish after Sign out during WebAuthn", async () => {
+    const root = document.createElement("div");
+    let finishCreate: ((value: unknown) => void) | undefined;
+    const origNav = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        credentials: {
+          create: () =>
+            new Promise((resolve) => {
+              finishCreate = resolve;
+            }),
+        },
+      },
+    });
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      calls.push(`${method} ${url}`);
+      if (method === "POST" && url.includes("register/start")) {
+        return new Response(
+          JSON.stringify({ handle: "h1", publicKey: { challenge: "AQIDBA" } }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+    setDek(mintDek());
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="add-passkey"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(10);
+    (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    expect(getDek()).toBeUndefined();
+    const prf = new Uint8Array(32).fill(9);
+    finishCreate?.({
+      id: "cred",
+      type: "public-key",
+      rawId: new Uint8Array([10, 11, 12, 13]).buffer,
+      response: {
+        clientDataJSON: new Uint8Array([1]).buffer,
+        attestationObject: new Uint8Array([2]).buffer,
+      },
+      getClientExtensionResults: () => ({
+        prf: { results: { first: prf.buffer } },
+      }),
+    });
+    await Bun.sleep(10);
+    expect(calls.some((c) => c.includes("register/finish"))).toBe(false);
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: origNav,
+    });
+  });
 });
 
 describe("Gate login", () => {
