@@ -8,6 +8,8 @@ import {
   REMEMBER_DAYS,
   passkeyLoginFinishUrl,
   passkeyLoginStartUrl,
+  passkeyRegisterFinishUrl,
+  passkeyRegisterStartUrl,
   passwordLoginUrl,
   passwordRegisterUrl,
   req,
@@ -17,6 +19,7 @@ import { copyText } from "../lib/clipboard.ts";
 import type { Signal } from "../lib/signal.ts";
 import {
   coercePublicKey,
+  createPasskey,
   getPasskey,
   prfBytes,
   serializeCredential,
@@ -78,6 +81,9 @@ export type GateHost = {
 
 export const CLIP_FAIL_SENTENCE =
   "The browser refused the clipboard. Select the value and copy it.";
+
+const clipFails = new WeakMap<object, boolean>();
+const focusHints = new WeakMap<object, "email" | "password" | "copy">();
 
 function rememberIsFresh(atIso: string, nowMs: number): boolean {
   const at = Date.parse(atIso);
@@ -274,38 +280,57 @@ function afterLoginPath(userCode: string): string {
   return userCode === "" ? "/register" : "/device";
 }
 
-function copyControl(value: string, onFail: (reason: string) => void): HTMLElement {
+function copyControl(value: string, onFail: () => void): HTMLElement {
   const row = el("div", { class: "row" });
   const field = el("input", {
     class: "mono",
     readonly: true,
     autocomplete: "off",
     "data-copy": "value",
+    "aria-label": "Error text",
     value,
   });
   const btn = el(
     "button",
-    { type: "button", class: "secondary", "data-action": "copy" },
+    {
+      type: "button",
+      class: "secondary",
+      "data-action": "copy",
+      "aria-label": "Copy error",
+    },
     ["Copy"],
   );
+  let copying = false;
   btn.addEventListener("click", () => {
     void (async () => {
-      if (btn.disabled) {
+      if (copying) {
         return;
       }
-      disable(btn, true);
+      copying = true;
       const ok = await copyText(value);
       if (ok) {
         btn.textContent = "Copied";
       } else {
         btn.textContent = "Copy";
-        onFail(CLIP_FAIL_SENTENCE);
+        onFail();
       }
-      disable(btn, false);
+      copying = false;
     })();
   });
   row.append(field, btn);
   return row;
+}
+
+function viewOf(state: GateState): GateView {
+  return resolveGate({
+    session: state.session.get(),
+    remember: loadRemember(),
+    email: state.email.get() || undefined,
+    method: state.method.get(),
+    useDifferentAccount: state.different.get(),
+    revealPassword: state.revealPassword.get(),
+    userCode: state.userCode.get() || undefined,
+  });
 }
 
 function titleFor(kind: GateKind): string {
@@ -357,6 +382,16 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     host.navigate(afterLoginPath(state.userCode.get()));
     return;
   }
+
+  const prevActive = document.activeElement;
+  const prevId =
+    prevActive instanceof HTMLElement &&
+    prevActive.id !== "" &&
+    root.contains(prevActive)
+      ? prevActive.id
+      : undefined;
+  const hadPassword = root.querySelector("#password") !== null;
+  const hadEmail = root.querySelector("#email") !== null;
 
   const remember = loadRemember();
   if (state.email.get() === "" && remember?.email) {
@@ -474,6 +509,7 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     );
     pw.addEventListener("click", () => {
       state.revealPassword.set(true);
+      focusHints.set(state, "password");
       host.redraw();
     });
     form.append(pw);
@@ -487,12 +523,18 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     diff.addEventListener("click", () => {
       state.different.set(true);
       state.method.set(undefined);
+      state.password.set("");
+      focusHints.set(state, "email");
       host.redraw();
     });
     form.append(diff);
   }
 
   const err = state.error.get();
+  if (err === undefined) {
+    clipFails.delete(state);
+  }
+  const clipFail = clipFails.get(state) === true;
   const sub = subFor(view.kind);
   const page = el(
     "div",
@@ -509,14 +551,33 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
   }
   if (err) {
     page.append(
-      el("p", { class: "error", role: "alert" }, [err]),
-      copyControl(err, (msg) => {
-        state.error.set(msg);
+      el("p", { class: "error", role: "alert" }, [clipFail ? CLIP_FAIL_SENTENCE : err]),
+      copyControl(err, () => {
+        clipFails.set(state, true);
+        focusHints.set(state, "copy");
         host.redraw();
       }),
     );
   }
   root.replaceChildren(page);
+
+  const hint = focusHints.get(state);
+  focusHints.delete(state);
+  const passwordJustRevealed = view.showPassword && !hadPassword;
+  const emailJustRevealed = view.showEmail && !hadEmail;
+  let target: HTMLElement | null = null;
+  if (passwordJustRevealed || hint === "password") {
+    target = page.querySelector("#password");
+  } else if (hint === "email" || emailJustRevealed) {
+    target = page.querySelector("#email");
+  } else if (hint === "copy" || clipFail) {
+    target = page.querySelector('[data-copy="value"]');
+  } else if (prevId !== undefined) {
+    target = page.querySelector(`#${prevId}`);
+  }
+  if (target !== null && typeof target.focus === "function") {
+    target.focus();
+  }
 }
 
 export async function onContinue(state: GateState, host: GateHost): Promise<void> {
@@ -526,31 +587,35 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
   state.pending.set(true);
   state.error.set(undefined);
   try {
-    if (state.password.get() !== "") {
-      const email = state.email.get();
-      const password = state.password.get();
+    const crypto = await import("../lib/crypto.ts");
+    crypto.clearDek();
+    const view = viewOf(state);
+    const email = state.email.get();
+    const password = state.password.get();
+    if (view.showPassword && password !== "") {
       const isRegister = state.method.get() === "register";
       if (isRegister) {
-        const crypto = await import("../lib/crypto.ts");
         const fresh = crypto.mintDek();
-        let body: Record<string, unknown>;
         try {
-          const wrap = crypto.wrapPassword(fresh, new TextEncoder().encode(password));
-          body = { email, password, wrap: crypto.wrapToJson(wrap) };
-        } catch {
-          crypto.zeroizeBytes(fresh);
+          let body: Record<string, unknown>;
+          try {
+            const wrap = crypto.wrapPassword(fresh, new TextEncoder().encode(password));
+            body = { email, password, wrap: crypto.wrapToJson(wrap) };
+          } catch {
+            state.password.set("");
+            state.error.set(FAIL_SENTENCE);
+            return;
+          }
+          const res = await req("POST", passwordRegisterUrl(), body);
           state.password.set("");
-          state.error.set(FAIL_SENTENCE);
-          return;
-        }
-        const res = await req("POST", passwordRegisterUrl(), body);
-        state.password.set("");
-        if (res.status !== 200) {
+          if (res.status !== 200) {
+            state.error.set(sentenceFor(res.status));
+            return;
+          }
+          crypto.setDek(fresh);
+        } finally {
           crypto.zeroizeBytes(fresh);
-          state.error.set(sentenceFor(res.status));
-          return;
         }
-        crypto.setDek(fresh);
       } else {
         const res = await req("POST", passwordLoginUrl(), { email, password });
         state.password.set("");
@@ -558,7 +623,6 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
           state.error.set(sentenceFor(res.status));
           return;
         }
-        const crypto = await import("../lib/crypto.ts");
         const opened = crypto.unwrapAny(
           crypto.wrapsFromJson(res.data),
           new TextEncoder().encode(password),
@@ -570,6 +634,7 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
       }
       await host.loadSession();
       if (state.session.get() === undefined) {
+        crypto.clearDek();
         if (state.error.get() === undefined) {
           state.error.set(FAIL_SENTENCE);
         }
@@ -579,7 +644,7 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
       host.navigate(afterLoginPath(state.userCode.get()));
       return;
     }
-    const res = await req("POST", startUrl(), { email: state.email.get() });
+    const res = await req("POST", startUrl(), { email });
     if (res.status !== 200) {
       state.error.set(sentenceFor(res.status));
       return;
@@ -604,30 +669,70 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
   state.pending.set(true);
   state.error.set(undefined);
   try {
-    const start = await req("POST", passkeyLoginStartUrl(), {
-      email: state.email.get() || undefined,
-    });
-    if (start.status !== 200) {
-      state.error.set(sentenceFor(start.status));
-      return;
-    }
-    const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialRequestOptions;
-    const cred = await getPasskey(pk, false);
-    const prf = prfBytes(cred);
-    const handle =
-      typeof (start.data as { handle?: unknown }).handle === "string"
-        ? (start.data as { handle: string }).handle
-        : "";
-    const finish = await req("POST", passkeyLoginFinishUrl(), {
-      handle,
-      credential: serializeCredential(cred),
-    });
-    if (finish.status !== 200) {
-      state.error.set(sentenceFor(finish.status));
-      return;
-    }
-    if (prf !== undefined) {
-      const crypto = await import("../lib/crypto.ts");
+    const crypto = await import("../lib/crypto.ts");
+    crypto.clearDek();
+    const email = state.email.get();
+    if (state.method.get() === "register") {
+      const start = await req("POST", passkeyRegisterStartUrl(), { email });
+      if (start.status !== 200) {
+        state.error.set(sentenceFor(start.status));
+        return;
+      }
+      const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialCreationOptions;
+      const cred = await createPasskey(pk);
+      const prf = prfBytes(cred);
+      if (prf === undefined) {
+        state.error.set(FAIL_SENTENCE);
+        return;
+      }
+      const handle =
+        typeof (start.data as { handle?: unknown }).handle === "string"
+          ? (start.data as { handle: string }).handle
+          : "";
+      const fresh = crypto.mintDek();
+      try {
+        const wrap = crypto.wrapPasskey(fresh, prf, crypto.toHex(new Uint8Array(cred.rawId)));
+        const finish = await req("POST", passkeyRegisterFinishUrl(), {
+          handle,
+          credential: serializeCredential(cred),
+          wrap: crypto.wrapToJson(wrap),
+          email,
+        });
+        if (finish.status !== 200) {
+          state.error.set(sentenceFor(finish.status));
+          return;
+        }
+        crypto.setDek(fresh);
+      } finally {
+        crypto.zeroizeBytes(fresh);
+      }
+    } else {
+      const start = await req("POST", passkeyLoginStartUrl(), {
+        email: email || undefined,
+      });
+      if (start.status !== 200) {
+        state.error.set(sentenceFor(start.status));
+        return;
+      }
+      const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialRequestOptions;
+      const cred = await getPasskey(pk, false);
+      const prf = prfBytes(cred);
+      if (prf === undefined) {
+        state.error.set(FAIL_SENTENCE);
+        return;
+      }
+      const handle =
+        typeof (start.data as { handle?: unknown }).handle === "string"
+          ? (start.data as { handle: string }).handle
+          : "";
+      const finish = await req("POST", passkeyLoginFinishUrl(), {
+        handle,
+        credential: serializeCredential(cred),
+      });
+      if (finish.status !== 200) {
+        state.error.set(sentenceFor(finish.status));
+        return;
+      }
       const opened = crypto.unwrapAny(crypto.wrapsFromJson(finish.data), undefined, prf);
       if (opened !== undefined) {
         crypto.setDek(opened);
@@ -635,12 +740,13 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
     }
     await host.loadSession();
     if (state.session.get() === undefined) {
+      crypto.clearDek();
       if (state.error.get() === undefined) {
         state.error.set(FAIL_SENTENCE);
       }
       return;
     }
-    saveRemember(state.email.get(), true);
+    saveRemember(email, true);
     host.navigate(afterLoginPath(state.userCode.get()));
   } catch {
     state.error.set(FAIL_SENTENCE);

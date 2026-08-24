@@ -4,6 +4,7 @@ import {
   KEY_LEN,
   clearDek,
   getDek,
+  onDekClear,
   open,
   seal,
   setDek,
@@ -137,6 +138,23 @@ describe("dek isolation", () => {
     expect(held !== undefined && toHex(held) === toHex(DEK)).toBe(true);
     clearDek();
     expect(getDek()).toBeUndefined();
+  });
+
+  test("clearDek notifies listeners and setDek does not", () => {
+    let n = 0;
+    const stop = onDekClear(() => {
+      n += 1;
+    });
+    try {
+      setDek(DEK);
+      expect(n).toBe(0);
+      clearDek();
+      expect(n).toBe(1);
+    } finally {
+      stop();
+    }
+    clearDek();
+    expect(n).toBe(1);
   });
 
   test("console TTL clears the DEK", () => {

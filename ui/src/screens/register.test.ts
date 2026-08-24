@@ -14,6 +14,7 @@ import { signal } from "../lib/signal.ts";
 import {
   CLIP_FAIL_SENTENCE,
   CLIP_MISSING_SENTENCE,
+  CLIP_TTL_MS,
   EMPTY_SENTENCE,
   LOADING_SENTENCE,
   MASK,
@@ -32,6 +33,10 @@ function host(): RegisterHost {
     error: signal(undefined),
     pending: signal(false),
   };
+}
+
+function setPath(state: RegisterHost, path: string): void {
+  (state.path as unknown as { set(v: string): void }).set(path);
 }
 
 function json(status: number, data: unknown): Response {
@@ -261,6 +266,8 @@ describe("Register screen", () => {
       "[data-select-copy]",
     ) as HTMLInputElement | null;
     expect(fallback?.value === FIELD).toBe(true);
+    expect(fallback?.getAttribute("value") === FIELD).toBe(false);
+    expect(fallback?.outerHTML.includes(FIELD)).toBe(false);
   });
 
   test("missing clipboard API offers select-to-copy", async () => {
@@ -290,6 +297,7 @@ describe("Register screen", () => {
       "[data-select-copy]",
     ) as HTMLInputElement | null;
     expect(fallback?.value === FIELD).toBe(true);
+    expect(fallback?.getAttribute("value") === FIELD).toBe(false);
   });
 
   test("press-and-hold reveals then hides the opened value", async () => {
@@ -314,6 +322,52 @@ describe("Register screen", () => {
     show?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     expect(valueEl?.textContent === FIELD).toBe(true);
     document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    expect(valueEl?.textContent).toBe(MASK);
+  });
+
+  test("Space and Enter hold-to-reveal; repeat is ignored", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    const valueEl = root.querySelector("[data-value]");
+    const show = root.querySelector('[data-action="show"]');
+    expect(valueEl?.textContent).toBe(MASK);
+    show?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+    expect(valueEl?.textContent === FIELD).toBe(true);
+    show?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+        repeat: true,
+      }),
+    );
+    expect(valueEl?.textContent === FIELD).toBe(true);
+    document.dispatchEvent(
+      new KeyboardEvent("keyup", { key: " ", bubbles: true, cancelable: true }),
+    );
+    expect(valueEl?.textContent).toBe(MASK);
+    show?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    expect(valueEl?.textContent === FIELD).toBe(true);
+    document.dispatchEvent(
+      new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }),
+    );
     expect(valueEl?.textContent).toBe(MASK);
   });
 
@@ -440,5 +494,158 @@ describe("Register screen", () => {
     rb?.click();
     await flush();
     expect(api.posts).toEqual([{ name: NAME, version: 1 }]);
+  });
+
+  test("clearDek drops opened values and Copy no-ops", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    let wrote: string | undefined;
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          wrote = text;
+        },
+      },
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    clearDek();
+    await flush();
+    expect(root.textContent?.includes(NO_DEK_SENTENCE)).toBe(true);
+    expect(root.querySelector('[data-action="copy"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    await flush();
+    expect(wrote === undefined).toBe(true);
+  });
+
+  test("Copy does not write after leave, and abandonRegister blanks the clipboard", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    let wrote: string | undefined;
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          wrote = text;
+        },
+      },
+    });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+    await flush();
+    setPath(state, "/");
+    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    await flush();
+    expect(wrote === undefined).toBe(true);
+    setPath(state, "/register");
+    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    await flush();
+    expect(wrote === FIELD).toBe(true);
+    abandonRegister(state);
+    await flush();
+    expect(wrote === "").toBe(true);
+  });
+
+  test("Copy blanks the clipboard after the short TTL", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({
+      entries: [
+        {
+          name: NAME,
+          ciphertext: sealed(dek, NAME, { token: FIELD }),
+          meta: { provider: "github", fields: ["token"] },
+        },
+      ],
+    });
+    let wrote: string | undefined;
+    const origTimeout = globalThis.setTimeout;
+    const due: Array<() => void> = [];
+    globalThis.setTimeout = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+      if (ms === CLIP_TTL_MS && typeof fn === "function") {
+        due.push(() => {
+          (fn as () => void)();
+        });
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return origTimeout(fn as TimerHandler, ms, ...args);
+    }) as typeof setTimeout;
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          wrote = text;
+        },
+      },
+    });
+    try {
+      renderRegister(state, root);
+      await flush();
+      (root.querySelector(`[data-name="${NAME}"]`) as HTMLButtonElement | null)?.click();
+      await flush();
+      (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+      await flush();
+      expect(wrote === FIELD).toBe(true);
+      expect(due.length).toBe(1);
+      due[0]?.();
+      await flush();
+      expect(wrote === "").toBe(true);
+    } finally {
+      globalThis.setTimeout = origTimeout;
+    }
+  });
+
+  test("wizard Cancel and Save drop typed field values", async () => {
+    const dek = mintDek();
+    setDek(dek);
+    mockApi({ entries: [] });
+    renderRegister(state, root);
+    await flush();
+    (root.querySelector('[data-action="add"]') as HTMLButtonElement | null)?.click();
+    const sel = root.querySelector("#provider") as HTMLSelectElement | null;
+    sel!.value = "github";
+    sel!.dispatchEvent(new Event("change", { bubbles: true }));
+    const token = root.querySelector(
+      'input[data-wizard-field="token"]',
+    ) as HTMLInputElement | null;
+    token!.value = FIELD;
+    token!.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(token?.getAttribute("value") === FIELD).toBe(false);
+    expect(token?.outerHTML.includes(FIELD)).toBe(false);
+    (root.querySelector('[data-action="cancel"]') as HTMLButtonElement | null)?.click();
+    expect(root.querySelector("[data-wizard]")).toBeNull();
+    (root.querySelector('[data-action="add"]') as HTMLButtonElement | null)?.click();
+    const sel2 = root.querySelector("#provider") as HTMLSelectElement | null;
+    sel2!.value = "github";
+    sel2!.dispatchEvent(new Event("change", { bubbles: true }));
+    const again = root.querySelector(
+      'input[data-wizard-field="token"]',
+    ) as HTMLInputElement | null;
+    expect(again).not.toBeNull();
+    expect(again?.value === "").toBe(true);
   });
 });

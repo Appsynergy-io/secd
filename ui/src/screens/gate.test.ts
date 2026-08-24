@@ -6,6 +6,7 @@ import {
   LAST_KEY,
   RATE_SENTENCE,
 } from "../lib/api.ts";
+import { clearDek, getDek, mintDek, setDek } from "../lib/crypto.ts";
 import { signal } from "../lib/signal.ts";
 import {
   CLIP_FAIL_SENTENCE,
@@ -134,6 +135,7 @@ describe("gate screen", () => {
     globalThis.fetch = origFetch;
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: origNav });
     localStorage.clear();
+    clearDek();
   });
 
   test("loadRemember reads secd.last", () => {
@@ -234,12 +236,18 @@ describe("gate screen", () => {
     renderGate(state, root, hostFor(state, root, []));
     const btn = root.querySelector('[data-action="copy"]') as HTMLButtonElement | null;
     expect(btn?.textContent).toBe("Copy");
+    expect(btn?.getAttribute("aria-label")).toBe("Copy error");
+    expect(root.querySelector('[data-copy="value"]')?.getAttribute("aria-label")).toBe(
+      "Error text",
+    );
     expect((root.querySelector('[data-copy="value"]') as HTMLInputElement | null)?.value).toBe(
       FAIL_SENTENCE,
     );
     btn?.click();
     await Bun.sleep(1);
     expect(btn?.textContent).toBe("Copy");
+    expect(btn?.disabled).toBe(false);
+    expect(btn?.hasAttribute("disabled")).toBe(false);
     expect(wrote).toBe(FAIL_SENTENCE);
     finish?.();
     await Bun.sleep(1);
@@ -257,7 +265,7 @@ describe("gate screen", () => {
     expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
     expect(root.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
     expect((root.querySelector('[data-copy="value"]') as HTMLInputElement | null)?.value).toBe(
-      CLIP_FAIL_SENTENCE,
+      FAIL_SENTENCE,
     );
   });
 
@@ -301,6 +309,7 @@ describe("gate screen", () => {
 
   test("POST login 200 then GET /session 401 stays on / with .error", async () => {
     const root = document.createElement("div");
+    setDek(mintDek());
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = reqUrl(input);
       const method = String(init?.method ?? "GET");
@@ -327,5 +336,194 @@ describe("gate screen", () => {
     expect(navs).toEqual([]);
     expect(state.session.get()).toBeUndefined();
     expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    expect(getDek()).toBeUndefined();
+  });
+
+  test("remembered-password then different account Continues via start, not login", async () => {
+    remember(false);
+    const NEW = "c@d.e";
+    const posts: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      posts.push({
+        url: reqUrl(input),
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      return new Response(JSON.stringify({ method: "password" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState({ password: "twelve-chars!" });
+    renderGate(state, root, hostFor(state, root, []));
+    (root.querySelector('[data-action="different"]') as HTMLButtonElement | null)?.click();
+    const email = root.querySelector("#email") as HTMLInputElement | null;
+    expect(email).not.toBeNull();
+    email!.value = NEW;
+    email!.dispatchEvent(new Event("input", { bubbles: true }));
+    submit(root);
+    await Bun.sleep(1);
+    expect(posts[0]).toEqual({ url: "/api/auth/start", body: { email: NEW } });
+    expect(posts.every((p) => !String(p.url).includes("password"))).toBe(true);
+  });
+
+  test("unwrap miss after a previous setDek yields getDek() undefined", async () => {
+    setDek(mintDek());
+    expect(getDek()).toBeDefined();
+    const root = document.createElement("div");
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "POST" && url === "/api/auth/password/login") {
+        return new Response(JSON.stringify({ wraps: [] }), { status: 200 });
+      }
+      if (method === "GET" && url === "/api/session") {
+        return new Response(JSON.stringify(liveSession()), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = makeState({ email: EMAIL, password: "twelve-chars!", method: "password" });
+    const navs: string[] = [];
+    const host = hostFor(state, root, navs, async () => {
+      const res = await fetch("/api/session");
+      if (res.status === 200) {
+        state.session.set(liveSession());
+      } else {
+        state.session.set(undefined);
+      }
+    });
+    renderGate(state, root, host);
+    submit(root);
+    await Bun.sleep(1);
+    expect(getDek()).toBeUndefined();
+  });
+
+  test("method=register + passkey never calls passkey login endpoints", async () => {
+    const urls: string[] = [];
+    const prf = new Uint8Array(32).fill(9);
+    const raw = new Uint8Array([10, 11, 12, 13]);
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        credentials: {
+          create: async () => ({
+            id: "cred",
+            type: "public-key",
+            rawId: raw.buffer,
+            response: {
+              clientDataJSON: new Uint8Array([1]).buffer,
+              attestationObject: new Uint8Array([2]).buffer,
+            },
+            getClientExtensionResults: () => ({
+              prf: { results: { first: prf.buffer } },
+            }),
+          }),
+          get: async () => {
+            throw new Error("login get must not run");
+          },
+        },
+      },
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = reqUrl(input);
+      urls.push(url);
+      if (url.includes("/api/auth/passkey/register/start")) {
+        return new Response(
+          JSON.stringify({ handle: "h1", publicKey: { challenge: "AQIDBA" } }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/api/auth/passkey/register/finish")) {
+        return new Response("{}", { status: 200 });
+      }
+      if (url === "/api/session") {
+        return new Response(JSON.stringify(liveSession()), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState({ email: EMAIL, method: "register" });
+    const host = hostFor(state, root, [], async () => {
+      state.session.set(liveSession());
+    });
+    renderGate(state, root, host);
+    (root.querySelector('[data-action="passkey"]') as HTMLButtonElement | null)?.click();
+    await Bun.sleep(20);
+    expect(urls.some((u) => u.includes("/api/auth/passkey/login"))).toBe(false);
+    expect(urls.some((u) => u.includes("/api/auth/passkey/register/start"))).toBe(true);
+  });
+
+  test("getPasskey without PRF performs no finish request", async () => {
+    const urls: string[] = [];
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        credentials: {
+          get: async () => ({
+            id: "cred",
+            type: "public-key",
+            rawId: new Uint8Array([1, 2, 3, 4]).buffer,
+            response: {
+              clientDataJSON: new Uint8Array([1]).buffer,
+              authenticatorData: new Uint8Array([2]).buffer,
+              signature: new Uint8Array([3]).buffer,
+            },
+          }),
+        },
+      },
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = reqUrl(input);
+      urls.push(url);
+      if (url === "/api/auth/passkey/login/start") {
+        return new Response(
+          JSON.stringify({ handle: "h1", publicKey: { challenge: "AQIDBA" } }),
+          { status: 200 },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState({ email: EMAIL, method: "passkey" });
+    const navs: string[] = [];
+    renderGate(state, root, hostFor(state, root, navs));
+    (root.querySelector('[data-action="passkey"]') as HTMLButtonElement | null)?.click();
+    await Bun.sleep(20);
+    expect(urls.some((u) => u.includes("/login/finish"))).toBe(false);
+    expect(state.path.get()).toBe("/");
+    expect(state.session.get()).toBeUndefined();
+    expect(navs).toEqual([]);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+  });
+
+  test("Use a password instead focuses #password", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const state = makeState({ email: EMAIL, method: "either" });
+    renderGate(state, root, hostFor(state, root, []));
+    expect(root.querySelector("#password")).toBeNull();
+    (root.querySelector('[data-action="password"]') as HTMLButtonElement | null)?.click();
+    expect(document.activeElement).toBe(root.querySelector("#password"));
+    root.remove();
+  });
+
+  test("Use a different account focuses #email", () => {
+    remember(false);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const state = makeState();
+    renderGate(state, root, hostFor(state, root, []));
+    (root.querySelector('[data-action="different"]') as HTMLButtonElement | null)?.click();
+    expect(document.activeElement).toBe(root.querySelector("#email"));
+    root.remove();
+  });
+
+  test("clipboard refusal focuses the select-to-copy field", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
+    const state = makeState({ email: EMAIL, error: FAIL_SENTENCE });
+    renderGate(state, root, hostFor(state, root, []));
+    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    await Bun.sleep(1);
+    expect(document.activeElement).toBe(root.querySelector('[data-copy="value"]'));
+    root.remove();
   });
 });

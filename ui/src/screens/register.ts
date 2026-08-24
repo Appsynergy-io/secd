@@ -16,6 +16,7 @@ import {
   checkName,
   fromHex,
   getDek,
+  onDekClear,
   open,
   seal,
   toHex,
@@ -38,6 +39,7 @@ export const NAME_FIRST_SENTENCE = "Name the secret first.";
 export const REQUIRED_SENTENCE = "Fill every required field.";
 export const BAD_NAME_SENTENCE = "That name is not allowed.";
 export const VERSIONS_FAIL_SENTENCE = "Versions did not load.";
+export const CLIP_TTL_MS = 15_000;
 
 export type RegisterHost = {
   path: { get(): string };
@@ -82,6 +84,8 @@ type Store = {
 };
 
 const stores = new WeakMap<object, Store>();
+const dekWatches = new WeakMap<object, { unsub: () => void; root: HTMLElement }>();
+const clipTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 
 function freshStore(): Store {
   return {
@@ -111,13 +115,25 @@ function storeOf(host: object): Store {
 }
 
 export function abandonRegister(host: object): void {
-  const s = stores.get(host);
-  if (!s) {
-    return;
+  const watch = dekWatches.get(host);
+  if (watch) {
+    watch.unsub();
+    dekWatches.delete(host);
   }
-  s.gen += 1;
-  s.opened.clear();
-  stores.delete(host);
+  const pending = clipTimers.get(host);
+  if (pending !== undefined) {
+    clearTimeout(pending);
+    clipTimers.delete(host);
+  }
+  const s = stores.get(host);
+  if (s) {
+    s.gen += 1;
+    s.opened.clear();
+    s.wizardValues = new Map();
+    delete s.wizardError;
+    stores.delete(host);
+  }
+  blankClipboard();
 }
 
 export function versionStamp(created: string): string {
@@ -132,6 +148,9 @@ function el<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (v === undefined || v === false) {
+      continue;
+    }
+    if ((tag === "input" || tag === "textarea") && k === "value") {
       continue;
     }
     if (v === true) {
@@ -149,6 +168,62 @@ function el<K extends keyof HTMLElementTagNameMap>(
     node.append(typeof child === "string" ? document.createTextNode(child) : child);
   }
   return node;
+}
+
+function blankClipboard(): void {
+  const clip = globalThis.navigator?.clipboard;
+  if (clip === undefined || typeof clip.writeText !== "function") {
+    return;
+  }
+  try {
+    const p = clip.writeText("");
+    if (p !== undefined && typeof (p as Promise<void>).catch === "function") {
+      void (p as Promise<void>).catch(() => {
+        /* clipboard blank is best-effort */
+      });
+    }
+  } catch {
+    /* clipboard blank is best-effort */
+  }
+}
+
+function scheduleClipboardBlank(host: object): void {
+  const prev = clipTimers.get(host);
+  if (prev !== undefined) {
+    clearTimeout(prev);
+  }
+  clipTimers.set(
+    host,
+    setTimeout(() => {
+      clipTimers.delete(host);
+      blankClipboard();
+    }, CLIP_TTL_MS),
+  );
+}
+
+function dropPlaintext(store: Store): void {
+  store.opened.clear();
+  store.wizardValues = new Map();
+  delete store.wizardError;
+}
+
+function watchDek(state: RegisterHost, root: HTMLElement): void {
+  const prev = dekWatches.get(state);
+  if (prev && prev.root === root) {
+    return;
+  }
+  prev?.unsub();
+  const unsub = onDekClear(() => {
+    const s = stores.get(state);
+    if (!s) {
+      return;
+    }
+    dropPlaintext(s);
+    if (state.path.get() === "/register") {
+      paint(state, root);
+    }
+  });
+  dekWatches.set(state, { unsub, root });
 }
 
 function currentLayout(): LayoutMode {
@@ -320,6 +395,7 @@ function putEntries(rows: unknown[]): Array<Record<string, unknown>> {
 
 export function renderRegister(state: RegisterHost, root: HTMLElement): void {
   const store = storeOf(state);
+  watchDek(state, root);
   paint(state, root);
   if (store.status === "idle") {
     void loadVault(state, root);
@@ -328,6 +404,9 @@ export function renderRegister(state: RegisterHost, root: HTMLElement): void {
 
 function paint(state: RegisterHost, root: HTMLElement): void {
   const store = storeOf(state);
+  if (getDek() === undefined) {
+    dropPlaintext(store);
+  }
   const layout = currentLayout();
   const selectedName = store.selected;
   const selected =
@@ -533,24 +612,50 @@ function fieldRow(
     },
     ["Show"],
   );
-  show.addEventListener("pointerdown", (ev) => {
-    ev.preventDefault();
+  const startHold = (): void => {
     if (value === undefined || disabled) {
       return;
     }
     store.revealed = { name: item.name, key };
     valueEl.textContent = value;
+  };
+  const stopHold = (): void => {
+    if (store.revealed?.name === item.name && store.revealed.key === key) {
+      delete store.revealed;
+      valueEl.textContent = MASK;
+    }
+  };
+  show.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    startHold();
     const doc = show.ownerDocument;
     const hide = () => {
-      if (store.revealed?.name === item.name && store.revealed.key === key) {
-        delete store.revealed;
-        valueEl.textContent = MASK;
-      }
+      stopHold();
       doc.removeEventListener("pointerup", hide);
       doc.removeEventListener("pointercancel", hide);
     };
     doc.addEventListener("pointerup", hide);
     doc.addEventListener("pointercancel", hide);
+  });
+  show.addEventListener("keydown", (ev) => {
+    if (ev.repeat) {
+      return;
+    }
+    if (ev.key !== " " && ev.key !== "Enter") {
+      return;
+    }
+    ev.preventDefault();
+    startHold();
+    const doc = show.ownerDocument;
+    const hide = (up: KeyboardEvent) => {
+      if (up.key !== ev.key) {
+        return;
+      }
+      up.preventDefault();
+      stopHold();
+      doc.removeEventListener("keyup", hide);
+    };
+    doc.addEventListener("keyup", hide);
   });
   const row = el("div", { class: "secd-stack", "data-field": key }, [
     el("p", {}, [key]),
@@ -572,7 +677,6 @@ function fieldRow(
       "data-select-copy": "",
       value,
     });
-    fallback.value = value;
     row.append(fallback);
   }
   return row;
@@ -706,6 +810,7 @@ function wizardPane(state: RegisterHost, root: HTMLElement, store: Store): HTMLE
   );
   cancel.addEventListener("click", () => {
     store.wizard = false;
+    store.wizardValues = new Map();
     delete store.wizardError;
     paint(state, root);
   });
@@ -795,6 +900,9 @@ async function onCopy(
   key: string,
 ): Promise<void> {
   const store = storeOf(state);
+  if (getDek() === undefined) {
+    return;
+  }
   const value = store.opened.get(name)?.fields[key];
   if (value === undefined || store.saving) {
     return;
@@ -809,13 +917,18 @@ async function onCopy(
   }
   paint(state, root);
   const gen = store.gen;
+  if (!stillHere(state, gen, store)) {
+    return;
+  }
   try {
     await clip.writeText(value);
     if (!stillHere(state, gen, store)) {
+      blankClipboard();
       return;
     }
     store.copyState = { name, key, label: "Copied" };
     paint(state, root);
+    scheduleClipboardBlank(state);
   } catch {
     if (!stillHere(state, gen, store)) {
       return;
@@ -860,7 +973,13 @@ async function onSave(state: RegisterHost, root: HTMLElement): Promise<void> {
   paint(state, root);
   const gen = store.gen;
   try {
-    const sealed = toHex(seal(dek, n, new TextEncoder().encode(JSON.stringify(payload))));
+    let sealed: string;
+    const pt = new TextEncoder().encode(JSON.stringify(payload));
+    try {
+      sealed = toHex(seal(dek, n, pt));
+    } finally {
+      zeroizeBytes(pt);
+    }
     const current = await req("GET", vaultUrl());
     if (!stillHere(state, gen, store)) {
       return;
@@ -897,6 +1016,8 @@ async function onSave(state: RegisterHost, root: HTMLElement): Promise<void> {
       return;
     }
     store.wizard = false;
+    store.wizardValues = new Map();
+    delete store.wizardError;
     delete store.selected;
     store.status = "idle";
     await loadVault(state, root);

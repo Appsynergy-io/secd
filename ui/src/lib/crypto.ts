@@ -40,6 +40,7 @@ export type Wrap = {
 let dek: Uint8Array | undefined;
 let dekDeadline = 0;
 let dekTimer: ReturnType<typeof setTimeout> | undefined;
+const dekClearListeners = new Set<() => void>();
 
 function fail(code: CryptoError): CryptoFail {
   return new CryptoFail(code);
@@ -57,7 +58,7 @@ export function setDek(bytes: Uint8Array): void {
   if (bytes.length !== KEY_LEN) {
     throw fail("key");
   }
-  clearDek();
+  dropDek();
   dek = new Uint8Array(KEY_LEN);
   dek.set(bytes);
   dekDeadline = Date.now() + CONSOLE_TTL_MS;
@@ -77,7 +78,15 @@ export function getDek(): Uint8Array | undefined {
   return dek;
 }
 
-export function clearDek(): void {
+/** Fired after the tab DEK is dropped (TTL, sign-out, failed unwrap). Not on replace. */
+export function onDekClear(fn: () => void): () => void {
+  dekClearListeners.add(fn);
+  return () => {
+    dekClearListeners.delete(fn);
+  };
+}
+
+function dropDek(): void {
   if (dekTimer !== undefined) {
     clearTimeout(dekTimer);
     dekTimer = undefined;
@@ -87,6 +96,13 @@ export function clearDek(): void {
     dek = undefined;
   }
   dekDeadline = 0;
+}
+
+export function clearDek(): void {
+  dropDek();
+  for (const fn of [...dekClearListeners]) {
+    fn();
+  }
 }
 
 function randomBytes(n: number): Uint8Array {
