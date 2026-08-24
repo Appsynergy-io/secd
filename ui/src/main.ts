@@ -4,10 +4,8 @@ import {
   FAIL_SENTENCE,
   LAST_FACTOR_SENTENCE,
   LAST_KEY,
-  NO_EPH_SENTENCE,
   RATE_SENTENCE,
   REMEMBER_DAYS,
-  deviceApproveUrl,
   deviceQuery,
   layoutMode,
   logoutUrl,
@@ -27,6 +25,7 @@ import {
   getPasskey,
   serializeCredential,
 } from "./lib/webauthn.ts";
+import { renderDevice } from "./screens/device.ts";
 
 export type Screen = "gate" | "device" | "register" | "activity" | "account";
 
@@ -276,6 +275,7 @@ export type AppState = {
   different: ReturnType<typeof signal<boolean>>;
   revealPassword: ReturnType<typeof signal<boolean>>;
   userCode: ReturnType<typeof signal<string>>;
+  eph: ReturnType<typeof signal<string>>;
   passkeys: ReturnType<typeof signal<PasskeyRow[] | undefined>>;
 };
 
@@ -355,7 +355,7 @@ function nav(state: AppState, screen: Screen): HTMLElement {
   );
 }
 
-function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
+function renderGate(state: AppState, root: HTMLElement): void {
   const view = resolveGate({
     session: state.session.get(),
     remember: loadRemember(),
@@ -368,7 +368,7 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
   const form = el("form", { class: "secd-auth-form" });
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    void (device ? approve(state) : onContinue(state));
+    void onContinue(state);
   });
   if (view.showEmail) {
     const input = el("input", {
@@ -396,22 +396,7 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
     });
     form.append(el("label", { for: "password" }, ["Password"]), input);
   }
-  if (device) {
-    const input = el("input", {
-      id: "user_code",
-      class: "mono",
-      name: "user_code",
-      autocomplete: "off",
-      value: state.userCode.get(),
-    });
-    input.addEventListener("input", () => {
-      state.userCode.set(input.value);
-    });
-    form.append(el("label", { for: "user_code" }, ["Device code"]), input);
-    form.append(
-      el("button", { type: "submit", "data-action": "approve" }, ["Approve"]),
-    );
-  } else if (view.showApprove) {
+  if (view.showApprove) {
     form.append(
       el("button", { type: "submit", "data-action": "approve" }, ["Approve"]),
     );
@@ -452,9 +437,8 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
     form.append(diff);
   }
   const err = state.error.get();
-  const page = el("div", { class: "app", "data-page": device ? "device" : "gate" }, [
-    el("h1", {}, [device ? "Approve this machine." : "secd"]),
-    device && !state.userCode.get() ? el("p", {}, [NO_EPH_SENTENCE]) : "",
+  const page = el("div", { class: "app", "data-page": "gate" }, [
+    el("h1", {}, ["secd"]),
     form,
     err ? el("p", { class: "error" }, [err]) : "",
   ]);
@@ -598,7 +582,13 @@ export function render(state: AppState): void {
   }
   switch (screen) {
     case "device":
-      renderGate(state, root, true);
+      if (state.session.get() === undefined) {
+        renderGate(state, root);
+      } else {
+        renderDevice(state, root, () => {
+          navigate(state, "/register");
+        });
+      }
       break;
     case "register":
       renderRegister(state, root);
@@ -610,7 +600,7 @@ export function render(state: AppState): void {
       renderAccount(state, root);
       break;
     default:
-      renderGate(state, root, false);
+      renderGate(state, root);
   }
 }
 
@@ -680,7 +670,7 @@ async function onContinue(state: AppState): Promise<void> {
         return;
       }
       saveRemember(email, false);
-      navigate(state, "/register");
+      navigate(state, state.userCode.get() === "" ? "/register" : "/device");
       return;
     }
     const res = await req("POST", startUrl(), { email: state.email.get() });
@@ -737,28 +727,7 @@ async function onPasskey(state: AppState): Promise<void> {
       return;
     }
     saveRemember(state.email.get(), true);
-    navigate(state, "/register");
-  } catch {
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    state.pending.set(false);
-    render(state);
-  }
-}
-
-async function approve(state: AppState): Promise<void> {
-  if (state.pending.get()) {
-    return;
-  }
-  state.pending.set(true);
-  state.error.set(undefined);
-  try {
-    const res = await req("POST", deviceApproveUrl(), {
-      user_code: state.userCode.get(),
-    });
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-    }
+    navigate(state, state.userCode.get() === "" ? "/register" : "/device");
   } catch {
     state.error.set(FAIL_SENTENCE);
   } finally {
@@ -936,7 +905,7 @@ function asSession(v: unknown): SessionInfo | undefined {
 }
 
 function boot(root: HTMLElement): void {
-  const { code } = deviceQuery(globalThis.location.search);
+  const { code, eph } = deviceQuery(globalThis.location.search);
   const bootPath = initialPath(globalThis.location.pathname, code);
   if (bootPath !== globalThis.location.pathname) {
     globalThis.history.replaceState(null, "", bootPath);
@@ -952,6 +921,7 @@ function boot(root: HTMLElement): void {
     different: signal(false),
     revealPassword: signal(false),
     userCode: signal(code),
+    eph: signal(eph),
     passkeys: signal(undefined),
   };
   mounted = root;

@@ -196,6 +196,13 @@ button:disabled {
   color: var(--color-text);
   border-inline-start: 2px solid var(--color-danger);
   padding-inline-start: var(--space);
+  user-select: all;
+}
+
+[data-device],
+[data-session-email],
+[data-session-id] {
+  user-select: all;
 }
 
 .list,

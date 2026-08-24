@@ -284,6 +284,7 @@ function accountState(q: {
     different: signal(false),
     revealPassword: signal(false),
     userCode: signal(""),
+    eph: signal(""),
     passkeys: signal(q.passkeys),
   };
 }
@@ -794,6 +795,7 @@ describe("Gate login", () => {
       different: signal(false),
       revealPassword: signal(false),
       userCode: signal(""),
+      eph: signal(""),
       passkeys: signal(undefined),
     };
   }
@@ -823,6 +825,41 @@ describe("Gate login", () => {
       expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
     });
   }
+
+  test("login with a CLI user code lands on the device screen", async () => {
+    const root = document.createElement("div");
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "POST" && url === "/api/auth/password/login") {
+        return new Response("{}", { status: 200 });
+      }
+      if (method === "GET" && url === "/api/session") {
+        return new Response(
+          JSON.stringify({
+            email: "a@b.c",
+            session_id: "s1",
+            has_passkey: false,
+            has_password: true,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = gateState();
+    state.userCode.set("ABCD-EFGH");
+    state.eph.set("11".repeat(32));
+    renderAccount(state, root);
+    render(state);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(state.path.get()).toBe("/device");
+    expect(state.session.get()?.session_id).toBe("s1");
+    expect(root.querySelector('[data-page="device"]')).not.toBeNull();
+    expect(root.querySelector("[data-device]")?.textContent).toBe("ABCD-EFGH");
+    expect(root.querySelector("[data-session-id]")?.textContent).toBe("s1");
+  });
 });
 
 describe("Register layout", () => {
@@ -858,6 +895,7 @@ describe("Register layout", () => {
       different: signal(false),
       revealPassword: signal(false),
       userCode: signal(""),
+      eph: signal(""),
       passkeys: signal(undefined),
     };
   }
