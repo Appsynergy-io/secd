@@ -212,6 +212,8 @@ button:disabled {
 [data-device],
 [data-session-email],
 [data-session-id],
+[data-passkey-id],
+[data-copy-fallback],
 [data-select-copy],
 [data-field="hash"],
 [data-field="prev"] {
