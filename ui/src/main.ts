@@ -11,6 +11,8 @@ import {
   deviceQuery,
   layoutMode,
   logoutUrl,
+  passkeyDeletePath,
+  passkeysUrl,
   passwordLoginUrl,
   removePasskeyEnabled,
   req,
@@ -100,11 +102,16 @@ export function initialPath(path: string, userCode: string): string {
 
 type AuthMethod = "register" | "passkey" | "password" | "either";
 
-type SessionInfo = {
+export type SessionInfo = {
   email: string;
   has_passkey: boolean;
   has_password: boolean;
   session_id: string;
+};
+
+export type PasskeyRow = {
+  id: string;
+  created: string;
 };
 
 type Remembered = {
@@ -255,7 +262,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-type AppState = {
+export type AppState = {
   path: ReturnType<typeof signal<string>>;
   email: ReturnType<typeof signal<string>>;
   password: ReturnType<typeof signal<string>>;
@@ -266,7 +273,11 @@ type AppState = {
   different: ReturnType<typeof signal<boolean>>;
   revealPassword: ReturnType<typeof signal<boolean>>;
   userCode: ReturnType<typeof signal<string>>;
+  passkeys: ReturnType<typeof signal<PasskeyRow[] | undefined>>;
 };
+
+let mounted: HTMLElement | undefined;
+const passkeyLoads = new WeakSet<object>();
 
 function loadRemember(): Remembered | undefined {
   try {
@@ -485,34 +496,39 @@ function renderActivity(state: AppState, root: HTMLElement): void {
   );
 }
 
-function renderAccount(state: AppState, root: HTMLElement): void {
+export function renderAccount(state: AppState, root: HTMLElement): void {
+  mounted = root;
   const session = state.session.get();
   const factors = dekFactors({
     has_passkey: session?.has_passkey === true,
     has_password: session?.has_password === true,
   });
   const last = lastFactor(factors);
-  const passkeyCount = session?.has_passkey === true ? 1 : 0;
-  const removeOk = removePasskeyEnabled(
-    passkeyCount,
-    session?.has_password === true,
-  );
+  const loaded = state.passkeys.get();
+  const removeId = loaded?.[0]?.id;
+  const removeOk =
+    !last &&
+    removeId !== undefined &&
+    removeId !== "" &&
+    removePasskeyEnabled(loaded?.length ?? 0, session?.has_password === true);
   const links = factors.map((factor) => {
     const label = factor === "passkey" ? "Passkey" : "Password";
     const children: Array<Node | string> = [el("span", { class: "mono" }, [label])];
     if (factor === "passkey") {
-      children.push(
-        el(
-          "button",
-          {
-            type: "button",
-            class: "danger",
-            "data-action": "remove",
-            disabled: removeOk ? undefined : true,
-          },
-          ["Remove"],
-        ),
+      const remove = el(
+        "button",
+        {
+          type: "button",
+          class: "danger",
+          "data-action": "remove",
+          disabled: removeOk ? undefined : true,
+        },
+        ["Remove"],
       );
+      remove.addEventListener("click", () => {
+        void onRemovePasskey(state);
+      });
+      children.push(remove);
     }
     return el("li", { class: "chain-link", "data-factor": factor }, children);
   });
@@ -537,10 +553,12 @@ function renderAccount(state: AppState, root: HTMLElement): void {
       await req("POST", logoutUrl());
       const crypto = await import("./lib/crypto.ts");
       crypto.clearDek();
+      state.passkeys.set(undefined);
       state.session.set(undefined);
       navigate(state, "/");
     })();
   });
+  const err = state.error.get();
   root.replaceChildren(
     el("div", { class: "app", "data-page": "account" }, [
       nav(state, "account"),
@@ -552,15 +570,20 @@ function renderAccount(state: AppState, root: HTMLElement): void {
       el("h2", {}, ["Passkeys"]),
       el("div", { class: "list", "data-list": "passkeys" }),
       out,
+      err ? el("p", { class: "error" }, [err]) : "",
     ]),
   );
+  if (loaded === undefined) {
+    void loadAccountPasskeys(state);
+  }
 }
 
 function render(state: AppState): void {
-  const root = document.getElementById("app");
+  const root = mounted ?? document.getElementById("app");
   if (!root) {
     return;
   }
+  mounted = root;
   const screen = screenFromPath(state.path.get());
   switch (screen) {
     case "device":
@@ -688,6 +711,85 @@ async function approve(state: AppState): Promise<void> {
   }
 }
 
+async function onRemovePasskey(state: AppState): Promise<void> {
+  if (state.pending.get()) {
+    return;
+  }
+  const session = state.session.get();
+  const factors = dekFactors({
+    has_passkey: session?.has_passkey === true,
+    has_password: session?.has_password === true,
+  });
+  if (lastFactor(factors)) {
+    return;
+  }
+  const id = state.passkeys.get()?.[0]?.id;
+  if (id === undefined || id === "") {
+    return;
+  }
+  state.pending.set(true);
+  state.error.set(undefined);
+  try {
+    const res = await req("DELETE", passkeyDeletePath(id));
+    if (res.status !== 200) {
+      state.error.set(sentenceFor(res.status));
+      return;
+    }
+    state.passkeys.set(undefined);
+    await loadSession(state);
+  } catch {
+    state.error.set(FAIL_SENTENCE);
+  } finally {
+    state.pending.set(false);
+    render(state);
+  }
+}
+
+async function loadAccountPasskeys(state: AppState): Promise<void> {
+  if (state.passkeys.get() !== undefined || passkeyLoads.has(state)) {
+    return;
+  }
+  passkeyLoads.add(state);
+  try {
+    const res = await req("GET", passkeysUrl());
+    if (res.status !== 200) {
+      state.passkeys.set([]);
+      return;
+    }
+    state.passkeys.set(parsePasskeys(res.data));
+  } catch {
+    state.passkeys.set([]);
+  } finally {
+    passkeyLoads.delete(state);
+    render(state);
+  }
+}
+
+function parsePasskeys(v: unknown): PasskeyRow[] {
+  const rec = typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
+  const rows = rec?.["passkeys"];
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  const out: PasskeyRow[] = [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) {
+      continue;
+    }
+    const r = row as Record<string, unknown>;
+    const id = r["id"];
+    if (typeof id !== "string" || id === "") {
+      continue;
+    }
+    const created = r["created"];
+    out.push({
+      id,
+      created: typeof created === "string" ? created : "",
+    });
+  }
+  return out;
+}
+
 async function loadSession(state: AppState): Promise<void> {
   const res = await req("GET", sessionUrl());
   if (res.status !== 200) {
@@ -733,7 +835,9 @@ function boot(root: HTMLElement): void {
     different: signal(false),
     revealPassword: signal(false),
     userCode: signal(code),
+    passkeys: signal(undefined),
   };
+  mounted = root;
   state.path.subscribe(() => {
     render(state);
   });

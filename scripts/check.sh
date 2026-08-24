@@ -188,8 +188,8 @@ lane_ui() {
   "$root/scripts/build-ui.sh"
 }
 
-# JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/fonts, the
-# source tree, so a hashed copy in dist cannot hide a budget breach.
+# JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/dist/fonts so a
+# missed copy cannot hide a 404.
 UI_BUN_JS_CSS_MAX=153600
 UI_BUN_FONTS_MAX=71680
 
@@ -210,14 +210,15 @@ for path in dist.rglob("*"):
         js_css += path.stat().st_size
 if js_css > js_css_max:
     sys.exit(f"ui-bun: ui/dist JS+CSS {js_css} bytes exceeds {js_css_max}")
-fonts_dir = root / "ui" / "fonts"
+fonts_dir = dist / "fonts"
+if not fonts_dir.is_dir():
+    sys.exit("ui-bun: missing ui/dist/fonts")
 fonts = 0
-if fonts_dir.is_dir():
-    for path in fonts_dir.rglob("*"):
-        if path.is_file():
-            fonts += path.stat().st_size
+for path in fonts_dir.rglob("*"):
+    if path.is_file():
+        fonts += path.stat().st_size
 if fonts > fonts_max:
-    sys.exit(f"ui-bun: ui/fonts {fonts} bytes exceeds {fonts_max}")
+    sys.exit(f"ui-bun: ui/dist/fonts {fonts} bytes exceeds {fonts_max}")
 print(f"ui-bun: JS+CSS {js_css} bytes, fonts {fonts} bytes")
 PY
 }

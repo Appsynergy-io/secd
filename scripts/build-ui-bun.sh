@@ -43,4 +43,6 @@ bun build ./index.html \
   --external="*.woff2"
 mkdir -p dist/fonts
 cp -a fonts/*.woff2 fonts/OFL.txt dist/fonts/
+[[ -f dist/fonts/geist-latin-wght-normal.woff2 && -f dist/fonts/geist-mono-latin-wght-normal.woff2 ]] \
+  || secd_die "build-ui-bun: missing Geist faces in dist/fonts"
 echo "build-ui-bun: ui/dist"

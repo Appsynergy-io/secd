@@ -12,15 +12,16 @@ describe("token layer", () => {
     expect(css).toContain("--color-success: oklch(70% 0.15 145)");
     expect(css).toContain("--color-warning: oklch(78% 0.13 80)");
     expect(css).toContain("--color-danger: oklch(64% 0.18 25)");
-    expect(css).toContain(
-      "--color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 12%)",
-    );
+    expect(css).toContain("--color-border: oklch(50% 0.012 250)");
   });
 
   test("light theme is defined under data-theme and prefers-color-scheme", () => {
     expect(css).toContain(':root[data-theme="light"]');
     expect(css).toContain("@media (prefers-color-scheme: light)");
     expect(css).toContain("--space: 8px");
+    expect(css).toContain("--color-accent: oklch(45% 0.14 78)");
+    expect(css).toContain("--color-on-accent: oklch(99% 0.012 250)");
+    expect(css).toContain("--color-danger: oklch(52% 0.18 25)");
   });
 
   test("latin Geist faces are file URLs, not data URIs or Google Fonts", () => {
