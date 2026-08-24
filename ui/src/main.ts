@@ -278,6 +278,7 @@ export type AppState = {
 
 let mounted: HTMLElement | undefined;
 const passkeyLoads = new WeakSet<object>();
+let logoutGen = 0;
 
 function loadRemember(): Remembered | undefined {
   try {
@@ -549,14 +550,7 @@ export function renderAccount(state: AppState, root: HTMLElement): void {
     "Sign out",
   ]);
   out.addEventListener("click", () => {
-    void (async () => {
-      await req("POST", logoutUrl());
-      const crypto = await import("./lib/crypto.ts");
-      crypto.clearDek();
-      state.passkeys.set(undefined);
-      state.session.set(undefined);
-      navigate(state, "/");
-    })();
+    void onLogout(state);
   });
   const err = state.error.get();
   root.replaceChildren(
@@ -585,6 +579,10 @@ function render(state: AppState): void {
   }
   mounted = root;
   const screen = screenFromPath(state.path.get());
+  if (screen !== "account") {
+    state.passkeys.set(undefined);
+    passkeyLoads.delete(state);
+  }
   switch (screen) {
     case "device":
       renderGate(state, root, true);
@@ -608,6 +606,26 @@ export function navigate(state: AppState, to: string): void {
     globalThis.history.pushState(null, "", to);
   }
   state.path.set(to);
+}
+
+async function onLogout(state: AppState): Promise<void> {
+  state.pending.set(true);
+  state.error.set(undefined);
+  logoutGen += 1;
+  try {
+    await req("POST", logoutUrl());
+  } catch {
+    state.error.set(FAIL_SENTENCE);
+  } finally {
+    const crypto = await import("./lib/crypto.ts");
+    crypto.clearDek();
+    state.passkeys.set(undefined);
+    passkeyLoads.delete(state);
+    state.session.set(undefined);
+    state.pending.set(false);
+    navigate(state, "/");
+    render(state);
+  }
 }
 
 async function onContinue(state: AppState): Promise<void> {
@@ -727,10 +745,14 @@ async function onRemovePasskey(state: AppState): Promise<void> {
   if (id === undefined || id === "") {
     return;
   }
+  const gen = logoutGen;
   state.pending.set(true);
   state.error.set(undefined);
   try {
     const res = await req("DELETE", passkeyDeletePath(id));
+    if (gen !== logoutGen) {
+      return;
+    }
     if (res.status !== 200) {
       state.error.set(sentenceFor(res.status));
       return;
@@ -738,30 +760,62 @@ async function onRemovePasskey(state: AppState): Promise<void> {
     state.passkeys.set(undefined);
     await loadSession(state);
   } catch {
+    if (gen !== logoutGen) {
+      return;
+    }
     state.error.set(FAIL_SENTENCE);
   } finally {
+    if (gen !== logoutGen) {
+      return;
+    }
     state.pending.set(false);
     render(state);
   }
 }
 
 async function loadAccountPasskeys(state: AppState): Promise<void> {
-  if (state.passkeys.get() !== undefined || passkeyLoads.has(state)) {
+  if (
+    state.passkeys.get() !== undefined ||
+    passkeyLoads.has(state) ||
+    state.session.get() === undefined
+  ) {
     return;
   }
   passkeyLoads.add(state);
+  const gen = logoutGen;
   try {
     const res = await req("GET", passkeysUrl());
+    if (
+      gen !== logoutGen ||
+      state.session.get() === undefined ||
+      screenFromPath(state.path.get()) !== "account"
+    ) {
+      return;
+    }
     if (res.status !== 200) {
-      state.passkeys.set([]);
+      state.error.set(sentenceFor(res.status));
       return;
     }
     state.passkeys.set(parsePasskeys(res.data));
   } catch {
-    state.passkeys.set([]);
+    if (
+      gen !== logoutGen ||
+      state.session.get() === undefined ||
+      screenFromPath(state.path.get()) !== "account"
+    ) {
+      return;
+    }
+    state.error.set(FAIL_SENTENCE);
   } finally {
-    passkeyLoads.delete(state);
-    render(state);
+    const stale = gen !== logoutGen;
+    const left =
+      state.session.get() === undefined || screenFromPath(state.path.get()) !== "account";
+    if (stale || left || state.passkeys.get() !== undefined) {
+      passkeyLoads.delete(state);
+    }
+    if (!stale) {
+      render(state);
+    }
   }
 }
 
@@ -791,7 +845,11 @@ function parsePasskeys(v: unknown): PasskeyRow[] {
 }
 
 async function loadSession(state: AppState): Promise<void> {
+  const gen = logoutGen;
   const res = await req("GET", sessionUrl());
+  if (gen !== logoutGen) {
+    return;
+  }
   if (res.status !== 200) {
     state.session.set(undefined);
     return;

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { LAST_FACTOR_SENTENCE } from "./lib/api.ts";
+import { FAIL_SENTENCE, LAST_FACTOR_SENTENCE } from "./lib/api.ts";
+import { clearDek, getDek, mintDek, setDek } from "./lib/crypto.ts";
 import { signal } from "./lib/signal.ts";
 import {
   dekFactors,
@@ -278,12 +279,33 @@ function accountState(q: {
   };
 }
 
+function reqUrl(input: RequestInfo | URL): string {
+  return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+}
+
 describe("Account chain", () => {
   const origDocument = globalThis.document;
   const origFetch = globalThis.fetch;
+  const origLocation = globalThis.location;
+  const origHistory = globalThis.history;
 
   beforeEach(() => {
     installDom();
+    const loc = { pathname: "/account" };
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      writable: true,
+      value: loc,
+    });
+    Object.defineProperty(globalThis, "history", {
+      configurable: true,
+      writable: true,
+      value: {
+        pushState(_s: unknown, _t: unknown, url: string) {
+          loc.pathname = String(url);
+        },
+      },
+    });
   });
 
   afterEach(() => {
@@ -292,7 +314,18 @@ describe("Account chain", () => {
       writable: true,
       value: origDocument,
     });
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      writable: true,
+      value: origLocation,
+    });
+    Object.defineProperty(globalThis, "history", {
+      configurable: true,
+      writable: true,
+      value: origHistory,
+    });
     globalThis.fetch = origFetch;
+    clearDek();
   });
 
   test("one factor sets data-last, disables Remove, and shows chain-reason", () => {
@@ -359,5 +392,154 @@ describe("Account chain", () => {
       method: "DELETE",
       url: "/api/auth/passkeys/pk-1",
     });
+  });
+
+  test("GET /passkeys failure sets error and does not record an empty list", async () => {
+    const root = document.createElement("div");
+    let n = 0;
+    globalThis.fetch = (async () => {
+      n += 1;
+      return new Response("{}", { status: 500 });
+    }) as unknown as typeof fetch;
+    const state = accountState({ has_passkey: true, has_password: true });
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    expect(n).toBe(1);
+    expect(state.passkeys.get()).toBeUndefined();
+    expect(state.error.get()).toBe(FAIL_SENTENCE);
+    expect(root.querySelector('[data-action="remove"]')?.hasAttribute("disabled")).toBe(true);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    expect(n).toBe(1);
+  });
+
+  test("leaving Account lets the next visit retry GET /passkeys", async () => {
+    const root = document.createElement("div");
+    let n = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url.includes("/passkeys")) {
+        n += 1;
+        return new Response("{}", { status: 500 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const state = accountState({ has_passkey: true, has_password: true });
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    expect(n).toBe(1);
+    (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    expect(state.passkeys.get()).toBeUndefined();
+    state.session.set({
+      email: "a@b.c",
+      has_passkey: true,
+      has_password: true,
+      session_id: "s1",
+    });
+    state.path.set("/account");
+    state.error.set(undefined);
+    renderAccount(state, root);
+    await Bun.sleep(1);
+    expect(n).toBe(2);
+  });
+
+  test("Sign out clears DEK and session when POST throws", async () => {
+    const root = document.createElement("div");
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "POST" && url.includes("/logout")) {
+        throw new Error("network");
+      }
+      return new Response(JSON.stringify({ passkeys: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    setDek(mintDek());
+    expect(getDek()?.length).toBe(32);
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(getDek()).toBeUndefined();
+    expect(state.session.get()).toBeUndefined();
+    expect(state.passkeys.get()).toBeUndefined();
+    expect(state.path.get()).toBe("/");
+  });
+
+  test("in-flight GET /passkeys is ignored after Sign out", async () => {
+    const root = document.createElement("div");
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "GET" && url.includes("/passkeys")) {
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const state = accountState({ has_passkey: true, has_password: true });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    finish?.(
+      new Response(JSON.stringify({ passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }] }), {
+        status: 200,
+      }),
+    );
+    await Bun.sleep(1);
+    expect(state.passkeys.get()).toBeUndefined();
+    expect(state.session.get()).toBeUndefined();
+  });
+
+  test("in-flight Remove loadSession is dropped after Sign out", async () => {
+    const root = document.createElement("div");
+    let finishDelete: ((value: Response) => void) | undefined;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = reqUrl(input);
+      const method = String(init?.method ?? "GET");
+      if (method === "DELETE") {
+        return new Promise<Response>((resolve) => {
+          finishDelete = resolve;
+        });
+      }
+      if (method === "GET" && url.includes("/session")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              email: "a@b.c",
+              session_id: "s1",
+              has_passkey: true,
+              has_password: true,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const state = accountState({
+      has_passkey: true,
+      has_password: true,
+      passkeys: [{ id: "pk-1", created: "2026-01-01T00:00:00Z" }],
+    });
+    renderAccount(state, root);
+    (root.querySelector('[data-action="remove"]') as unknown as FakeNode | null)?.click();
+    (root.querySelector('[data-action="logout"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    finishDelete?.(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await Bun.sleep(1);
+    expect(state.session.get()).toBeUndefined();
+    expect(state.passkeys.get()).toBeUndefined();
   });
 });
