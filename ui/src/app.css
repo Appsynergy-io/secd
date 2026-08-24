@@ -35,7 +35,7 @@
   --color-text: oklch(96% 0.012 250);
   --color-text-muted: oklch(74% 0.012 250);
   --color-text-dim: oklch(62% 0.012 250);
-  --color-border: oklch(50% 0.012 250);
+  --color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 12%);
   --color-accent: oklch(76% 0.14 78);
   --color-accent-soft: oklch(76% 0.14 78 / 0.18);
   --color-on-accent: oklch(16% 0.012 250);
@@ -56,11 +56,7 @@
     --color-text: oklch(16% 0.012 250);
     --color-text-muted: oklch(38% 0.012 250);
     --color-text-dim: oklch(50% 0.012 250);
-    --color-border: oklch(50% 0.012 250);
-    --color-accent: oklch(45% 0.14 78);
     --color-accent-soft: oklch(76% 0.14 78 / 0.12);
-    --color-on-accent: oklch(99% 0.012 250);
-    --color-danger: oklch(52% 0.18 25);
   }
 }
 
@@ -71,11 +67,7 @@
   --color-text: oklch(16% 0.012 250);
   --color-text-muted: oklch(38% 0.012 250);
   --color-text-dim: oklch(50% 0.012 250);
-  --color-border: oklch(50% 0.012 250);
-  --color-accent: oklch(45% 0.14 78);
   --color-accent-soft: oklch(76% 0.14 78 / 0.12);
-  --color-on-accent: oklch(99% 0.012 250);
-  --color-danger: oklch(52% 0.18 25);
 }
 
 *,
@@ -118,13 +110,12 @@ body {
 }
 
 .nav a {
-  color: var(--color-accent);
+  color: var(--color-text);
   text-decoration: none;
   padding: var(--space);
 }
 
 .nav a[aria-current="page"] {
-  color: var(--color-text);
   text-decoration: underline;
 }
 
@@ -182,13 +173,13 @@ button {
 
 button.secondary {
   background: transparent;
-  color: var(--color-accent);
+  color: var(--color-text);
   border: 1px solid var(--color-border);
 }
 
 button.danger {
   background: transparent;
-  color: var(--color-danger);
+  color: var(--color-text);
   border: 1px solid var(--color-danger);
 }
 
@@ -197,8 +188,11 @@ button:disabled {
   opacity: 0.5;
 }
 
-.error {
-  color: var(--color-danger);
+.error,
+.chain-reason {
+  color: var(--color-text);
+  border-inline-start: 2px solid var(--color-danger);
+  padding-inline-start: var(--space);
 }
 
 .list,
@@ -326,10 +320,6 @@ code {
   height: 0;
 }
 
-.chain-reason {
-  color: var(--color-danger);
-}
-
 .chain:not([data-last="1"]) .chain-reason {
   display: none;
 }
@@ -349,8 +339,16 @@ input:focus-visible {
 }
 
 @media (hover: hover) {
+  .nav a:hover {
+    text-decoration: underline;
+  }
+
   button:hover:not(:disabled) {
-    box-shadow: 0 0 0 1px var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-accent);
+  }
+
+  button.secondary:hover:not(:disabled) {
+    box-shadow: 0 0 0 2px var(--color-accent);
   }
 
   button.danger:hover:not(:disabled) {

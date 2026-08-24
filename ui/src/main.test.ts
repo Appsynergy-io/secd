@@ -9,6 +9,7 @@ import {
   lastFactor,
   render,
   renderAccount,
+  renderRegister,
   resolveGate,
   screenFromPath,
   SCREENS,
@@ -622,5 +623,71 @@ describe("Account chain", () => {
     await Bun.sleep(1);
     expect(state.session.get()).toBeUndefined();
     expect(state.passkeys.get()).toBeUndefined();
+  });
+});
+
+describe("Register layout", () => {
+  const origDocument = globalThis.document;
+  const origWidth = globalThis.innerWidth;
+
+  beforeEach(() => {
+    installDom();
+  });
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      writable: true,
+      value: origDocument,
+    });
+    Object.defineProperty(globalThis, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: origWidth,
+    });
+  });
+
+  function registerState(): AppState {
+    return {
+      path: signal("/register"),
+      email: signal(""),
+      password: signal(""),
+      error: signal(undefined),
+      pending: signal(false),
+      session: signal(undefined),
+      method: signal(undefined),
+      different: signal(false),
+      revealPassword: signal(false),
+      userCode: signal(""),
+      passkeys: signal(undefined),
+    };
+  }
+
+  test(">=900px is list | inspector and has no sheet", () => {
+    Object.defineProperty(globalThis, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 900,
+    });
+    const root = document.createElement("div");
+    renderRegister(registerState(), root);
+    expect(root.querySelector('[data-layout="list-inspector"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="list"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="inspector"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
+  });
+
+  test("below 900px is list-only: no inspector, no sheet until a secret is selected", () => {
+    Object.defineProperty(globalThis, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 899,
+    });
+    const root = document.createElement("div");
+    renderRegister(registerState(), root);
+    expect(root.querySelector('[data-layout="list-only"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="list"]')).not.toBeNull();
+    expect(root.querySelector('[data-pane="inspector"]')).toBeNull();
+    expect(root.querySelector('[data-pane="sheet"]')).toBeNull();
   });
 });

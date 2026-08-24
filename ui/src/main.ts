@@ -74,7 +74,10 @@ export function lastFactor(factors: readonly DekFactor[]): boolean {
 }
 
 export function currentLayout(widthPx = globalThis.innerWidth): LayoutMode {
-  const w = typeof widthPx === "number" && Number.isFinite(widthPx) ? widthPx : BREAKPOINT_PX;
+  const w =
+    typeof widthPx === "number" && Number.isFinite(widthPx) && widthPx > 0
+      ? widthPx
+      : BREAKPOINT_PX;
   return layoutMode(w);
 }
 
@@ -458,28 +461,36 @@ function renderGate(state: AppState, root: HTMLElement, device: boolean): void {
   root.replaceChildren(page);
 }
 
-function renderRegister(state: AppState, root: HTMLElement): void {
+function inspectorCard(): HTMLElement {
+  return el("div", { class: "card", "data-pane": "inspector" }, [
+    el("h2", { class: "mono" }, ["Secret"]),
+    el("p", {}, ["Select a secret"]),
+  ]);
+}
+
+export function renderRegister(state: AppState, root: HTMLElement): void {
+  mounted = root;
   const copy = el("button", { type: "button", "data-action": "copy" }, ["Copy"]);
   copy.addEventListener("click", () => {
     void copyText("••••••••");
   });
   const layout = currentLayout();
+  const workspace = el("div", { class: "workspace" }, [
+    el("div", { class: "card", "data-pane": "list" }, [
+      el("div", { class: "list", "data-list": "secrets" }, [
+        el("p", {}, ["No secrets yet."]),
+      ]),
+    ]),
+  ]);
+  if (layout === "list-inspector") {
+    workspace.append(inspectorCard());
+  }
   root.replaceChildren(
     el("div", { class: "app", "data-page": "register", "data-layout": layout }, [
       nav(state, "register"),
       el("h1", {}, ["Register"]),
       el("p", {}, ["Copy is the default action."]),
-      el("div", { class: "workspace" }, [
-        el("div", { class: "card", "data-pane": "list" }, [
-          el("div", { class: "list", "data-list": "secrets" }, [
-            el("p", {}, ["No secrets yet."]),
-          ]),
-        ]),
-        el("div", { class: "card", "data-pane": "inspector" }, [
-          el("h2", { class: "mono" }, ["Secret"]),
-          el("p", {}, ["Select a secret"]),
-        ]),
-      ]),
+      workspace,
       copy,
     ]),
   );
@@ -939,6 +950,9 @@ function boot(root: HTMLElement): void {
   });
   globalThis.addEventListener("popstate", () => {
     state.path.set(globalThis.location.pathname);
+  });
+  globalThis.addEventListener("resize", () => {
+    render(state);
   });
   void (async () => {
     try {
