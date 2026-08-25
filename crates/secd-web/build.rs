@@ -4,7 +4,7 @@
 //! deadlocks the parent cargo lock and silently embeds a stale console.
 //! scripts/check.sh and scripts/release.sh both build ui/dist before
 //! touching this crate. If dist/ is missing or older than its inputs, say
-//! so and stop. Never invoke bun or scripts/build-ui-bun.sh from here.
+//! so and stop. Never invoke bun or scripts/build-ui.sh from here.
 
 use std::fs;
 use std::io::Write;
@@ -24,7 +24,7 @@ fn main() {
         root.join("ui/bun.lock"),
         root.join("ui/bunfig.toml"),
         root.join("ui/fonts"),
-        root.join("scripts/build-ui-bun.sh"),
+        root.join("scripts/build-ui.sh"),
     ];
     println!("cargo:rerun-if-changed={}", dist.display());
     for path in &inputs {
@@ -33,13 +33,15 @@ fn main() {
     }
 
     if !dist.is_dir() || !index.is_file() {
-        panic!("missing ui/dist — run scripts/build-ui-bun.sh (or scripts/check.sh ui-bun) first");
+        panic!("missing ui/dist — run scripts/build-ui.sh (or scripts/check.sh ui) first");
     }
 
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     collect_files(&dist, "", &mut files);
     if files.iter().all(|(rel, _)| rel != "index.html") {
-        panic!("missing ui/dist/index.html — run scripts/build-ui-bun.sh (or scripts/check.sh ui-bun) first");
+        panic!(
+            "missing ui/dist/index.html — run scripts/build-ui.sh (or scripts/check.sh ui) first"
+        );
     }
     for (_, path) in &files {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -52,8 +54,8 @@ fn main() {
         let changed = newest(path);
         if changed > built {
             panic!(
-                "ui/dist is older than {} — run scripts/build-ui-bun.sh \
-                 (or scripts/check.sh ui-bun) to rebuild the console",
+                "ui/dist is older than {} — run scripts/build-ui.sh \
+                 (or scripts/check.sh ui) to rebuild the console",
                 path.display()
             );
         }

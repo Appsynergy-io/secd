@@ -13,7 +13,6 @@ useDefault = true
 description = "build output, which git does not track and a commit cannot carry"
 paths = [
   '''^target/''',
-  '''^crates/secd-ui/dist/''',
   '''^ui/dist/''',
   '''^ui/node_modules/''',
   '''^\.tmp/''',

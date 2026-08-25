@@ -98,7 +98,7 @@ jobs:
             sudo apt-get install -y musl-tools
           }
       - if: matrix.image == 'yes'
-        run: scripts/check.sh ui-bun
+        run: scripts/check.sh ui
       - name: build
         env:
           TRIPLE: ${{ matrix.target }}

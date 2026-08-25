@@ -3,8 +3,8 @@ description: Toolchain and shared build cache, identical in every job.
 runs:
   using: composite
   steps:
-    # rust-toolchain.toml is the single source of truth for channel,
-    # components and targets; this materialises it.
+    # rust-toolchain.toml is the single source of truth for channel and
+    # components; this materialises it.
     - shell: bash
       run: rustup show active-toolchain
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

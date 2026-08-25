@@ -6,8 +6,7 @@
 #   scripts/check.sh                 every lane
 #   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
 #   scripts/check.sh secrets         gitleaks over the tree and the history
-#   scripts/check.sh ui              build crates/secd-ui/dist
-#   scripts/check.sh ui-bun          build ui/dist, tsc, bun test
+#   scripts/check.sh ui              build ui/dist, tsc, bun test
 #   scripts/check.sh bun-audit       bun audit against ui/bun.lock
 #   scripts/check.sh crypto-parity   secd-core fixture vs the bun console crypto chunk
 #   scripts/check.sh clippy test     one or more named lanes
@@ -35,9 +34,8 @@ ZIZMOR_PINNED="1.29.0"
 GITLEAKS_PINNED="8.30.1"
 
 # Cheapest first: a formatting slip should not cost a full test run. `ui`
-# builds the wasm console. `ui-bun` builds ui/dist; secd-web/build.rs refuses
-# to build without a fresh one. Both consoles stay until Teardown.
-ALL_LANES=(contract shell workflow secrets fmt ui ui-bun bun-audit crypto-parity clippy test test-release compile-fail release-dry)
+# builds ui/dist; secd-web/build.rs refuses to build without a fresh one.
+ALL_LANES=(contract shell workflow secrets fmt ui bun-audit crypto-parity clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -183,17 +181,13 @@ lane_release_dry() {
   "$root/scripts/dev/release-dry.sh"
 }
 
-lane_ui() {
-  "$root/scripts/build-ui.sh"
-}
-
 # JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/dist/fonts so a
 # missed copy cannot hide a 404.
-UI_BUN_JS_CSS_MAX=153600
-UI_BUN_FONTS_MAX=71680
+UI_JS_CSS_MAX=153600
+UI_FONTS_MAX=71680
 
-ui_bun_budgets() {
-  python3 - "$root" "$UI_BUN_JS_CSS_MAX" "$UI_BUN_FONTS_MAX" <<'PY'
+ui_budgets() {
+  python3 - "$root" "$UI_JS_CSS_MAX" "$UI_FONTS_MAX" <<'PY'
 from pathlib import Path
 import sys
 
@@ -202,27 +196,27 @@ js_css_max = int(sys.argv[2])
 fonts_max = int(sys.argv[3])
 dist = root / "ui" / "dist"
 if not dist.is_dir():
-    sys.exit("ui-bun: missing ui/dist")
+    sys.exit("ui: missing ui/dist")
 js_css = 0
 for path in dist.rglob("*"):
     if path.is_file() and path.suffix.lower() in {".js", ".css"}:
         js_css += path.stat().st_size
 if js_css > js_css_max:
-    sys.exit(f"ui-bun: ui/dist JS+CSS {js_css} bytes exceeds {js_css_max}")
+    sys.exit(f"ui: ui/dist JS+CSS {js_css} bytes exceeds {js_css_max}")
 fonts_dir = dist / "fonts"
 if not fonts_dir.is_dir():
-    sys.exit("ui-bun: missing ui/dist/fonts")
+    sys.exit("ui: missing ui/dist/fonts")
 fonts = 0
 for path in fonts_dir.rglob("*"):
     if path.is_file():
         fonts += path.stat().st_size
 if fonts > fonts_max:
-    sys.exit(f"ui-bun: ui/dist/fonts {fonts} bytes exceeds {fonts_max}")
-print(f"ui-bun: JS+CSS {js_css} bytes, fonts {fonts} bytes")
+    sys.exit(f"ui: ui/dist/fonts {fonts} bytes exceeds {fonts_max}")
+print(f"ui: JS+CSS {js_css} bytes, fonts {fonts} bytes")
 PY
 }
 
-lane_ui_bun() {
+lane_ui() {
   secd_ensure_bun
   (
     cd "$root/ui"
@@ -234,10 +228,10 @@ lane_ui_bun() {
     first="$(mktemp -d)"
     second="$(mktemp -d)"
     trap 'rm -rf "$first" "$second"' EXIT
-    "$root/scripts/build-ui-bun.sh"
+    "$root/scripts/build-ui.sh"
     cp -a "$root/ui/dist/." "$first/"
-    ui_bun_budgets
-    "$root/scripts/build-ui-bun.sh"
+    ui_budgets
+    "$root/scripts/build-ui.sh"
     cp -a "$root/ui/dist/." "$second/"
     if ! diff -rq "$first" "$second" >/dev/null; then
       diff -rq "$first" "$second" >&2 || true
@@ -267,7 +261,7 @@ lane_crypto_parity() {
   if ! cmp -s "$fixture" "$generated"; then
     secd_die "crypto-parity: fixture is stale"
   fi
-  "$root/scripts/build-ui-bun.sh"
+  "$root/scripts/build-ui.sh"
   secd_ensure_bun
   (
     cd "$root/ui"
@@ -345,7 +339,6 @@ dispatch_lane() {
     secrets) lane_secrets ;;
     fmt) lane_fmt ;;
     ui) lane_ui ;;
-    ui-bun) lane_ui_bun ;;
     bun-audit) lane_bun_audit ;;
     crypto-parity) lane_crypto_parity ;;
     clippy) lane_clippy ;;

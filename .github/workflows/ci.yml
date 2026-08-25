@@ -91,52 +91,28 @@ jobs:
           fi
           # Every job downstream of this is `if: code == true`, and the gate
           # reads a skipped job as success -- so anything missing from this
-          # pattern is not "cheaper", it is unchecked. vendor/ is here because
-          # crates/secd-ui links against it and a change there once passed the
-          # gate with every cargo lane skipped; scripts/, deploy/ and .github/
-          # are here because they decide how the code is built and shipped;
-          # contract.toml and every *.md are here because tests/plan_contract.rs
-          # reads them at run time -- T_CONTRACT_AGENTS_EQ_CLAUDE compares
-          # AGENTS.md with CLAUDE.md and T_CONTRACT_ONE_DOC enumerates every
-          # tracked markdown file, so a documentation-only pull request that
-          # skipped `test` could merge those two invariants broken. keys/ and
-          # packaging/ for the same reason: keys/cosign.pub is include_str!'d
-          # into src/update.rs and tests/release_scripts.rs asserts it matches
-          # the copy embedded in packaging/install.sh. ui/ is the bun console;
-          # a change there once would skip ui-bun the same way vendor/ skipped
-          # the wasm console.
+          # pattern is not "cheaper", it is unchecked. scripts/, deploy/ and
+          # .github/ are here because they decide how the code is built and
+          # shipped; contract.toml and every *.md are here because
+          # tests/plan_contract.rs reads them at run time --
+          # T_CONTRACT_AGENTS_EQ_CLAUDE compares AGENTS.md with CLAUDE.md and
+          # T_CONTRACT_ONE_DOC enumerates every tracked markdown file, so a
+          # documentation-only pull request that skipped `test` could merge
+          # those two invariants broken. keys/ and packaging/ for the same
+          # reason: keys/cosign.pub is include_str!'d into src/update.rs and
+          # tests/release_scripts.rs asserts it matches the copy embedded in
+          # packaging/install.sh. ui/ is the bun console.
           if git diff --name-only "$base" HEAD \
-            | grep -qE '^(src/|crates/|tests/|tools/|vendor/|scripts/|deploy/|packaging/|skills/|keys/|ui/|\.github/|contract\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|.*\.md$)'; then
+            | grep -qE '^(src/|crates/|tests/|tools/|scripts/|deploy/|packaging/|skills/|keys/|ui/|\.github/|contract\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|.*\.md$)'; then
             echo "code=true" >>"$GITHUB_OUTPUT"
           else
             echo "code=false" >>"$GITHUB_OUTPUT"
           fi
 
-  # The wasm console. secd-web no longer embeds it; both consoles stay until
-  # Teardown.
-  ui:
-    name: ui — wasm console into crates/secd-ui/dist
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [fast, changes]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-      - run: scripts/check.sh ui
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ui-dist
-          path: crates/secd-ui/dist
-          if-no-files-found: error
-          retention-days: 1
-
   # crates/secd-web/build.rs refuses to build without a fresh ui/dist, so this
   # is a prerequisite of every cargo job rather than a peer lane.
-  ui-bun:
-    name: ui-bun — bun console into ui/dist
+  ui:
+    name: ui — bun console into ui/dist
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
@@ -146,10 +122,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: scripts/check.sh ui-bun
+      - run: scripts/check.sh ui
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ui-bun-dist
+          name: ui-dist
           path: ui/dist
           if-no-files-found: error
           retention-days: 1
@@ -183,7 +159,7 @@ jobs:
   clippy:
     name: clippy — workspace, all targets, warnings denied
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui-bun, changes]
+    needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -193,7 +169,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-bun-dist
+          name: ui-dist
           path: ui/dist
       # Built from this same commit in this same run, but the checkout is
       # newer than it, so build.rs would otherwise call it stale.
@@ -203,7 +179,7 @@ jobs:
   test:
     name: test — workspace, debug
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui-bun, changes]
+    needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -213,7 +189,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-bun-dist
+          name: ui-dist
           path: ui/dist
       - run: find ui/dist -type f -exec touch {} +
       - uses: ./.github/actions/testdeps
@@ -230,7 +206,7 @@ jobs:
   test-release:
     name: test-release — workspace, release profile
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui-bun, changes]
+    needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -240,7 +216,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-bun-dist
+          name: ui-dist
           path: ui/dist
       - run: find ui/dist -type f -exec touch {} +
       - uses: ./.github/actions/testdeps
@@ -522,7 +498,6 @@ jobs:
       - fast
       - secrets
       - ui
-      - ui-bun
       - bun-audit
       - crypto-parity
       - clippy
@@ -569,7 +544,7 @@ jobs:
   # main only, and not part of the gate. This is the sole writer of the shared
   # cache: caches are branch-scoped, so without a run on the default branch
   # every pull request starts cold. Running every lane means the saved target/
-  # holds the debug, release and wasm32 artifact sets the lanes restore.
+  # holds the debug and release artifact sets the lanes restore.
   #
   # fetch-depth: 0 because every lane includes `secrets`, whose history half
   # refuses a shallow clone.
