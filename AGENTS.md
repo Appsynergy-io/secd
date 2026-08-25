@@ -90,7 +90,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
 - Toolchain, bun 1.4.0, `wasm-bindgen-cli` and `wasm-opt` are pinned by version and sha256. bun is never the curl|bash installer. `wasm-bindgen-cli` must match the `wasm-bindgen` version in `Cargo.lock`; `wasm-opt` is mandatory, because applying it conditionally made CI and a laptop ship different wasm.
-- `crates/secd-ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes cargo itself; run `scripts/check.sh ui` first.
+- `ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes the bundler; run `scripts/check.sh ui-bun` first. `crates/secd-ui` stays until Teardown.
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.
 - `gate` is the only check the ruleset requires, so every ci job but `warm` is one of its `needs`; `plan-contract.sh` proves it. A job outside that list can fail while the gate reports success.

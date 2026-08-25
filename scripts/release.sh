@@ -302,7 +302,7 @@ case "$target" in
         echo "release: crates/secd-web missing" >&2
         exit 1
       fi
-      "$root/scripts/build-ui.sh"
+      "$root/scripts/build-ui-bun.sh"
     fi
     RUSTFLAGS="$musl_flags" cargo build --locked --release --target "$target" --bin secd
     if [[ "$do_image" -eq 1 ]]; then

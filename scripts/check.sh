@@ -34,10 +34,9 @@ ACTIONLINT_PINNED="1.7.7"
 ZIZMOR_PINNED="1.29.0"
 GITLEAKS_PINNED="8.30.1"
 
-# Cheapest first: a formatting slip should not cost a full test run. `ui` is a
-# prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
-# refuses to build without a fresh crates/secd-ui/dist. `ui-bun` builds the
-# bun console into ui/dist; both consoles stay until Teardown.
+# Cheapest first: a formatting slip should not cost a full test run. `ui`
+# builds the wasm console. `ui-bun` builds ui/dist; secd-web/build.rs refuses
+# to build without a fresh one. Both consoles stay until Teardown.
 ALL_LANES=(contract shell workflow secrets fmt ui ui-bun bun-audit crypto-parity clippy test test-release compile-fail release-dry)
 
 usage() {

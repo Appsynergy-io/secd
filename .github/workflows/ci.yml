@@ -112,11 +112,10 @@ jobs:
             echo "code=false" >>"$GITHUB_OUTPUT"
           fi
 
-  # crates/secd-web/build.rs refuses to build without a fresh
-  # crates/secd-ui/dist, so this is a prerequisite of every cargo job rather
-  # than a peer lane.
+  # The wasm console. secd-web no longer embeds it; both consoles stay until
+  # Teardown.
   ui:
-    name: ui — wasm bundle for secd-web
+    name: ui — wasm console into crates/secd-ui/dist
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
@@ -134,6 +133,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # crates/secd-web/build.rs refuses to build without a fresh ui/dist, so this
+  # is a prerequisite of every cargo job rather than a peer lane.
   ui-bun:
     name: ui-bun — bun console into ui/dist
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
@@ -146,6 +147,12 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: scripts/check.sh ui-bun
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-bun-dist
+          path: ui/dist
+          if-no-files-found: error
+          retention-days: 1
 
   bun-audit:
     name: bun-audit — bun audit against ui/bun.lock
@@ -176,7 +183,7 @@ jobs:
   clippy:
     name: clippy — workspace, all targets, warnings denied
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui, changes]
+    needs: [ui-bun, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -186,17 +193,17 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-dist
-          path: crates/secd-ui/dist
+          name: ui-bun-dist
+          path: ui/dist
       # Built from this same commit in this same run, but the checkout is
       # newer than it, so build.rs would otherwise call it stale.
-      - run: touch crates/secd-ui/dist/*
+      - run: find ui/dist -type f -exec touch {} +
       - run: scripts/check.sh clippy
 
   test:
     name: test — workspace, debug
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui, changes]
+    needs: [ui-bun, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -206,9 +213,9 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-dist
-          path: crates/secd-ui/dist
-      - run: touch crates/secd-ui/dist/*
+          name: ui-bun-dist
+          path: ui/dist
+      - run: find ui/dist -type f -exec touch {} +
       - uses: ./.github/actions/testdeps
         id: testdeps
       - name: test
@@ -223,7 +230,7 @@ jobs:
   test-release:
     name: test-release — workspace, release profile
     if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
-    needs: [ui, changes]
+    needs: [ui-bun, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -233,9 +240,9 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ui-dist
-          path: crates/secd-ui/dist
-      - run: touch crates/secd-ui/dist/*
+          name: ui-bun-dist
+          path: ui/dist
+      - run: find ui/dist -type f -exec touch {} +
       - uses: ./.github/actions/testdeps
         id: testdeps
       - name: test-release

@@ -16,7 +16,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 const HSTS: &str = "max-age=63072000";
-const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-BNvK97dfoiB5WN/zZRF5YN83VZ4bVP1SYnNJ+7pQOWk='; style-src 'self' 'sha256-Zt0GvCiuTuKfb8onn0gRkfdttdIaLVp/y71isjQND6o=' 'sha256-qpmQISDq1j6svEmvD/Prj059Gn2skArZPQjIjFHKdrY='; font-src 'self' data:; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
+const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; upgrade-insecure-requests";
 const PERM: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(self), publickey-credentials-get=(self), screen-wake-lock=(), serial=(), storage-access=(), usb=(), window-management=(), xr-spatial-tracking=()";
 
 const SEC: &[&str] = &[
@@ -111,6 +111,16 @@ fn hv(h: &HeaderMap, name: &str) -> String {
         .to_string()
 }
 
+fn quoted_attr(html: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = html.find(&needle)? + needle.len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    let raw = &rest[..end];
+    let trimmed = raw.trim_start_matches("./");
+    Some(format!("/{trimmed}"))
+}
+
 #[test]
 fn T_HDR_HSTS() {
     block_on(async {
@@ -131,6 +141,12 @@ fn T_HDR_CSP() {
         assert_eq!(csp, CSP);
         assert!(!csp.contains("'unsafe-inline'"));
         assert!(!csp.contains("'unsafe-eval'"));
+        assert!(!csp.contains("wasm-unsafe-eval"));
+        assert!(!csp.contains("sha256-"));
+        assert!(!csp.contains("data:"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(csp.contains("font-src 'self'"));
     });
 }
 
@@ -244,8 +260,14 @@ fn T_HDR_JSON_CT() {
 fn T_HDR_HTML_CT() {
     block_on(async {
         let h = fresh();
-        let (_, hdrs, _) = exchange(&h.app, Method::GET, "/", None, None).await;
+        let (s, hdrs, body) = exchange(&h.app, Method::GET, "/", None, None).await;
+        assert_eq!(s, StatusCode::OK);
         assert_eq!(hv(&hdrs, "content-type"), "text/html; charset=UTF-8");
+        let (s2, hdrs2, body2) =
+            exchange(&h.app, Method::GET, "/no-such-console-path", None, None).await;
+        assert_eq!(s2, StatusCode::OK);
+        assert_eq!(hv(&hdrs2, "content-type"), "text/html; charset=UTF-8");
+        assert_eq!(body, body2);
     });
 }
 
@@ -253,9 +275,16 @@ fn T_HDR_HTML_CT() {
 fn T_HDR_JS_CT() {
     block_on(async {
         let h = fresh();
-        let (s, hdrs, _) = exchange(&h.app, Method::GET, "/secd-ui.js", None, None).await;
+        let (s, _, body) = exchange(&h.app, Method::GET, "/", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        let html = String::from_utf8_lossy(&body);
+        let src = quoted_attr(&html, "src").expect("console script");
+        assert!(src.ends_with(".js"), "{src}");
+        let (s, hdrs, js) = exchange(&h.app, Method::GET, &src, None, None).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(hv(&hdrs, "content-type"), "text/javascript; charset=UTF-8");
+        let text = String::from_utf8_lossy(&js);
+        assert!(!text.contains("id=\"app\""));
     });
 }
 
@@ -263,10 +292,40 @@ fn T_HDR_JS_CT() {
 fn T_HDR_CSS_CT() {
     block_on(async {
         let h = fresh();
-        let (s, hdrs, _) = exchange(&h.app, Method::GET, "/app.css", None, None).await;
+        let (s, _, body) = exchange(&h.app, Method::GET, "/", None, None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(hv(&hdrs, "content-type"), "text/html; charset=UTF-8");
-        assert!(!hv(&hdrs, "content-type").contains("css"));
+        let html = String::from_utf8_lossy(&body);
+        let href = quoted_attr(&html, "href").expect("console stylesheet");
+        assert!(href.ends_with(".css"), "{href}");
+        let (s, hdrs, css) = exchange(&h.app, Method::GET, &href, None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(hv(&hdrs, "content-type"), "text/css; charset=UTF-8");
+        let text = String::from_utf8_lossy(&css);
+        assert!(text.contains("@font-face") || text.contains("{"));
+    });
+}
+
+#[test]
+fn T_HDR_NO_INLINE() {
+    block_on(async {
+        let h = fresh();
+        let (s, _, body) = exchange(&h.app, Method::GET, "/", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        let html = String::from_utf8_lossy(&body);
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains(" style="), "inline style attribute");
+        assert!(!lower.contains("<style"), "inline style element");
+        let mut rest = lower.as_str();
+        let mut scripts = 0;
+        while let Some(i) = rest.find("<script") {
+            let tag = &rest[i..];
+            let end = tag.find('>').expect("script tag");
+            let open = &tag[..=end];
+            assert!(open.contains("src="), "inline script without src: {open}");
+            scripts += 1;
+            rest = &tag[end + 1..];
+        }
+        assert!(scripts > 0, "console shell loads a script");
     });
 }
 

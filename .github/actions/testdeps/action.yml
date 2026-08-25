@@ -14,6 +14,13 @@ runs:
           sudo apt-get update
           sudo apt-get install -y keyutils
         }
+        SECD_ROOT="${GITHUB_WORKSPACE}"
+        SECD_TOOL_TAG="testdeps"
+        CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+        export SECD_ROOT SECD_TOOL_TAG CARGO_HOME
+        # shellcheck source=scripts/tools.sh
+        . "$GITHUB_WORKSPACE/scripts/tools.sh"
+        secd_ensure_bun
     # SECD_REQUIRE_BROWSER turns a missing browser into a test failure, so
     # resolve one here rather than discovering it in the assertion.
     #

@@ -92,21 +92,21 @@ files = [
 ".claude/settings.json" = "b18f1ae2d286ba443e52f69e59966555d656351b3e635c358ad64e7fdfb73f8d"
 ".githooks/pre-push" = "b8ab511bfa0fd8b7f0d1a5cd88388b99b38b250db5ae169f84f948c18c3cd18f"
 ".github/actions/setup/action.yml" = "51193e0a0e60953257d8ddb345a2be35597170b39e079b032bab03a0b00e6017"
-".github/actions/testdeps/action.yml" = "850e58eedfdfe1986dbf70e78e023c5d75253ea834940090ab2267651106282d"
+".github/actions/testdeps/action.yml" = "be58c38fa45cb4f72b8bfc4ba03ba8a9906e5d049b12ae487549130000ec2ff0"
 ".github/dependabot.yml" = "ccc1b40ab352caf1cb1f51b59e456cc4b99a87c11fd47c958dcef14024675b29"
 ".github/workflows/audit.yml" = "70284dbb3fcce2414aef59310be07f86d86368712575ad8ec82fae797cccbd95"
-".github/workflows/ci.yml" = "1c43a4b6478c850849622a93308e5cc48b1b5fb9516fb16533c6b6b03e1aab1d"
-".github/workflows/release.yml" = "7b60880f1f1c8d7faea80b096c9d4826f4dbbe454294496a5a2763836c351113"
+".github/workflows/ci.yml" = "70ecf726e2b7b46ce7d0418136a1a6d6ad1a6c9764c9fcdff900ac728cad82e7"
+".github/workflows/release.yml" = "0bcee5593cf0717fcca70bfac43c8d0a851800bf3e2466089db52397441c5e63"
 ".gitleaks.toml" = "e618066c2aa8358389d7cb1b1fd93d7e2716ec85c9a8b6415633f9a9c6d6b365"
 "deploy/agent/secd-agent.service" = "877bd4f1d714a37747b4d4674a53a3ce8ccef22e2b9e40f97653d507c86c2eeb"
 "deploy/agent/secd-agent.sh" = "0e2cd60f2bb04bae332651b7e20403fbd8e54feca8c2af523f1f88e04cf37896"
 "deploy/agent/secd-agent.timer" = "373f51161623e6e79129275ea8b20af3593f01066df2211fef529149855936b5"
-"deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
+"deploy/k3s/deployment.yaml" = "188c24a46668f2a38d3bace2fb55df7b9674ebcf7c212795b55c961ba6c257c7"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
 "scripts/build-ui-bun.sh" = "0e7f767017a422939e77cd0d9af86d48e7d493f5e8568459fbd6ac852f3f9fd8"
 "scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "e524bf7929cdf863a845a20bd3589a00347b181bacce1b0ceb699a270ec49cc3"
+"scripts/check.sh" = "67e911ff02092239ec732bfb0bacf2d561cee78f1475e185a8dff6c4e2544203"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
 "scripts/dev/release-dry.sh" = "62f55ffd879ba3453bd5fdbd3664ea0878966fbd7f080df8a8cda7e0910412ae"
@@ -118,7 +118,7 @@ files = [
 "scripts/plan-contract.sh" = "e3f3847bb4658d777b7d73ec99eb9598f33ae586ac4b44c8655d0521850775ab"
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
-"scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
+"scripts/release.sh" = "1ef6eca7191821a1ebcf1e3809c915414e98bb8a9c7bd56e2d5b95986a0087b9"
 "scripts/repo-settings.sh" = "eea8e831a77e98e24739269f5adaf1a46ad8b018fab041103a6ea1160b3e5398"
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
@@ -470,6 +470,9 @@ pending = false
 pending = false
 
 [tests.T_VAULT_PUT_GET]
+pending = false
+
+[tests.T_VAULT_TS_SEAL_OPEN]
 pending = false
 
 [tests.T_VAULT_PUT_PLAINTEXT_FIELD]
@@ -830,6 +833,9 @@ pending = false
 pending = false
 
 [tests.T_HDR_CSS_CT]
+pending = false
+
+[tests.T_HDR_NO_INLINE]
 pending = false
 
 [tests.T_HDR_NO_SERVER]
