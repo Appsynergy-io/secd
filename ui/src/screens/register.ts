@@ -622,10 +622,10 @@ function paint(state: RegisterHost, root: HTMLElement): void {
   }
   const workspace = el("div", { class: "workspace" });
   workspace.append(listPane(state, root, store));
-  workspace.append(inspectorPane(state, root, store, selected));
+  workspace.append(inspectorPane(state, root, store, selected, !sheetVisible));
   page.append(workspace);
   if (selected) {
-    page.append(sheetPane(state, root, store, selected));
+    page.append(sheetPane(state, root, store, selected, sheetVisible));
   }
   if (store.wizard) {
     page.append(wizardPane(state, root, store));
@@ -728,6 +728,7 @@ function secretBody(
   root: HTMLElement,
   store: Store,
   item: VaultEntry | undefined,
+  visible: boolean,
 ): HTMLElement[] {
   if (!item) {
     return [
@@ -745,7 +746,7 @@ function secretBody(
     nodes.push(el("p", { class: "error", "data-reason": "" }, [opened.error]));
   }
   for (const key of item.fieldKeys) {
-    nodes.push(fieldRow(state, root, store, item, key, opened));
+    nodes.push(fieldRow(state, root, store, item, key, opened, visible));
   }
   nodes.push(versionsBlock(state, root, store, item.name));
   return nodes;
@@ -756,11 +757,12 @@ function inspectorPane(
   root: HTMLElement,
   store: Store,
   item: VaultEntry | undefined,
+  visible: boolean,
 ): HTMLElement {
   return el(
     "div",
     { class: "card", "data-pane": "inspector" },
-    secretBody(state, root, store, item),
+    secretBody(state, root, store, item, visible),
   );
 }
 
@@ -769,6 +771,7 @@ function sheetPane(
   root: HTMLElement,
   store: Store,
   item: VaultEntry,
+  visible: boolean,
 ): HTMLElement {
   const close = el(
     "button",
@@ -787,7 +790,7 @@ function sheetPane(
       role: "dialog",
       "aria-modal": "true",
     },
-    [el("div", { class: "secd-modal" }, [...secretBody(state, root, store, item), close])],
+    [el("div", { class: "secd-modal" }, [...secretBody(state, root, store, item, visible), close])],
   );
 }
 
@@ -798,6 +801,7 @@ function fieldRow(
   item: VaultEntry,
   key: string,
   opened: Opened | undefined,
+  visible: boolean,
 ): HTMLElement {
   const value = opened?.fields[key];
   const copied =
@@ -837,14 +841,20 @@ function fieldRow(
     }
     dropHoldListeners(state);
     store.revealed = { name: item.name, key };
-    for (const node of fieldValueNodes(root, key)) {
-      node.textContent = value;
+    const pane = show.closest("[data-pane]");
+    if (pane instanceof HTMLElement) {
+      for (const node of fieldValueNodes(pane, key)) {
+        node.textContent = value;
+      }
     }
   };
   const stopHold = (): void => {
     delete store.revealed;
-    for (const node of fieldValueNodes(root, key)) {
-      node.textContent = MASK;
+    const pane = show.closest("[data-pane]");
+    if (pane instanceof HTMLElement) {
+      for (const node of fieldValueNodes(pane, key)) {
+        node.textContent = MASK;
+      }
     }
     dropHoldListeners(state);
   };
@@ -897,15 +907,17 @@ function fieldRow(
       : undefined;
   if (fail && value !== undefined) {
     row.append(el("p", { class: "error", "data-reason": "" }, [fail.reason]));
-    const fallback = el("input", {
-      class: "mono",
-      readonly: true,
-      autocomplete: "off",
-      "data-select-copy": "",
-      "aria-label": "Secret value",
-      value,
-    });
-    row.append(fallback);
+    if (visible) {
+      const fallback = el("input", {
+        class: "mono",
+        readonly: true,
+        autocomplete: "off",
+        "data-select-copy": "",
+        "aria-label": "Secret value",
+        value,
+      });
+      row.append(fallback);
+    }
   }
   return row;
 }
@@ -1147,8 +1159,12 @@ async function onCopy(
   }
   delete store.copyFail;
   store.copyState = { name, key, label: "Copy" };
+  const gen = store.gen;
   const clip = globalThis.navigator?.clipboard;
   if (clip === undefined || typeof clip.writeText !== "function") {
+    if (!stillHere(state, gen, store)) {
+      return;
+    }
     store.copyFail = { name, key, reason: CLIP_MISSING_SENTENCE };
     focusHints.set(state, "copy");
     paint(state, root);
@@ -1156,7 +1172,6 @@ async function onCopy(
   }
   focusHints.set(state, { key });
   paint(state, root);
-  const gen = store.gen;
   if (!stillHere(state, gen, store)) {
     return;
   }

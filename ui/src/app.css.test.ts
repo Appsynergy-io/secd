@@ -13,7 +13,7 @@ describe("token layer", () => {
     expect(css).toContain("--color-warning: oklch(78% 0.13 80)");
     expect(css).toContain("--color-danger: oklch(64% 0.18 25)");
     expect(css).toContain(
-      "--color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 12%)",
+      "--color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 42%)",
     );
     expect(css).not.toContain("--color-border: oklch(");
     expect(css).not.toContain("--color-accent: oklch(45%");
@@ -29,6 +29,7 @@ describe("token layer", () => {
     expect(css).toContain("--color-bg: oklch(99% 0.012 250)");
     expect(css).toContain("--color-surface: oklch(96% 0.012 250)");
     expect(css).toContain("--color-focus: oklch(45% 0.12 78)");
+    expect(css).toContain("--color-success: oklch(52% 0.15 145)");
   });
 
   test("latin Geist faces are file URLs, not data URIs or Google Fonts", () => {

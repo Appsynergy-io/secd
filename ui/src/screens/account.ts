@@ -406,9 +406,14 @@ async function loadPasskeys(state: AccountHost, root: HTMLElement): Promise<void
   state.error.set(undefined);
   try {
     const res = await req("GET", passkeysUrl());
+    if (gen !== logoutGen || loadGen !== passkeyLoadGen) {
+      return;
+    }
+    if (res.status === 401 || res.status === 403) {
+      await signOut(state);
+      return;
+    }
     if (
-      gen !== logoutGen ||
-      loadGen !== passkeyLoadGen ||
       state.session.get() === undefined ||
       state.path.get() !== "/account"
     ) {
@@ -458,9 +463,14 @@ async function loadSessions(state: AccountHost, root: HTMLElement): Promise<void
   m.sessionsError = undefined;
   try {
     const res = await req("GET", sessionsUrl());
+    if (gen !== logoutGen || loadGen !== passkeyLoadGen) {
+      return;
+    }
+    if (res.status === 401 || res.status === 403) {
+      await signOut(state);
+      return;
+    }
     if (
-      gen !== logoutGen ||
-      loadGen !== passkeyLoadGen ||
       state.session.get() === undefined ||
       state.path.get() !== "/account"
     ) {
@@ -607,6 +617,10 @@ async function onRemove(
     if (gen !== logoutGen) {
       return;
     }
+    if (res.status === 401 || res.status === 403) {
+      await signOut(state);
+      return;
+    }
     if (res.status !== 200) {
       state.error.set(failSentence(res.status, res.data));
       return;
@@ -650,6 +664,10 @@ async function onRevoke(
   try {
     const res = await req("DELETE", sessionRevokePath(id));
     if (gen !== logoutGen) {
+      return;
+    }
+    if (res.status === 401 || res.status === 403) {
+      await signOut(state);
       return;
     }
     if (res.status !== 200) {
@@ -697,6 +715,10 @@ async function onAdd(state: AccountHost, root: HTMLElement): Promise<void> {
     if (gen !== logoutGen) {
       return;
     }
+    if (start.status === 401 || start.status === 403) {
+      await signOut(state);
+      return;
+    }
     if (start.status !== 200) {
       state.error.set(failSentence(start.status, start.data));
       return;
@@ -729,6 +751,10 @@ async function onAdd(state: AccountHost, root: HTMLElement): Promise<void> {
         email,
       });
       if (gen !== logoutGen) {
+        return;
+      }
+      if (finish.status === 401 || finish.status === 403) {
+        await signOut(state);
         return;
       }
       if (finish.status !== 200) {

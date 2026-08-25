@@ -594,6 +594,28 @@ describe("device screen", () => {
     }
   });
 
+  test("Copy writeText rejection leaves painted Approve errors", async () => {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () => Promise.reject(new Error("denied")),
+        },
+      },
+    });
+    setDek(mintDek());
+    for (const painted of [FAIL_SENTENCE, RATE_SENTENCE]) {
+      const root = document.createElement("div");
+      const state = signedState();
+      state.error.set(painted);
+      renderDevice(state, root);
+      (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+      await Bun.sleep(1);
+      expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
+      expect(root.querySelector(".error")?.textContent).toBe(painted);
+    }
+  });
+
   test("Copy success clears CLIP_FAIL_SENTENCE", async () => {
     const root = document.createElement("div");
     Object.defineProperty(globalThis, "navigator", {

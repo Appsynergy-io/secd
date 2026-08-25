@@ -445,7 +445,10 @@ async function onCopy(
     focusHints.set(state, "copy");
   } else {
     copiedOf(state).set(false);
-    state.error.set(CLIP_FAIL_SENTENCE);
+    const err = state.error.get();
+    if (err === undefined || err === CLIP_FAIL_SENTENCE) {
+      state.error.set(CLIP_FAIL_SENTENCE);
+    }
     focusHints.set(state, "code");
   }
   renderDevice(state, root, onApproved);
