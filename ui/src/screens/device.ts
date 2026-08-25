@@ -90,6 +90,14 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+function asButton(node: Element | null): HTMLButtonElement | null {
+  return node !== null && node.tagName === "BUTTON" ? (node as HTMLButtonElement) : null;
+}
+
+function asInput(node: Element | null): HTMLInputElement | null {
+  return node !== null && node.tagName === "INPUT" ? (node as HTMLInputElement) : null;
+}
+
 function disable(btn: HTMLButtonElement, on: boolean): void {
   btn.disabled = on;
   if (on) {
@@ -128,14 +136,14 @@ function refreshDeviceControls(page: HTMLElement, state: DeviceState): void {
     codeView.textContent = code === "" ? "No device code." : code;
   }
 
-  const copy = page.querySelector('[data-action="copy"]');
-  if (copy instanceof HTMLButtonElement) {
+  const copy = asButton(page.querySelector('[data-action="copy"]'));
+  if (copy !== null) {
     copy.textContent = copied.get() && code !== "" ? "Copied" : "Copy";
     disable(copy, code === "" || pending);
   }
 
-  const approve = page.querySelector('[data-action="approve"]');
-  if (approve instanceof HTMLButtonElement) {
+  const approve = asButton(page.querySelector('[data-action="approve"]'));
+  if (approve !== null) {
     disable(approve, disabled);
   }
 
@@ -231,18 +239,23 @@ function failSentence(status: number, data: unknown): string {
   return errorMessage(data) ?? FAIL_SENTENCE;
 }
 
+function stillOnDevice(root: HTMLElement): boolean {
+  return root.querySelector('[data-page="device"]') !== null;
+}
+
 export function renderDevice(
   state: DeviceState,
   root: HTMLElement,
   onApproved?: () => void,
 ): void {
   seedDeviceQuery(state, globalThis.location?.search ?? "");
-  const prevInput = root.querySelector("#user_code");
-  const hadCodeFocus =
-    prevInput instanceof HTMLInputElement && document.activeElement === prevInput;
-  const selStart =
-    prevInput instanceof HTMLInputElement ? prevInput.selectionStart : null;
-  const selEnd = prevInput instanceof HTMLInputElement ? prevInput.selectionEnd : null;
+  const prevInput = asInput(root.querySelector("#user_code"));
+  const prevApprove = asButton(root.querySelector('[data-action="approve"]'));
+  const hadCodeFocus = prevInput !== null && document.activeElement === prevInput;
+  const hadApproveFocus =
+    prevApprove !== null && document.activeElement === prevApprove;
+  const selStart = prevInput !== null ? prevInput.selectionStart : null;
+  const selEnd = prevInput !== null ? prevInput.selectionEnd : null;
   const code = state.userCode.get();
   const eph = state.eph.get();
   const session = state.session.get();
@@ -307,8 +320,8 @@ export function renderDevice(
     copied.set(false);
     state.userCode.set(input.value);
     const pageEl = input.closest("[data-page]");
-    if (pageEl instanceof HTMLElement) {
-      refreshDeviceControls(pageEl, state);
+    if (pageEl !== null) {
+      refreshDeviceControls(pageEl as HTMLElement, state);
     }
   });
   const approve = el(
@@ -346,8 +359,8 @@ export function renderDevice(
     ],
   );
   root.replaceChildren(page);
-  const restored = page.querySelector("#user_code");
-  if (restored instanceof HTMLInputElement) {
+  const restored = asInput(page.querySelector("#user_code"));
+  if (restored !== null) {
     restored.value = code;
     if (
       typeof selStart === "number" &&
@@ -364,11 +377,25 @@ export function renderDevice(
       ? page.querySelector("#user_code")
       : hint === "copy"
         ? page.querySelector('[data-action="copy"]')
-        : hadCodeFocus
-          ? page.querySelector("#user_code")
-          : null;
+        : hadApproveFocus
+          ? !approve.disabled
+            ? approve
+            : page.querySelector("#user_code")
+          : hadCodeFocus
+            ? page.querySelector("#user_code")
+            : null;
   if (found !== null && typeof (found as HTMLElement).focus === "function") {
     (found as HTMLElement).focus();
+  }
+  if (hint === "code") {
+    const codeInput = asInput(found) ?? restored;
+    if (codeInput !== null) {
+      if (typeof codeInput.select === "function") {
+        codeInput.select();
+      } else if (typeof codeInput.setSelectionRange === "function") {
+        codeInput.setSelectionRange(0, codeInput.value.length);
+      }
+    }
   }
 }
 
@@ -399,12 +426,22 @@ async function onCopy(
     return;
   }
   const ok = await copyText(code);
-  if (root.querySelector('[data-page="device"]') === null) {
+  if (!stillOnDevice(root)) {
+    return;
+  }
+  if (state.pending.get()) {
+    copiedOf(state).set(ok);
+    const copy = asButton(root.querySelector('[data-action="copy"]'));
+    if (copy !== null) {
+      copy.textContent = ok && code !== "" ? "Copied" : "Copy";
+    }
     return;
   }
   if (ok) {
     copiedOf(state).set(true);
-    state.error.set(undefined);
+    if (state.error.get() === CLIP_FAIL_SENTENCE) {
+      state.error.set(undefined);
+    }
     focusHints.set(state, "copy");
   } else {
     copiedOf(state).set(false);
@@ -466,6 +503,9 @@ async function onApprove(
       user_code: state.userCode.get(),
       sealed_dek: sealed,
     });
+    if (!stillOnDevice(root)) {
+      return;
+    }
     if (res.status === 200) {
       state.error.set(undefined);
       if (onApproved !== undefined) {
@@ -476,11 +516,17 @@ async function onApprove(
     }
     state.error.set(failSentence(res.status, res.data));
   } catch {
+    if (!stillOnDevice(root)) {
+      return;
+    }
     state.error.set(FAIL_SENTENCE);
   } finally {
     zeroizeBytes(ephBytes);
     state.pending.set(false);
-    if (onApproved === undefined || state.error.get() !== undefined) {
+    if (
+      stillOnDevice(root) &&
+      (onApproved === undefined || state.error.get() !== undefined)
+    ) {
       renderDevice(state, root, onApproved);
     }
   }

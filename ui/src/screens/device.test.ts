@@ -38,16 +38,24 @@ type FakeNode = {
   listeners: Map<string, Array<(ev?: { preventDefault(): void }) => void>>;
   text: string;
   value: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
+  removeAttribute(name: string): void;
   append(...nodes: Array<FakeNode | string>): void;
+  insertBefore(newNode: FakeNode, ref: FakeNode): void;
   replaceChildren(...nodes: Array<FakeNode | string>): void;
+  remove(): void;
   addEventListener(type: string, fn: (ev?: { preventDefault(): void }) => void): void;
   click(): void;
   submit(): void;
   querySelector(sel: string): FakeNode | null;
+  closest(sel: string): FakeNode | null;
   focus(): void;
+  select(): void;
+  setSelectionRange(start: number, end: number): void;
   textContent: string;
 };
 
@@ -66,6 +74,8 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
     listeners: new Map(),
     text,
     value: "",
+    selectionStart: null,
+    selectionEnd: null,
     setAttribute(name: string, value: string) {
       node.attrs.set(name, value);
       if (name === "disabled") {
@@ -81,6 +91,12 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
     hasAttribute(name: string) {
       return node.attrs.has(name);
     },
+    removeAttribute(name: string) {
+      node.attrs.delete(name);
+      if (name === "disabled") {
+        node.disabled = false;
+      }
+    },
     append(...nodes: Array<FakeNode | string>) {
       for (const n of nodes) {
         const child = typeof n === "string" ? fakeText(n) : n;
@@ -88,9 +104,29 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
         node.children.push(child);
       }
     },
+    insertBefore(newNode: FakeNode, ref: FakeNode) {
+      const i = node.children.indexOf(ref);
+      newNode.parent = node;
+      if (i < 0) {
+        node.children.push(newNode);
+        return;
+      }
+      node.children.splice(i, 0, newNode);
+    },
     replaceChildren(...nodes: Array<FakeNode | string>) {
+      for (const child of node.children) {
+        child.parent = null;
+      }
       node.children = [];
       node.append(...nodes);
+    },
+    remove() {
+      const parent = node.parent;
+      if (parent === null) {
+        return;
+      }
+      parent.children = parent.children.filter((c) => c !== node);
+      node.parent = null;
     },
     addEventListener(type: string, fn: (ev?: { preventDefault(): void }) => void) {
       const list = node.listeners.get(type) ?? [];
@@ -120,9 +156,27 @@ function fakeEl(tag: string, nodeType = 1, text = ""): FakeNode {
       });
       return found[0] ?? null;
     },
+    closest(sel: string) {
+      let cur: FakeNode | null = node;
+      while (cur !== null) {
+        if (cur.nodeType === 1 && matches(cur, sel)) {
+          return cur;
+        }
+        cur = cur.parent;
+      }
+      return null;
+    },
     focus() {
-      const doc = globalThis.document as unknown as { activeElement?: FakeNode };
+      const doc = globalThis.document as unknown as { activeElement?: FakeNode | null };
       doc.activeElement = node;
+    },
+    select() {
+      node.selectionStart = 0;
+      node.selectionEnd = node.value.length;
+    },
+    setSelectionRange(start: number, end: number) {
+      node.selectionStart = start;
+      node.selectionEnd = end;
     },
     get textContent() {
       if (node.nodeType === 3) {
@@ -191,10 +245,29 @@ function matches(node: FakeNode, sel: string): boolean {
   return true;
 }
 
+function asFake(node: Element | null): FakeNode | null {
+  return node as unknown as FakeNode | null;
+}
+
+function activeEl(): FakeNode | null {
+  return (globalThis.document as unknown as { activeElement?: FakeNode | null }).activeElement ??
+    null;
+}
+
+function typeUserCode(input: FakeNode, value: string, caret: number): void {
+  input.value = value;
+  input.setSelectionRange(caret, caret);
+  input.focus();
+  for (const fn of input.listeners.get("input") ?? []) {
+    fn();
+  }
+}
+
 function installDom(): void {
   const body = fakeEl("body");
   const document = {
     body,
+    activeElement: null as FakeNode | null,
     createElement(tag: string) {
       return fakeEl(tag);
     },
@@ -493,8 +566,129 @@ describe("device screen", () => {
     expect(wrote).toBe("ABCD-EFGH");
     finish?.();
     await Bun.sleep(1);
-    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+    const copiedBtn = asFake(root.querySelector('[data-action="copy"]'));
+    expect(copiedBtn?.textContent).toBe("Copied");
     expect(wrote).toBe("ABCD-EFGH");
+    expect(activeEl()).toBe(copiedBtn);
+  });
+
+  test("Copy success leaves painted Approve errors", async () => {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () => Promise.resolve(),
+        },
+      },
+    });
+    setDek(mintDek());
+    for (const painted of [FAIL_SENTENCE, RATE_SENTENCE, "already approved"]) {
+      const root = document.createElement("div");
+      const state = signedState();
+      state.error.set(painted);
+      renderDevice(state, root);
+      (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+      await Bun.sleep(1);
+      expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+      expect(root.querySelector(".error")?.textContent).toBe(painted);
+    }
+  });
+
+  test("Copy success clears CLIP_FAIL_SENTENCE", async () => {
+    const root = document.createElement("div");
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () => Promise.resolve(),
+        },
+      },
+    });
+    setDek(mintDek());
+    const state = signedState();
+    state.error.set(CLIP_FAIL_SENTENCE);
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+    expect(root.querySelector(".error")).toBeNull();
+  });
+
+  test("Copy that finishes while Approve is pending updates Copied in place", async () => {
+    const root = document.createElement("div");
+    let finishCopy: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finishCopy = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    let finishApprove: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finishApprove = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    const page = root.querySelector('[data-page="device"]');
+    const copy = root.querySelector('[data-action="copy"]');
+    expect(copy?.textContent).toBe("Copy");
+    finishCopy?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBe(page);
+    expect(root.querySelector('[data-action="copy"]')).toBe(copy);
+    expect(copy?.textContent).toBe("Copied");
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    expect(root.querySelector(".error")).toBeNull();
+    finishApprove?.(
+      new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }),
+    );
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
+  });
+
+  test("Copy that finishes after Approve failure keeps the painted error", async () => {
+    const root = document.createElement("div");
+    let finishCopy: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finishCopy = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: FAIL_SENTENCE }), {
+        status: 401,
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    finishCopy?.();
+    await Bun.sleep(1);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copied");
   });
 
   test("clipboard refusal keeps Copy and offers select-to-copy", async () => {
@@ -509,6 +703,10 @@ describe("device screen", () => {
     await Bun.sleep(1);
     expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
     expect(root.querySelector(".error")?.textContent).toBe(CLIP_FAIL_SENTENCE);
+    const input = asFake(root.querySelector("#user_code"));
+    expect(activeEl()).toBe(input);
+    expect(input?.selectionStart).toBe(0);
+    expect(input?.selectionEnd).toBe(input?.value.length ?? -1);
   });
 
   test("Approve seals the DEK to the CLI eph and does not put the DEK on the wire", async () => {
@@ -635,47 +833,92 @@ describe("device screen", () => {
     expect(state.eph.get().length).toBe(64);
     expect(ephOk(state.eph.get())).toBe(true);
   });
-});
-
-describe("device input", () => {
-  const origNav = globalThis.navigator;
-
-  afterEach(() => {
-    clearDek();
-    Object.defineProperty(globalThis, "navigator", {
-      configurable: true,
-      value: origNav,
-    });
-  });
 
   test("typing in #user_code updates the code without remounting the field", () => {
     const root = document.createElement("div");
-    document.body.append(root);
     const state = makeState({
       eph: deviceEphHex(),
       session: { email: "a@b.c", session_id: "s1" },
     });
     setDek(mintDek());
     renderDevice(state, root);
-    const input = root.querySelector("#user_code") as HTMLInputElement | null;
+    const input = asFake(root.querySelector("#user_code"));
     expect(input).not.toBeNull();
-    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(true);
-    input!.focus();
-    input!.value = "ABCD-EFGH";
-    input!.setSelectionRange(4, 4);
-    input!.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(root.querySelector("#user_code")).toBe(input);
-    expect(document.activeElement).toBe(input);
-    expect(input!.selectionStart).toBe(4);
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+    typeUserCode(input as FakeNode, "ABCD-EFGH", 4);
+    expect(asFake(root.querySelector("#user_code"))).toBe(input);
+    expect(activeEl()).toBe(input);
+    expect(input?.selectionStart).toBe(4);
+    expect(input?.selectionEnd).toBe(4);
     expect(state.userCode.get()).toBe("ABCD-EFGH");
     expect(root.querySelector("[data-device]")?.textContent).toBe("ABCD-EFGH");
-    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(false);
-    root.remove();
+    expect(root.querySelector('[data-action="copy"]')?.textContent).toBe("Copy");
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(root.querySelector("[data-reason]")).toBeNull();
+  });
+
+  test("Approve remount restores focus when the control stays enabled", () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    const state = signedState();
+    renderDevice(state, root);
+    asFake(root.querySelector('[data-action="approve"]'))?.focus();
+    renderDevice(state, root);
+    const approve = asFake(root.querySelector('[data-action="approve"]'));
+    expect(approve?.hasAttribute("disabled")).toBe(false);
+    expect(activeEl()).toBe(approve);
+  });
+
+  test("Approve remount focuses the code while the control is pending", async () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    asFake(root.querySelector('[data-action="approve"]'))?.focus();
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
+    finish?.(new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }));
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-action="approve"]')?.hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(activeEl()).toBe(asFake(root.querySelector("#user_code")));
+  });
+
+  test("Approve does not paint Device after the page has left", async () => {
+    const root = document.createElement("div");
+    setDek(mintDek());
+    let finish: ((value: Response) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-state="loading"]')).not.toBeNull();
+    root.replaceChildren();
+    finish?.(new Response(JSON.stringify({ error: FAIL_SENTENCE }), { status: 401 }));
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
   });
 
   test("Copy does not paint Device after the page has left", async () => {
     const root = document.createElement("div");
-    document.body.append(root);
     let finish: ((value: void) => void) | undefined;
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
@@ -690,11 +933,44 @@ describe("device input", () => {
     });
     setDek(mintDek());
     renderDevice(signedState(), root);
-    (root.querySelector('[data-action="copy"]') as HTMLButtonElement | null)?.click();
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
     root.replaceChildren();
     finish?.();
     await Bun.sleep(1);
     expect(root.querySelector('[data-page="device"]')).toBeNull();
-    root.remove();
+  });
+
+  test("Copy then Approve does not paint Device over Register", async () => {
+    const root = document.createElement("div");
+    let finish: ((value: void) => void) | undefined;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    });
+    setDek(mintDek());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 })) as unknown as typeof fetch;
+    const state = signedState();
+    renderDevice(state, root, () => {
+      const next = document.createElement("div");
+      next.setAttribute("data-page", "register");
+      root.replaceChildren(next);
+    });
+    (root.querySelector('[data-action="copy"]') as unknown as FakeNode | null)?.click();
+    await Bun.sleep(1);
+    (root.querySelector("form") as unknown as FakeNode | null)?.submit();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="register"]')).not.toBeNull();
+    finish?.();
+    await Bun.sleep(1);
+    expect(root.querySelector('[data-page="device"]')).toBeNull();
+    expect(root.querySelector('[data-page="register"]')).not.toBeNull();
   });
 });
