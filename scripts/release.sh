@@ -295,7 +295,7 @@ case "$target" in
       export CC_x86_64_unknown_linux_musl=musl-gcc
     fi
     # scratch has no musl loader; default musl target is dynamically linked.
-    # Do not export RUSTFLAGS: crt-static breaks host proc-macros (wasm-bindgen-cli).
+    # Do not export RUSTFLAGS: crt-static breaks host proc-macros.
     musl_flags="${RUSTFLAGS:+$RUSTFLAGS }${repro_flags} -C target-feature=+crt-static"
     if [[ "$do_image" -eq 1 ]]; then
       if [[ ! -d crates/secd-web ]]; then

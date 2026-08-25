@@ -1,6 +1,5 @@
 [workspace]
-members = ["crates/secd-core", "crates/secd-web", "crates/secd-ui", "tools/import-legacy"]
-exclude = ["vendor/appsy-ui"]
+members = ["crates/secd-core", "crates/secd-web", "tools/import-legacy"]
 resolver = "2"
 
 [package]

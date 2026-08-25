@@ -4,19 +4,28 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 use crate::{Error, Secret};
 
-const NONCE_LEN: usize = 24;
+pub(crate) const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 /// Nonce (24) plus at least one ciphertext byte. Shorter blobs fail before decrypt.
 const MIN_BLOB: usize = NONCE_LEN + 1;
 
 /// Seal `plaintext` with XChaCha20-Poly1305. AAD is `name` UTF-8. Blob is nonce || ciphertext.
 pub fn seal(key: &[u8], name: &str, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let cipher = cipher(key)?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng
         .try_fill_bytes(&mut nonce_bytes)
         .map_err(|_| Error::Rng)?;
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    seal_with_nonce(key, name, plaintext, &nonce_bytes)
+}
+
+pub(crate) fn seal_with_nonce(
+    key: &[u8],
+    name: &str,
+    plaintext: &[u8],
+    nonce_bytes: &[u8; NONCE_LEN],
+) -> Result<Vec<u8>, Error> {
+    let cipher = cipher(key)?;
+    let nonce = XNonce::from_slice(nonce_bytes);
     let ct = cipher
         .encrypt(
             nonce,
@@ -27,7 +36,7 @@ pub fn seal(key: &[u8], name: &str, plaintext: &[u8]) -> Result<Vec<u8>, Error> 
         )
         .map_err(|_| Error::Aead)?;
     let mut blob = Vec::with_capacity(NONCE_LEN + ct.len());
-    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(nonce_bytes);
     blob.extend_from_slice(&ct);
     Ok(blob)
 }

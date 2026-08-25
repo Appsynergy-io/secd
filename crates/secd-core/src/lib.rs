@@ -1,6 +1,7 @@
 pub mod aead;
 pub mod group;
 pub mod name;
+pub mod parity;
 pub mod provider;
 pub mod redact;
 pub mod wrap;

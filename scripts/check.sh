@@ -6,7 +6,9 @@
 #   scripts/check.sh                 every lane
 #   scripts/check.sh fast            contract, shell, workflow, fmt  (~60s)
 #   scripts/check.sh secrets         gitleaks over the tree and the history
-#   scripts/check.sh ui              build crates/secd-ui/dist
+#   scripts/check.sh ui              build ui/dist, tsc, bun test
+#   scripts/check.sh bun-audit       bun audit against ui/bun.lock
+#   scripts/check.sh crypto-parity   secd-core fixture vs the bun console crypto chunk
 #   scripts/check.sh clippy test     one or more named lanes
 #   scripts/check.sh pipeline --update   re-pin [pipeline] after a deliberate edit
 set -euo pipefail
@@ -31,10 +33,9 @@ ACTIONLINT_PINNED="1.7.7"
 ZIZMOR_PINNED="1.29.0"
 GITLEAKS_PINNED="8.30.1"
 
-# Cheapest first: a formatting slip should not cost a full test run. `ui` is a
-# prerequisite of every cargo lane, not a peer -- crates/secd-web/build.rs
-# refuses to build without a fresh crates/secd-ui/dist.
-ALL_LANES=(contract shell workflow secrets fmt ui clippy test test-release compile-fail release-dry)
+# Cheapest first: a formatting slip should not cost a full test run. `ui`
+# builds ui/dist; secd-web/build.rs refuses to build without a fresh one.
+ALL_LANES=(contract shell workflow secrets fmt ui bun-audit crypto-parity clippy test test-release compile-fail release-dry)
 
 usage() {
   echo "usage: check.sh [lane ...]" >&2
@@ -180,8 +181,93 @@ lane_release_dry() {
   "$root/scripts/dev/release-dry.sh"
 }
 
+# JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/dist/fonts so a
+# missed copy cannot hide a 404.
+UI_JS_CSS_MAX=153600
+UI_FONTS_MAX=71680
+
+ui_budgets() {
+  python3 - "$root" "$UI_JS_CSS_MAX" "$UI_FONTS_MAX" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+js_css_max = int(sys.argv[2])
+fonts_max = int(sys.argv[3])
+dist = root / "ui" / "dist"
+if not dist.is_dir():
+    sys.exit("ui: missing ui/dist")
+js_css = 0
+for path in dist.rglob("*"):
+    if path.is_file() and path.suffix.lower() in {".js", ".css"}:
+        js_css += path.stat().st_size
+if js_css > js_css_max:
+    sys.exit(f"ui: ui/dist JS+CSS {js_css} bytes exceeds {js_css_max}")
+fonts_dir = dist / "fonts"
+if not fonts_dir.is_dir():
+    sys.exit("ui: missing ui/dist/fonts")
+fonts = 0
+for path in fonts_dir.rglob("*"):
+    if path.is_file():
+        fonts += path.stat().st_size
+if fonts > fonts_max:
+    sys.exit(f"ui: ui/dist/fonts {fonts} bytes exceeds {fonts_max}")
+print(f"ui: JS+CSS {js_css} bytes, fonts {fonts} bytes")
+PY
+}
+
 lane_ui() {
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun x tsc --noEmit
+    bun test
+  )
+  (
+    first="$(mktemp -d)"
+    second="$(mktemp -d)"
+    trap 'rm -rf "$first" "$second"' EXIT
+    "$root/scripts/build-ui.sh"
+    cp -a "$root/ui/dist/." "$first/"
+    ui_budgets
+    "$root/scripts/build-ui.sh"
+    cp -a "$root/ui/dist/." "$second/"
+    if ! diff -rq "$first" "$second" >/dev/null; then
+      diff -rq "$first" "$second" >&2 || true
+      secd_die "ui/dist is not byte-identical across two builds"
+    fi
+  )
+}
+
+lane_bun_audit() {
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun audit
+  )
+}
+
+# The crypto chunk dist/index.html loads must open the secd-core fixture.
+# Missing or stale fixture is a failure; the lane does not regenerate it
+# in place. dist is always rebuilt, so a leftover bundle cannot open it.
+lane_crypto_parity() {
+  local fixture="$root/crates/secd-core/tests/fixtures/crypto-parity.json"
+  [[ -f "$fixture" ]] || secd_die "crypto-parity: missing fixture"
+  mkdir -p "${TMPDIR:-$root/.tmp}"
+  local generated="${TMPDIR:-$root/.tmp}/crypto-parity-generated.json"
+  cargo run -p secd-core --example parity_fixture --locked --quiet >"$generated"
+  if ! cmp -s "$fixture" "$generated"; then
+    secd_die "crypto-parity: fixture is stale"
+  fi
   "$root/scripts/build-ui.sh"
+  secd_ensure_bun
+  (
+    cd "$root/ui"
+    bun install --frozen-lockfile --ignore-scripts
+    bun "$root/ui/crypto-parity.ts"
+  )
 }
 
 lane_clippy() {
@@ -253,6 +339,8 @@ dispatch_lane() {
     secrets) lane_secrets ;;
     fmt) lane_fmt ;;
     ui) lane_ui ;;
+    bun-audit) lane_bun_audit ;;
+    crypto-parity) lane_crypto_parity ;;
     clippy) lane_clippy ;;
     test) lane_test ;;
     test-release) lane_test_release ;;

@@ -1,4 +1,6 @@
 /target
+/.tmp/
 **/*.rs.bk
-crates/secd-ui/dist/
+ui/dist/
+ui/node_modules/
 __pycache__/

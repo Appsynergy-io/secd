@@ -54,7 +54,7 @@ spec:
             - {name: tls, mountPath: /tls, readOnly: true}
             - {name: tmp, mountPath: /tmp}
           readinessProbe:
-            tcpSocket: {port: 443}
+            httpGet: {path: /, port: 443, scheme: HTTPS}
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:

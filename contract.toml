@@ -82,7 +82,6 @@ files = [
   "src/login.rs",
   "crates/secd-core/src/",
   "crates/secd-web/src/",
-  "crates/secd-ui/src/",
   "tools/import-legacy/src/",
 ]
 
@@ -91,21 +90,21 @@ files = [
 ".claude/hooks/session-start.sh" = "b9d357645701d5fe767169dd8d9447cc2cfaa0703e551bc9404cdfc14935f69f"
 ".claude/settings.json" = "b18f1ae2d286ba443e52f69e59966555d656351b3e635c358ad64e7fdfb73f8d"
 ".githooks/pre-push" = "b8ab511bfa0fd8b7f0d1a5cd88388b99b38b250db5ae169f84f948c18c3cd18f"
-".github/actions/setup/action.yml" = "44713b4d5894a8be9497f16ee0774895f1545035681723920cd9b54382a72c42"
-".github/actions/testdeps/action.yml" = "850e58eedfdfe1986dbf70e78e023c5d75253ea834940090ab2267651106282d"
-".github/dependabot.yml" = "7bf8d7d7d7fb3c57e53444abceeeed644e28e003a89ff5d2c81ec03b3ea0ddd3"
+".github/actions/setup/action.yml" = "f95194fd44b0b9a462577d0a2c9e5fbf1d0bd4a098803a08f742fb990857079a"
+".github/actions/testdeps/action.yml" = "be58c38fa45cb4f72b8bfc4ba03ba8a9906e5d049b12ae487549130000ec2ff0"
+".github/dependabot.yml" = "ccc1b40ab352caf1cb1f51b59e456cc4b99a87c11fd47c958dcef14024675b29"
 ".github/workflows/audit.yml" = "70284dbb3fcce2414aef59310be07f86d86368712575ad8ec82fae797cccbd95"
-".github/workflows/ci.yml" = "771492ee720e24c6a42023cc4989beac36d0716f138fb3fb6bd2086737945cc6"
+".github/workflows/ci.yml" = "db3b5ae440312df58fbbc52456f478324299f1f219c584772e46580a05065d9b"
 ".github/workflows/release.yml" = "7b60880f1f1c8d7faea80b096c9d4826f4dbbe454294496a5a2763836c351113"
-".gitleaks.toml" = "e05a8d7c9c94216c50da943fd4ed5e1107f68c1323e9e0909df1298c14abe830"
+".gitleaks.toml" = "d572d504f80f5f16813c4ce750df7c80e780edc7158d520c4ed749892ab6d573"
 "deploy/agent/secd-agent.service" = "877bd4f1d714a37747b4d4674a53a3ce8ccef22e2b9e40f97653d507c86c2eeb"
 "deploy/agent/secd-agent.sh" = "0e2cd60f2bb04bae332651b7e20403fbd8e54feca8c2af523f1f88e04cf37896"
 "deploy/agent/secd-agent.timer" = "373f51161623e6e79129275ea8b20af3593f01066df2211fef529149855936b5"
-"deploy/k3s/deployment.yaml" = "548161515f011847b782551ad9e1a86a8c3bb574da38f9e153c8a7c5238433bf"
+"deploy/k3s/deployment.yaml" = "188c24a46668f2a38d3bace2fb55df7b9674ebcf7c212795b55c961ba6c257c7"
 "deploy/k3s/kustomization.yaml" = "13e5f3a23ea08d57424c5bf2ee75f5166b5fd85af959d223ec12fcd4a74ddd17"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
-"scripts/build-ui.sh" = "cd11c809b750c365c97885116b95db89f6cc8e4175f95cb5f1be3277f9e06ac9"
-"scripts/check.sh" = "bab3f2cabb7ee6ac96a7d0ec8ca92e23a1a0e1f2f4c006858e09dd29458d3a92"
+"scripts/build-ui.sh" = "1ffd1e414ba657460ee055698fc14db0e2808ad3c12e2c2fda16c38a00a39f86"
+"scripts/check.sh" = "912426b6e81e26d528ef6cfec3700a6fc0ff8adf4d97a6db6c774a7489387e6f"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "b491473d69e5c0acbb78334884f496f84a03e49c9bba91ef5a6f8f0d5c1ca3a7"
 "scripts/dev/release-dry.sh" = "62f55ffd879ba3453bd5fdbd3664ea0878966fbd7f080df8a8cda7e0910412ae"
@@ -114,13 +113,15 @@ files = [
 "scripts/k3s-apply.sh" = "65f26c9c0734542988b7f81d3c09d4dbd374157cc9dfb76455c43c822db5ebad"
 "scripts/merge-latest-json.sh" = "6a56449f8494e8f4f2724e6cd93e0d5c9ee96579a698eb08856e769bac472d41"
 "scripts/merge.sh" = "63ccbd79101736458e5e8b4f9305ae9cc64e9429dda1da32abbe0c118feab269"
-"scripts/plan-contract.sh" = "d173fff00011f1d51ac8f2d158280ea8e4c53a4614626eb9ec802fdcddcae513"
+"scripts/plan-contract.sh" = "b884488047431434f1be5d327f4db01b8a7e2be2cf9fbdc64ca2aec3bf46df63"
 "scripts/publish-release.sh" = "04889b93bf539d0c152282979500bebea87d6875298e7cf9f8997b038ad7cfa9"
 "scripts/push-image.sh" = "c4099f87e1c272d4f17ae7a3f888932e7ed1973e8bfc9f6b22aa3aa52598d95e"
-"scripts/release.sh" = "1864f3f98c267e9b9c5d16ec2ba7c0f2bf366185c686a1653e7179acff296158"
+"scripts/release.sh" = "ce1ee69a81898e2d6f6942f0394aeda0ce7da5f0a2b0b372e41f2f093ddfb92c"
 "scripts/repo-settings.sh" = "eea8e831a77e98e24739269f5adaf1a46ad8b018fab041103a6ea1160b3e5398"
 "scripts/sbom.sh" = "eba5ea8140580a3995f66c25c7864b160c9f2989c57e3bffc1793b693a7055d0"
-"scripts/tools.sh" = "f80727f6190301ad923bf4fb39186507e92ee075f806b6289462b04a955106c6"
+"scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
+"ui/bunfig.toml" = "d7223d78e8a6ea0fce0b51bd8d0f39d9f74a473a356bc6e18bc9dce075e67ef0"
+"ui/package.json" = "23b3fd672cfdb0747548aecd5f0cd816ec20a0da633f21a18c49c17f6cc756d1"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 
@@ -158,6 +159,9 @@ pending = false
 pending = false
 
 [tests.T_AEAD_EMPTY]
+pending = false
+
+[tests.T_CRYPTO_PARITY_FIXTURE]
 pending = false
 
 [tests.T_WRAP_PASSWORD]
@@ -466,6 +470,9 @@ pending = false
 [tests.T_VAULT_PUT_GET]
 pending = false
 
+[tests.T_VAULT_TS_SEAL_OPEN]
+pending = false
+
 [tests.T_VAULT_PUT_PLAINTEXT_FIELD]
 pending = false
 
@@ -494,9 +501,6 @@ pending = false
 pending = false
 
 [tests.T_VAULT_ROLLBACK_BAD]
-pending = false
-
-[tests.T_WEB_ADD_PROVIDER_FIELDS]
 pending = false
 
 [tests.T_PROV_GET_BUILTIN]
@@ -545,51 +549,6 @@ pending = false
 pending = false
 
 [tests.T_TUI_THEME]
-pending = false
-
-[tests.T_WEB_PK_ONLY_NO_PASSWORD_NODE]
-pending = false
-
-[tests.T_WEB_REMEMBERED_NO_EMAIL]
-pending = false
-
-[tests.T_WEB_LIVE_SESSION_APPROVE_ONLY]
-pending = false
-
-[tests.T_WEB_STALE_REMEMBER]
-pending = false
-
-[tests.T_WEB_CONDITIONAL]
-pending = false
-
-[tests.T_WEB_XSS_NAME]
-pending = false
-
-[tests.T_WEB_MOBILE_BREAKPOINT]
-pending = false
-
-[tests.T_WEB_COPY_DEFAULT]
-pending = false
-
-[tests.T_WEB_TYPED_EMAIL_KEPT]
-pending = false
-
-[tests.T_WEB_DEVICE_QUERY_BOOT]
-pending = false
-
-[tests.T_WEB_WRAP_ROUNDTRIP]
-pending = false
-
-[tests.T_WEB_ACCOUNT_SESSIONS]
-pending = false
-
-[tests.T_WEB_ACCOUNT_REVOKE]
-pending = false
-
-[tests.T_WEB_ACCOUNT_PASSKEYS]
-pending = false
-
-[tests.T_WEB_ACCOUNT_REMOVE_LAST_DISABLED]
 pending = false
 
 [tests.T_CLI_LS_NO_VALUE]
@@ -824,6 +783,9 @@ pending = false
 pending = false
 
 [tests.T_HDR_CSS_CT]
+pending = false
+
+[tests.T_HDR_NO_INLINE]
 pending = false
 
 [tests.T_HDR_NO_SERVER]

@@ -139,6 +139,8 @@ PIPELINE_ROOTS = (
     # `secrets` lane stops applying, which is exactly the kind of edit that
     # should not pass unremarked.
     ".gitleaks.toml",
+    "ui/bunfig.toml",
+    "ui/package.json",
 )
 
 
@@ -244,7 +246,6 @@ for rel in found_pipeline:
 # be silent. String equality only: at bump time the new image does not exist
 # yet, and a registry lookup here would make the contract need the network.
 VERSION_SITES = (
-    "crates/secd-ui/Cargo.toml",
     "crates/secd-web/Cargo.toml",
     "crates/secd-core/Cargo.toml",
     "tools/import-legacy/Cargo.toml",
@@ -302,8 +303,10 @@ else:
 # looked for three named scopes and three named cargo subcommands.
 COMPILES = re.compile(
     r"cargo\s+(?:build|test|clippy|install|run)\b"
-    r"|check\.sh\s+(?:ui|clippy|test|test-release|compile-fail)\b"
+    r"|check\.sh\s+(?:ui|bun-audit|crypto-parity|clippy|test|test-release|compile-fail)\b"
     r"|release\.sh[^\n]*--build-only\b"
+    r"|bun\s+(?:install|ci|add|build|run|test)\b"
+    r"|bunx\b"
 )
 # Any write scope and any secret, not an enumeration of the ones seen so far.
 # secrets.GITHUB_TOKEN is the exception: its power is exactly the job's

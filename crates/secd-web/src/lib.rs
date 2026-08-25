@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::middleware;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::Response;
 use axum::Router;
 
 use crate::headers::json_status;
@@ -57,5 +57,5 @@ async fn fallback(req: Request<Body>) -> Response {
     if req.method() != axum::http::Method::GET {
         return json_status(StatusCode::METHOD_NOT_ALLOWED, "method");
     }
-    Html("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>secd</title></head><body></body></html>").into_response()
+    static_ui::serve_path(req.uri().path())
 }

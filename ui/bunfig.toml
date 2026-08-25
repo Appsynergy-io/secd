@@ -1,0 +1,12 @@
+telemetry = false
+
+[install]
+linker = "isolated"
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = ["typescript", "@types/bun"]
+exact = true
+ignoreScripts = true
+saveTextLockfile = true
+
+[test]
+preload = ["./happydom.ts"]

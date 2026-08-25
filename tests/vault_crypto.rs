@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::{to_bytes, Body};
@@ -352,6 +353,89 @@ fn T_VAULT_PUT_GET() {
         assert_eq!(got_hex.as_bytes(), ct.as_bytes());
         let opened = open(&dek, "kv/round", &hex::decode(got_hex).expect("hex")).expect("open");
         assert!(opened.as_bytes() == FIXTURE);
+    });
+}
+
+const TS_KEY: [u8; 32] = [0x13; 32];
+const TS_NAME: &str = "kv/ts-put";
+const TS_PLAIN: &[u8] = b"fixture-ts-put-do-not-print";
+
+fn bun_bin() -> PathBuf {
+    if let Ok(home) = std::env::var("CARGO_HOME") {
+        let p = PathBuf::from(home).join("bin/bun");
+        if p.is_file() {
+            return p;
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".cargo/bin/bun");
+        if p.is_file() {
+            return p;
+        }
+    }
+    PathBuf::from("bun")
+}
+
+fn ts_aead(op: &str, key: &[u8], name: &str, payload: &[u8]) -> Vec<u8> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(bun_bin())
+        .current_dir(root.join("ui"))
+        .arg("vault-roundtrip.ts")
+        .arg(op)
+        .arg(hex::encode(key))
+        .arg(name)
+        .arg(hex::encode(payload))
+        .output()
+        .expect("bun");
+    assert!(
+        out.status.success(),
+        "bun {op} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    hex::decode(String::from_utf8(out.stdout).expect("utf8").trim()).expect("hex")
+}
+
+#[test]
+fn T_VAULT_TS_SEAL_OPEN() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+
+        let ts_blob = ts_aead("seal", &TS_KEY, TS_NAME, TS_PLAIN);
+        let ts_ct = hex::encode(&ts_blob);
+        let (s, _) = put_json(
+            &h.app,
+            "/api/v1/vault",
+            &json!({"entries":[{"name":TS_NAME,"ciphertext":ts_ct,"meta":{}}]}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let got = v["entries"][0]["ciphertext"].as_str().expect("ct");
+        let stored = hex::decode(got).expect("hex");
+        let opened = open(&TS_KEY, TS_NAME, &stored).expect("rust open of ts seal");
+        assert!(opened.as_bytes() == TS_PLAIN);
+
+        let rust_blob = seal(&TS_KEY, TS_NAME, TS_PLAIN).expect("rust seal");
+        let rust_ct = hex::encode(&rust_blob);
+        let (s, _) = put_json(
+            &h.app,
+            "/api/v1/vault",
+            &json!({"entries":[{"name":TS_NAME,"ciphertext":rust_ct,"meta":{}}]}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let got = v["entries"][0]["ciphertext"].as_str().expect("ct");
+        let stored = hex::decode(got).expect("hex");
+        let opened = ts_aead("open", &TS_KEY, TS_NAME, &stored);
+        assert!(opened == TS_PLAIN);
     });
 }
 
