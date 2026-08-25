@@ -1,0 +1,8 @@
+[Unit]
+Description=Record secd-agent failure time
+Documentation=https://github.com/Appsynergy-io/secd
+
+[Service]
+Type=oneshot
+StateDirectory=secd
+ExecStart=/bin/sh -c 'date -u -Iseconds > /var/lib/secd/agent-fail'
