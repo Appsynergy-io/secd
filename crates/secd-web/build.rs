@@ -5,6 +5,10 @@
 //! scripts/check.sh and scripts/release.sh both build ui/dist before
 //! touching this crate. If dist/ is missing or older than its inputs, say
 //! so and stop. Never invoke bun or scripts/build-ui.sh from here.
+//! Dist files are copied into `$OUT_DIR/ui_embed` and included by a path
+//! relative to the generated file: an absolute `include_bytes!` leaves
+//! the workspace path in the binary, and `--remap-path-prefix` does not
+//! rewrite it.
 
 use std::fs;
 use std::io::Write;
@@ -61,7 +65,23 @@ fn main() {
         }
     }
 
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("ui_assets.rs");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let embed_dir = out_dir.join("ui_embed");
+    if embed_dir.exists() {
+        fs::remove_dir_all(&embed_dir).expect("clear ui_embed");
+    }
+    fs::create_dir_all(&embed_dir).expect("ui_embed");
+    for (rel, path) in &files {
+        refuse_rel(rel);
+        let dest = embed_dest(&embed_dir, rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).expect("ui_embed parent");
+        }
+        fs::copy(path, &dest)
+            .unwrap_or_else(|e| panic!("copy {} -> {} ({e})", path.display(), dest.display()));
+    }
+
+    let out = out_dir.join("ui_assets.rs");
     let mut gen = fs::File::create(&out).expect("ui_assets.rs");
     writeln!(
         gen,
@@ -69,13 +89,12 @@ fn main() {
     )
     .expect("write");
     writeln!(gen, "pub static ASSETS: &[(&str, &[u8])] = &[").expect("write");
-    for (rel, path) in &files {
-        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+    for (rel, _) in &files {
         writeln!(
             gen,
             "    ({}, include_bytes!({})),",
             rust_string_lit(rel),
-            rust_string_lit(&abs.to_string_lossy())
+            rust_string_lit(&format!("ui_embed/{rel}"))
         )
         .expect("write");
     }
@@ -127,9 +146,27 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
         if path.is_dir() {
             collect_files(&path, &rel, out);
         } else if path.is_file() {
+            refuse_rel(&rel);
             out.push((rel, path));
         }
     }
+}
+
+fn refuse_rel(rel: &str) {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
+        panic!("rel paths must be relative with / separators: {rel}");
+    }
+    if rel.contains("..") {
+        panic!("refusing ui/dist relative path containing ..: {rel}");
+    }
+}
+
+fn embed_dest(embed_dir: &Path, rel: &str) -> PathBuf {
+    let mut dest = embed_dir.to_path_buf();
+    for part in rel.split('/') {
+        dest.push(part);
+    }
+    dest
 }
 
 fn rust_string_lit(s: &str) -> String {
