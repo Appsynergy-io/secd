@@ -234,6 +234,7 @@ no_build_paths() {
     if [[ "$hits" -ne 0 ]]; then
       echo "release: ${bin} embeds ${hits} build-machine paths under ${needle};" >&2
       echo "release: --remap-path-prefix is not taking effect" >&2
+      strings "$bin" | grep -F "$needle" >&2 || true
       exit 1
     fi
   done
@@ -287,6 +288,10 @@ if [[ "$do_sign" -eq 1 ]]; then
 fi
 
 if [[ "$do_build" -eq 1 ]]; then
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  # vendored openssl-sys bakes OPENSSLDIR under CARGO_TARGET_DIR; remap-path-prefix does not rewrite C strings.
+  export CARGO_TARGET_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/secd-release-target"
+fi
 case "$target" in
   x86_64-unknown-linux-musl)
     if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
