@@ -196,7 +196,7 @@ if [[ "$apply" -eq 0 ]]; then
   say "from repository secrets into the 'release' environment. Secret values"
   say "cannot be read back, so they have to be re-entered:"
   say "  1. the environment appears by itself the first time the release runs,"
-  say "     because release.yml declares environment: release"
+  say "     because ci.yml's sign/image jobs declare environment: release"
   say "  2. Settings > Environments > release > add both secrets, then delete"
   say "     them from Settings > Secrets and variables > Actions"
   say ""

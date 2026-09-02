@@ -10,20 +10,22 @@ runs:
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         # shared-key replaces the per-job key component, so every job in every
-        # workflow reads the same entry. Only main writes it: caches are
-        # branch-scoped, so an entry written on a PR branch is readable by
-        # nothing else and would just evict the one that is.
+        # workflow reads the same entry. Only `warm` (push to main) writes it:
+        # a tag or the weekly advisories run also sees refs/heads/main, and a
+        # save there would overwrite the debug+release artifact set with a
+        # cold one. Caches are branch-scoped, so an entry written on a PR
+        # branch is readable by nothing else and would just evict the one that is.
         shared-key: secd-v1
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         cache-on-failure: true
         cache-all-crates: true
         cache-bin: true
-    # PR runs restore only; main is the sole writer, matching rust-cache
-    # save-if. The key is the bun lockfile, so a package bump is a miss.
+    # PR / tag / schedule restore only; `warm` is the sole writer, matching
+    # rust-cache save-if. The key is the bun lockfile, so a package bump is a miss.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.bun/install/cache
         key: bun-${{ runner.os }}-${{ hashFiles('ui/bun.lock') }}
         restore-keys: |
           bun-${{ runner.os }}-
-        lookup-only: ${{ github.ref != 'refs/heads/main' }}
+        lookup-only: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}

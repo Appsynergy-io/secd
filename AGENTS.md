@@ -62,8 +62,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `scripts/k3s-apply.sh` | digest-pin GHCR image and apply `deploy/k3s` |
 | `deploy/k3s` | Deployment; the digest is bound at apply time, not committed |
 | `deploy/agent/` | pull-based CD for the cluster host: systemd timer, no inbound access |
-| `.github/workflows/ci.yml` | PR, merge queue and `main`: one lane per job behind the `gate` status; `warm` on `main` writes the shared cache |
-| `.github/workflows/release.yml` | tag `v*`: preflight → build → sign → image → publish |
+| `.github/workflows/ci.yml` | the pipeline. PR/merge-queue: `gate`. `push` to `main`: `warm`. tag `v*`: publish. Weekly: cargo-audit. |
 | `keys/cosign.pub` | verify key for `secd update` |
 | `skills/` | grok ≡ claude (later) |
 
@@ -91,5 +90,5 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - `ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes the bundler; run `scripts/check.sh ui` first.
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.
-- `gate` is the only check the ruleset requires, so every ci job but `warm` is one of its `needs`; `plan-contract.sh` proves it. A job outside that list can fail while the gate reports success.
+- `gate` is the only check the ruleset requires, so every job that reports on a pull request is one of its `needs`; tag, schedule and `warm` are exempt. `plan-contract.sh` proves both, and that `.github/workflows/` holds only `ci.yml`.
 - Dependabot opens minor and patch bumps grouped. ci re-pins `[pipeline]` on the bot's branch with a GitHub App token — a `GITHUB_TOKEN` push starts no run — and arms auto-merge. Anything not minor or patch stays for a human.
