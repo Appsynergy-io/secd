@@ -80,7 +80,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
 - A version is a promise about bytes, and the pipeline owns it. Push to `main` tags the next patch above the highest `v*` tag with `TAG_TOKEN` (`GITHUB_TOKEN` never retriggers), but only when the merge touched `src/ crates/ tools/ scripts/ deploy/ packaging/ keys/ ui/ Cargo.* rust-toolchain.toml`. The tag push publishes. Nothing uses `--clobber`.
 - Cargo.toml's version is the floor, not the answer. Raise it in a pull request only to force a minor or major; the publish chain stamps the tag over every file that restates it with `scripts/stamp-version.sh`, and never commits to `main`.
-- The release is the record of what should be deployed: the image job publishes image-digest.txt, and the apply refuses any digest that does not match it. `deploy/agent/` converges the cluster on a timer, pulling rather than being pushed to, so no cluster credential leaves the LAN.
+- The release is the record of what should be deployed: the image job publishes image-digest.txt, and the apply refuses any digest that does not match it. `deploy/agent/` converges the cluster on a timer, pulling rather than being pushed to, so no cluster credential leaves the LAN. It converges its own checkout on the released tag first, so the deploy logic and the image it applies are always the same release; `SECD_SELF_UPDATE=0` pins a host for debugging.
 - A released binary carries no path from the machine that built it. The release refuses one that does.
 - Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
 - DEK: kernel keyring, else `$XDG_RUNTIME_DIR/secd/` (tmpfs). `store` keeps a kernel write only if `load` reads it back.
@@ -88,7 +88,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - The audit chain fails closed. A write it cannot make, or a head it cannot read, fails the request being recorded; the chain never restarts from zero on an error.
 - One prose file: this document. `CLAUDE.md` is the same bytes. README.md is the install page. No docs/ or CODE.md.
 - `contract.toml` is closed. A new command, route, provider, T-ID, or `src/` file not on the allow-list fails `scripts/plan-contract.sh`.
-- Toolchain and bun 1.4.0 are pinned by version and sha256. bun is never the curl|bash installer.
+- Toolchain, bun 1.4.0 and cosign v2.5.0 are pinned by version and sha256, and every `ensure-` script decides by version, never by presence: a distribution cosign 3 on a cluster host refuses a key signature 2.5.0 verifies, and reported it as an unsigned image.
 - `ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes the bundler; run `scripts/check.sh ui` first.
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.

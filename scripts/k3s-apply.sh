@@ -216,11 +216,18 @@ os.chmod(os.path.join(cfg, "config.json"), 0o600)
 PY
   export DOCKER_CONFIG="$dockercfg"
 fi
+# Keep cosign's own words. Sent to /dev/null, an unreadable registry and a
+# cosign that cannot parse the signature both read as "is not signed", which
+# is the most alarming thing this script can say and was wrong both times.
+cosign_err="$(mktemp)"
 if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
-  "${img_host}/${img_name}@${digest}" >/dev/null 2>&1; then
-  echo "k3s-apply: ${digest} is not signed by keys/cosign.pub" >&2
+  "${img_host}/${img_name}@${digest}" >/dev/null 2>"$cosign_err"; then
+  echo "k3s-apply: cosign verify refused ${digest}:" >&2
+  grep -v '^WARNING' "$cosign_err" | head -5 >&2
+  rm -f "$cosign_err"
   exit 1
 fi
+rm -f "$cosign_err"
 echo "k3s-apply: signature ok" >&2
 
 if [[ -n "${KUBECTL:-}" ]]; then
