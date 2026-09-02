@@ -32,6 +32,8 @@ routes = [
   "POST /api/v1/device/poll",
   "POST /api/v1/device/approve",
   "POST /api/v1/device/revoke",
+  "GET /api/v1/device/pending",
+  "POST /api/v1/device/deny",
   "GET /api/v1/vault",
   "PUT /api/v1/vault",
   "GET /api/v1/vault/versions",
@@ -817,4 +819,16 @@ pending = false
 pending = false
 
 [tests.T_HDR_TLS13]
+pending = false
+
+[tests.T_AUDIT_GET_CHAIN]
+pending = false
+
+[tests.T_VAULT_ENTRY_UPDATED]
+pending = false
+
+[tests.T_DEVICE_PENDING_LIST]
+pending = false
+
+[tests.T_DEVICE_DENY]
 pending = false

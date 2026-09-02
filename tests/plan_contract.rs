@@ -25,6 +25,8 @@ const ROUTES: &[&str] = &[
     "POST /api/v1/device/poll",
     "POST /api/v1/device/approve",
     "POST /api/v1/device/revoke",
+    "GET /api/v1/device/pending",
+    "POST /api/v1/device/deny",
     "GET /api/v1/vault",
     "PUT /api/v1/vault",
     "GET /api/v1/vault/versions",
