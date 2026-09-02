@@ -243,19 +243,12 @@ def put_blob(digest, blob, content_type):
         if not loc:
             raise RuntimeError("registry upload: missing Location")
     session = session_url(start, loc)
-    # GHCR 404s a monolithic PUT of the blob. PATCH the session, then PUT
-    # the digest with an empty body. Complete against the POST session; a
-    # PATCH Location is a blob-store URL, not the session.
-    with do(
-        "PATCH",
-        session,
-        data=blob,
-        headers={"Content-Type": "application/octet-stream"},
-    ):
-        pass
+    # GHCR 405s PATCH on the session. Monolithic PUT of the blob with
+    # ?digest= on the POST session (plural /blobs/uploads/) is the path
+    # that v0.1.10's docker client used.
     sep = "&" if "?" in session else "?"
     complete = session + sep + "digest=" + urllib.parse.quote(digest, safe=":")
-    with do("PUT", complete, data=b""):
+    with do("PUT", complete, data=blob, headers={"Content-Type": content_type}):
         pass
 
 
