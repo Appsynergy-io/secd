@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use rand::RngCore;
@@ -22,8 +22,11 @@ const INTERVAL: u64 = 5;
 
 struct Device {
     hostname: String,
+    eph_pub: String,
     created: Instant,
+    created_at: SystemTime,
     approved: Option<Approved>,
+    denied: bool,
 }
 
 struct Approved {
@@ -92,7 +95,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/device/start", post(start))
         .route("/api/v1/device/poll", post(poll))
         .route("/api/v1/device/approve", post(approve))
+        .route("/api/v1/device/deny", post(deny))
         .route("/api/v1/device/revoke", post(revoke))
+        .route("/api/v1/device/pending", get(pending))
 }
 
 async fn start(State(state): State<AppState>, Json(body): Json<StartBody>) -> Response {
@@ -110,12 +115,15 @@ async fn start(State(state): State<AppState>, Json(body): Json<StartBody>) -> Re
     if device_id.is_empty() || hostname.is_empty() {
         return json_status(StatusCode::BAD_REQUEST, "device");
     }
-    let _ = (eph, device_id);
+    let eph_pub = hex::encode(&eph[..32]);
     let verification_uri = format!("{}/device", state.origin);
     let code = state.devices.insert(Device {
         hostname,
+        eph_pub,
         created: Instant::now(),
+        created_at: SystemTime::now(),
         approved: None,
+        denied: false,
     });
     json_value(
         StatusCode::OK,
@@ -137,6 +145,10 @@ async fn poll(State(state): State<AppState>, Json(body): Json<CodeBody>) -> Resp
     if now.saturating_duration_since(d.created) > DEVICE_TTL {
         g.remove(&body.user_code);
         return json_value(StatusCode::OK, json!({ "status": "expired" }));
+    }
+    if d.denied {
+        g.remove(&body.user_code);
+        return json_value(StatusCode::OK, json!({ "status": "denied" }));
     }
     match &d.approved {
         None => json_value(StatusCode::OK, json!({ "status": "pending" })),
@@ -168,6 +180,9 @@ async fn approve(
     if now.saturating_duration_since(d.created) > DEVICE_TTL {
         return fail_auth();
     }
+    if d.denied {
+        return json_status(StatusCode::BAD_REQUEST, "denied");
+    }
     if d.approved.is_some() {
         return json_status(StatusCode::BAD_REQUEST, "already approved");
     }
@@ -182,6 +197,61 @@ async fn approve(
         token,
         sealed_dek: body.sealed_dek,
     });
+    json_value(StatusCode::OK, json!({ "ok": true }))
+}
+
+async fn pending(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if state.sessions.console_from_headers(&headers).is_none() {
+        return fail_auth();
+    }
+    let now = Instant::now();
+    let mut g = lock(&state.devices.inner);
+    DevicePending::sweep(&mut g);
+    let mut rows: Vec<_> = g
+        .iter()
+        .filter(|(_, d)| d.approved.is_none() && !d.denied)
+        .map(|(code, d)| {
+            let expires_in = DEVICE_TTL
+                .saturating_sub(now.saturating_duration_since(d.created))
+                .as_secs();
+            (
+                d.created,
+                json!({
+                    "user_code": code,
+                    "hostname": d.hostname,
+                    "eph_pub": d.eph_pub,
+                    "created": crate::sessions::rfc3339(d.created_at),
+                    "expires_in": expires_in,
+                }),
+            )
+        })
+        .collect();
+    rows.sort_by_key(|(created, _)| *created);
+    let pending: Vec<Value> = rows.into_iter().map(|(_, row)| row).collect();
+    json_value(StatusCode::OK, json!({ "pending": pending }))
+}
+
+async fn deny(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeBody>,
+) -> Response {
+    if state.sessions.console_from_headers(&headers).is_none() {
+        return fail_auth();
+    }
+    let now = Instant::now();
+    let mut g = lock(&state.devices.inner);
+    DevicePending::sweep(&mut g);
+    let Some(d) = g.get_mut(&body.user_code) else {
+        return json_status(StatusCode::NOT_FOUND, "not found");
+    };
+    if now.saturating_duration_since(d.created) > DEVICE_TTL {
+        return json_status(StatusCode::NOT_FOUND, "not found");
+    }
+    if d.approved.is_some() {
+        return json_status(StatusCode::BAD_REQUEST, "already approved");
+    }
+    d.denied = true;
     json_value(StatusCode::OK, json!({ "ok": true }))
 }
 

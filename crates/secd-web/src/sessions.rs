@@ -419,7 +419,7 @@ fn from_unix(secs: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs.max(0) as u64)
 }
 
-fn rfc3339(t: SystemTime) -> String {
+pub(crate) fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
     let odt = OffsetDateTime::from_unix_timestamp(d.as_secs() as i64)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
