@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { clearDek, mintDek, setDek } from "./lib/crypto.ts";
+import type { AppState } from "./lib/host.ts";
+import { leaveAccess } from "./screens/access.ts";
+import { leaveActivity } from "./screens/activity.ts";
+import { leaveVault } from "./screens/vault.ts";
 import {
   HINTS,
   NAV,
@@ -28,7 +32,30 @@ function mount(): HTMLElement {
 
 const session = { email: "ops@imabee.com", session_id: "s1", has_passkey: true, has_password: false };
 
+const origFetch = globalThis.fetch;
+const painted: object[] = [];
+
+/** Paint the shell for real, but let no screen's load reach the network. */
+function paint(state: AppState): void {
+  painted.push(state);
+  render(state);
+}
+
+beforeEach(() => {
+  globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+});
+
 afterEach(() => {
+  for (const state of painted.splice(0)) {
+    leaveVault(state);
+    leaveActivity(state);
+    leaveAccess(state);
+  }
+  globalThis.fetch = origFetch;
   clearDek();
   document.body.replaceChildren();
 });
@@ -89,7 +116,7 @@ describe("shell", () => {
     const state = freshState("/activity");
     state.session.set(session);
     state.counts.set({ vault: 12, activity: 8 });
-    render(state);
+    paint(state);
     const items = [...root.querySelectorAll(".nav-item")];
     expect(items.map((a) => a.textContent)).toEqual(["Vault12", "Providers", "Devices", "Activity8", "Access"]);
     expect(root.querySelector('.nav-item[aria-current="page"]')?.getAttribute("href")).toBe("/activity");
@@ -108,10 +135,10 @@ describe("shell", () => {
     const root = mount();
     const state = freshState("/vault");
     state.session.set(session);
-    render(state);
+    paint(state);
     expect(root.querySelector('.shell[data-screen="gate"]')).not.toBeNull();
     setDek(mintDek());
-    render(state);
+    paint(state);
     expect(root.querySelector('.content[data-screen="vault"]')).not.toBeNull();
     expect(root.querySelector(".content")?.getAttribute("data-scroll")).toBe("hidden");
     expect(root.querySelector("[data-key]")?.textContent).toStartWith("vault key · ");
@@ -121,7 +148,7 @@ describe("shell", () => {
     const root = mount();
     for (const path of ["/vault", "/providers", "/devices", "/activity", "/access", "/device", "/"]) {
       const state = freshState(path);
-      render(state);
+      paint(state);
       expect(root.querySelector('.shell[data-screen="gate"]')).not.toBeNull();
       expect(root.querySelector(".side")).toBeNull();
     }
@@ -131,7 +158,7 @@ describe("shell", () => {
     const root = mount();
     const state = freshState("/access");
     state.session.set(session);
-    render(state);
+    paint(state);
     const toast = root.querySelector(".toast") as HTMLElement;
     expect(toast.hidden).toBe(true);
     flash(state, "Copied");

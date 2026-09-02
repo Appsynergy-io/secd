@@ -57,7 +57,7 @@ lane_shell() {
   fi
   local files=()
   while IFS= read -r f; do files+=("$f"); done < <(
-    git -C "$root" ls-files -- 'scripts/*.sh' 'packaging/*.sh' '.githooks/*' '.claude/hooks/*.sh'
+    git -C "$root" ls-files -- 'scripts/*.sh' 'packaging/*.sh' 'deploy/agent/*.sh' '.githooks/*' '.claude/hooks/*.sh'
   )
   [[ ${#files[@]} -gt 0 ]] || return 0
   shellcheck -x "${files[@]}"

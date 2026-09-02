@@ -360,7 +360,7 @@ jobs:
   # is a PAT so the tag push retriggers this file (publish jobs). The default
   # GITHUB_TOKEN never does. Never clobber an existing tag.
   tag:
-    name: tag — v from Cargo.toml
+    name: tag — next version from the tag history
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -369,8 +369,42 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The tags are the version, and the previous main commit is the
+          # diff base. Neither is in a shallow clone.
+          fetch-depth: 0
           persist-credentials: false
-      - name: tag if missing
+      # The whole publish chain hangs off the tag this job may push, so this
+      # is the cheap check that gates every expensive one: a merge that
+      # cannot change the released bytes never reaches the build matrix.
+      # Errs wide on purpose: a false positive costs one build, a false
+      # negative ships nothing and says so nowhere. .github/ is in because a
+      # build flag lives there. Out: *.md, tests/, contract.toml, skills/ --
+      # none of them reach a released byte.
+      - name: does this merge change what ships
+        id: ships
+        run: |
+          set -uo pipefail
+          if ! base="$(git rev-parse --verify -q HEAD^)"; then
+            echo "no previous commit; treating this as a release" >&2
+            echo "ships=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$base" HEAD \
+            | grep -qE '^(src/|crates/|tools/|scripts/|deploy/|packaging/|keys/|ui/|\.github/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'; then
+            echo "ships=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "ships=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: nothing to release
+        if: steps.ships.outputs.ships != 'true'
+        run: |
+          echo "tag: this merge changes no released byte; no tag, no build"
+      # Cargo.toml is the floor, not the answer: the pipeline owns the number
+      # so that no merge can silently reuse a version that already has a tag,
+      # which is how v0.1.18 came to describe five different trees. Raise the
+      # floor in a pull request only to force a minor or major.
+      - name: derive and push the next tag
+        if: steps.ships.outputs.ships == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAG_TOKEN }}
           SHA: ${{ github.sha }}
@@ -380,13 +414,24 @@ jobs:
             echo "tag: secrets.TAG_TOKEN is empty; GITHUB_TOKEN cannot retrigger this workflow" >&2
             exit 1
           }
-          ver="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
-          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] \
-            || { echo "tag: bad version ${ver}" >&2; exit 1; }
-          tag="v${ver}"
+          floor="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
+          [[ "$floor" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "tag: bad floor version ${floor}" >&2; exit 1; }
+          git fetch --tags --force -q origin
+          # `|| true`: an empty tag list makes grep exit 1, and pipefail would
+          # abort here instead of reaching the no-tags branch below.
+          last="$(git tag --list 'v[0-9]*' | sed 's/^v//' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [ -z "$last" ]; then
+            next="$floor"
+          else
+            bumped="$(echo "$last" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
+            next="$(printf '%s\n%s\n' "$floor" "$bumped" | sort -V | tail -n 1)"
+          fi
+          tag="v${next}"
           if git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null; then
-            echo "tag: ${tag} exists"
-            exit 0
+            echo "tag: ${tag} already exists; the derivation is wrong" >&2
+            exit 1
           fi
           # git push, not the refs API: creating a ref via API is a `create`
           # event and does not retrigger `on.push.tags`.
@@ -395,16 +440,16 @@ jobs:
           git tag -a "$tag" "$SHA" -m "$tag"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
             push origin "refs/tags/${tag}"
-          echo "tag: pushed ${tag} at ${SHA}"
+          echo "tag: floor ${floor}, last ${last:-none} -> pushed ${tag} at ${SHA}"
 
   # Tag (or a dispatch that names one). Cheap refusals, then the matrix,
   # then sign / image / publish. Compile jobs hold no secret and no write.
   # Fail-fast on the billed matrix: one bad OS kills the rest.
   #
   # The PR already validated this SHA. preflight proves that, and that the
-  # tag matches Cargo.toml, rather than running the suite again.
+  # tag stamps the tree cleanly, rather than running the suite again.
   preflight:
-    name: preflight — tag matches version and is on main
+    name: preflight — tag is on main and stamps clean
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -416,20 +461,34 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # Version agreement across all seven files that restate it, plus the
-      # pipeline pin. A release built from a half-bumped tree would name an
-      # image tag that does not exist.
+      # pipeline pin. Run against the committed tree, before any job stamps
+      # it: contract.toml pins the bytes of the deploy manifests, so the
+      # stamped tree is deliberately not what this rule describes.
       - run: scripts/check.sh contract
-      - name: tag matches the version and descends from main
+      - name: tag is at or above the floor and descends from main
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ver="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
-          [ "$TAG" = "v${ver}" ] || { echo "tag ${TAG} is not v${ver}" >&2; exit 1; }
+          ver="${TAG#v}"
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] \
+            || { echo "preflight: ${TAG} is not a version tag" >&2; exit 1; }
+          floor="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
+          # The tag job derives upward from the tag history, so a tag below
+          # the floor this tree declares can only be a hand-pushed mistake.
+          [ "$(printf '%s\n%s\n' "$floor" "$ver" | sort -V | tail -n 1)" = "$ver" ] \
+            || { echo "preflight: ${TAG} is below the floor v${floor}" >&2; exit 1; }
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$SHA" origin/main \
             || { echo "${SHA} is not an ancestor of main" >&2; exit 1; }
+      # Proves the stamp the build jobs depend on before the matrix costs
+      # anything: release.sh, publish-release.sh and k3s-apply.sh all refuse a
+      # tag that does not equal the Cargo.toml version.
+      - name: the tag stamps cleanly
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: scripts/stamp-version.sh "${TAG#v}"
 
   # Compilation. No secrets, no write permission: build.rs from every
   # transitive dependency runs here, so this job must be powerless.
@@ -456,6 +515,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: stamp the tag into the workspace
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: scripts/stamp-version.sh "${TAG#v}"
       - name: target
         env:
           TRIPLE: ${{ matrix.target }}
@@ -507,6 +570,10 @@ jobs:
           pattern: build-*
           merge-multiple: true
           path: target/release-dist
+      - name: stamp the tag into the workspace
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: scripts/stamp-version.sh "${TAG#v}"
       - name: sign
         env:
           COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
@@ -624,6 +691,10 @@ jobs:
         with:
           name: image-digest
           path: target/release-dist
+      - name: stamp the tag into the workspace
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: scripts/stamp-version.sh "${TAG#v}"
       - name: sbom
         run: scripts/sbom.sh target/release-dist/secd-sbom.cyclonedx.json
       # Explicit paths rather than a glob: the two released binaries, and not

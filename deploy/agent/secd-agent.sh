@@ -74,7 +74,19 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
+# Which tag that digest was published under. The pipeline derives the version
+# from the tag history rather than from a committed file, so this checkout's
+# Cargo.toml is a floor and names an older image -- k3s-apply.sh must be told
+# the released tag, not left to read one that no longer matches.
+loc="$(curl -fsSIL --proto '=https' "https://github.com/${REPO}/releases/latest" \
+  | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | tail -n 1)"
+ver="${loc##*/v}"
+[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
+  || secd_die "could not read the released version from ${loc:-<no redirect>}"
+
 # k3s-apply.sh re-resolves the tag, refuses a digest that does not match this
 # one, verifies the image signature against keys/cosign.pub, bounds the rollout
 # and rolls back on failure. The agent adds no deployment logic of its own.
-exec "$root/scripts/k3s-apply.sh" --expect-digest "$want"
+exec "$root/scripts/k3s-apply.sh" \
+  --image "ghcr.io/appsynergy-io/secd-web:${ver}" \
+  --expect-digest "$want"

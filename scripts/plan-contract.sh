@@ -270,9 +270,11 @@ else:
         if got != version:
             errors.append(f"{rel} is version {got}, but Cargo.toml is {version}")
 
+    # The floor, not what runs: the pipeline tags above this number and
+    # stamp-version.sh rewrites this line in the publish chain's checkout.
     doc = (root / "CLAUDE.md").read_text(encoding="utf-8")
-    if f"Version {version}." not in doc:
-        errors.append(f"CLAUDE.md does not say `Version {version}.`")
+    if f"Version floor {version}." not in doc:
+        errors.append(f"CLAUDE.md does not say `Version floor {version}.`")
 
     # Either a tag matching the version or a digest pinned by the release.
     dep = (root / "deploy/k3s/deployment.yaml").read_text(encoding="utf-8")
