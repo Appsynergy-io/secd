@@ -119,7 +119,13 @@ layer_digest = "sha256:" + hashlib.sha256(gz_bytes).hexdigest()
 config = {
     "architecture": "amd64",
     "os": "linux",
-    "config": {"Entrypoint": ["/secd-web"], "User": "1000"},
+    "config": {
+        "Entrypoint": ["/secd-web"],
+        "User": "1000",
+        "Labels": {
+            "org.opencontainers.image.source": "https://github.com/Appsynergy-io/secd",
+        },
+    },
     "rootfs": {"type": "layers", "diff_ids": [diff_id]},
 }
 config_bytes = (json.dumps(config, separators=(",", ":"), sort_keys=True) + "\n").encode()
@@ -185,17 +191,38 @@ def urlparse_path(url):
     return urllib.parse.urlparse(url).path
 
 
+def ensure_bearer():
+    # GHCR 403s a GitHub PAT sent as a registry Bearer (it does not 401),
+    # so exchange at GET /v2/ before the first upload. Never send the PAT.
+    global bearer
+    if bearer:
+        return
+    req = urllib.request.Request(registry + "/v2/", method="GET")
+    www = ""
+    try:
+        urllib.request.urlopen(req)
+    except urllib.error.HTTPError as e:
+        www = e.headers.get("WWW-Authenticate", "") or ""
+        if not www and e.code not in (401, 403):
+            raise RuntimeError(f"registry GET /v2/ -> HTTP {e.code}") from None
+    if not www:
+        www = f'Bearer realm="{registry}/token",service="{host}"'
+    bearer = fetch_bearer(www)
+
+
 def do(method, url, data=None, headers=None, retry_auth=True):
     global bearer
-    h = {"Authorization": "Bearer " + (bearer or token)}
+    ensure_bearer()
+    h = {"Authorization": "Bearer " + bearer}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
         return urllib.request.urlopen(req)
     except urllib.error.HTTPError as e:
-        if e.code == 401 and retry_auth and not bearer:
-            bearer = fetch_bearer(e.headers.get("WWW-Authenticate", ""))
+        www = e.headers.get("WWW-Authenticate", "") or ""
+        if e.code in (401, 403) and retry_auth and www:
+            bearer = fetch_bearer(www)
             return do(method, url, data=data, headers=headers, retry_auth=False)
         raise RuntimeError(f"registry {method} {urlparse_path(url)} -> HTTP {e.code}") from None
 
