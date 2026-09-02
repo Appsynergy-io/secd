@@ -1076,6 +1076,7 @@ fn T_AUTH_LOGOUT() {
             .unwrap_or("");
         assert!(set.contains("__Host-secd="));
         assert!(set.contains("Max-Age=0"));
+        assert!(set.contains("Expires="));
         let (s, _, raw) = exchange(
             &h.app,
             Method::GET,

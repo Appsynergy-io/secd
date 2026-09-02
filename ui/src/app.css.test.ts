@@ -6,19 +6,19 @@ const css = await Bun.file(resolve(root, "src/app.css")).text();
 
 describe("token layer", () => {
   test("Keyring ground, brass accent, and semantic tones are oklch tokens", () => {
-    expect(css).toContain("--color-bg: oklch(16% 0.012 250)");
-    expect(css).toContain("--color-surface: oklch(19% 0.012 250)");
-    expect(css).toContain("--color-accent: oklch(76% 0.14 78)");
+    expect(css).toContain("--color-bg: oklch(13% 0.008 240)");
+    expect(css).toContain("--color-surface: oklch(16% 0.008 240)");
+    expect(css).toContain("--color-accent: oklch(62% 0.07 48)");
     expect(css).toContain("--color-success: oklch(70% 0.15 145)");
     expect(css).toContain("--color-warning: oklch(78% 0.13 80)");
     expect(css).toContain("--color-danger: oklch(64% 0.18 25)");
     expect(css).toContain(
-      "--color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 42%)",
+      "--color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 28%)",
     );
     expect(css).not.toContain("--color-border: oklch(");
     expect(css).not.toContain("--color-accent: oklch(45%");
     expect(css).not.toContain("--color-danger: oklch(52%");
-    expect(css.match(/--color-accent: oklch\(76% 0\.14 78\)/g)?.length).toBe(1);
+    expect(css.match(/--color-accent: oklch\(62% 0\.07 48\)/g)?.length).toBe(1);
     expect(css.match(/--color-danger: oklch\(64% 0\.18 25\)/g)?.length).toBe(1);
   });
 
@@ -26,9 +26,9 @@ describe("token layer", () => {
     expect(css).toContain(':root[data-theme="light"]');
     expect(css).toContain("@media (prefers-color-scheme: light)");
     expect(css).toContain("--space: 8px");
-    expect(css).toContain("--color-bg: oklch(99% 0.012 250)");
-    expect(css).toContain("--color-surface: oklch(96% 0.012 250)");
-    expect(css).toContain("--color-focus: oklch(45% 0.12 78)");
+    expect(css).toContain("--color-bg: oklch(97% 0.008 90)");
+    expect(css).toContain("--color-surface: oklch(94% 0.008 90)");
+    expect(css).toContain("--color-focus: oklch(48% 0.08 48)");
     expect(css).toContain("--color-success: oklch(52% 0.15 145)");
   });
 

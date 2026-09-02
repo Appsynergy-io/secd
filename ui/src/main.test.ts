@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { FAIL_SENTENCE, LAST_FACTOR_SENTENCE } from "./lib/api.ts";
-import { clearDek, getDek, mintDek, setDek } from "./lib/crypto.ts";
+import { FAIL_SENTENCE, LAST_FACTOR_SENTENCE, LAST_KEY } from "./lib/api.ts";
+import { clearDek, getDek, mintDek, setDek, wrapPassword, wrapToJson } from "./lib/crypto.ts";
 import { signal } from "./lib/signal.ts";
 import {
   dekFactors,
@@ -44,17 +44,17 @@ describe("router", () => {
 
 describe("resolveGate", () => {
   test("live session is approve-only", () => {
-    const v = resolveGate({
-      session: {
-        email: "a@b.c",
-        has_passkey: true,
-        has_password: false,
-        session_id: "s1",
-      },
-    });
+    const session = {
+      email: "a@b.c",
+      has_passkey: true,
+      has_password: false,
+      session_id: "s1",
+    };
+    const v = resolveGate({ session, unlocked: true });
     expect(v.kind).toBe("approve-only");
     expect(v.showApprove).toBe(true);
     expect(v.showEmail).toBe(false);
+    expect(resolveGate({ session }).kind).toBe("remembered-passkey");
   });
 
   test("cold start shows email with webauthn autocomplete", () => {
@@ -521,6 +521,10 @@ describe("Account chain", () => {
     }) as unknown as typeof fetch;
     setDek(mintDek());
     expect(getDek()?.length).toBe(32);
+    localStorage.setItem(
+      LAST_KEY,
+      JSON.stringify({ email: "a@b.c", has_passkey: true, at: new Date().toISOString() }),
+    );
     const state = accountState({
       has_passkey: true,
       has_password: true,
@@ -535,6 +539,7 @@ describe("Account chain", () => {
     expect(state.path.get()).toBe("/");
     expect(state.error.get()).toBeUndefined();
     expect(root.querySelector(".error")).toBeNull();
+    expect(localStorage.getItem(LAST_KEY)).toBeNull();
   });
 
   test("in-flight GET /passkeys is ignored after leaving Account", async () => {
@@ -928,7 +933,9 @@ describe("Gate login", () => {
       const url = reqUrl(input);
       const method = String(init?.method ?? "GET");
       if (method === "POST" && url === "/api/auth/password/login") {
-        return new Response("{}", { status: 200 });
+        const dek = mintDek();
+        const wrap = wrapPassword(dek, new TextEncoder().encode("x"));
+        return new Response(JSON.stringify({ wraps: [wrapToJson(wrap)] }), { status: 200 });
       }
       if (method === "GET" && url === "/api/session") {
         return new Response(

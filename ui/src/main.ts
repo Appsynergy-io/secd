@@ -19,7 +19,9 @@ import {
 import { leaveActivity, renderActivity as renderActivityScreen } from "./screens/activity.ts";
 import { renderDevice } from "./screens/device.ts";
 import { abandonRegister, renderRegister as renderRegisterScreen } from "./screens/register.ts";
+import { getDek } from "./lib/crypto.ts";
 import {
+  forgetRemember,
   leaveGate,
   loadRemember,
   renderGate,
@@ -175,7 +177,7 @@ function nav(state: AppState, screen: Screen): HTMLElement {
     ["activity", "Activity"],
     ["account", "Account"],
   ];
-  return el(
+  const bar = el(
     "nav",
     { class: "nav", "aria-label": "Console" },
     items.map(([id, label]) =>
@@ -189,10 +191,26 @@ function nav(state: AppState, screen: Screen): HTMLElement {
       ),
     ),
   );
+  if (state.session.get() !== undefined) {
+    const out = el(
+      "button",
+      { type: "button", class: "secondary", "data-action": "logout" },
+      ["Sign out"],
+    );
+    out.addEventListener("click", () => {
+      void onLogout(state);
+    });
+    bar.append(out);
+  }
+  return bar;
 }
 
 export function renderRegister(state: AppState, root: HTMLElement): void {
-  renderRegisterScreen(state, root);
+  const host = state as AppState & { onLogout?: () => void };
+  host.onLogout = () => {
+    void onLogout(state);
+  };
+  renderRegisterScreen(host, root);
 }
 
 function renderActivity(state: AppState, root: HTMLElement): void {
@@ -234,7 +252,7 @@ export function render(state: AppState): void {
   }
   switch (screen) {
     case "device":
-      if (state.session.get() === undefined) {
+      if (state.session.get() === undefined || getDek() === undefined) {
         renderGate(state, root, gateHost(state));
       } else {
         renderDevice(state, root, () => {
@@ -243,13 +261,25 @@ export function render(state: AppState): void {
       }
       break;
     case "register":
-      renderRegister(state, root);
+      if (getDek() === undefined) {
+        renderGate(state, root, gateHost(state));
+      } else {
+        renderRegister(state, root);
+      }
       break;
     case "activity":
-      renderActivity(state, root);
+      if (state.session.get() === undefined) {
+        renderGate(state, root, gateHost(state));
+      } else {
+        renderActivity(state, root);
+      }
       break;
     case "account":
-      renderAccount(state, root);
+      if (state.session.get() === undefined) {
+        renderGate(state, root, gateHost(state));
+      } else {
+        renderAccount(state, root);
+      }
       break;
     default:
       renderGate(state, root, gateHost(state));
@@ -280,9 +310,12 @@ async function onLogout(state: AppState): Promise<void> {
 function signOutLocal(state: AppState): void {
   leaveAccount(state);
   leaveGate(state);
+  forgetRemember();
   state.session.set(undefined);
   state.pending.set(false);
   state.error.set(undefined);
+  state.method.set(undefined);
+  state.different.set(false);
   navigate(state, "/");
   render(state);
 }

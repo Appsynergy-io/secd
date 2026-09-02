@@ -10,6 +10,7 @@ import { clearDek, getDek, mintDek, setDek } from "../lib/crypto.ts";
 import { signal } from "../lib/signal.ts";
 import {
   CLIP_FAIL_SENTENCE,
+  forgetRemember,
   loadRemember,
   renderGate,
   resolveGate,
@@ -91,7 +92,10 @@ function submit(root: HTMLElement): void {
 
 describe("resolveGate", () => {
   test("five kinds from session, remember, method, and cold start", () => {
-    expect(resolveGate({ session: liveSession() }).kind).toBe("approve-only");
+    expect(resolveGate({ session: liveSession(), unlocked: true }).kind).toBe(
+      "approve-only",
+    );
+    expect(resolveGate({ session: liveSession() }).kind).not.toBe("approve-only");
     expect(resolveGate({ remember: { email: EMAIL, has_passkey: true, at: FRESH() } }).kind).toBe(
       "remembered-passkey",
     );
@@ -136,6 +140,13 @@ describe("gate screen", () => {
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: origNav });
     localStorage.clear();
     clearDek();
+  });
+
+  test("forgetRemember drops secd.last", () => {
+    remember(true);
+    expect(loadRemember()?.email).toBe(EMAIL);
+    forgetRemember();
+    expect(loadRemember()).toBeUndefined();
   });
 
   test("loadRemember reads secd.last", () => {
@@ -183,7 +194,7 @@ describe("gate screen", () => {
     expect(root.querySelector('[data-action="passkey"]')?.getAttribute("type")).toBe("submit");
   });
 
-  test("live session on / with empty user_code navigates to /register", () => {
+  test("live session on / without DEK stays on the gate", () => {
     const root = document.createElement("div");
     const posts: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -193,10 +204,19 @@ describe("gate screen", () => {
     const state = makeState({ session: liveSession(), path: "/", userCode: "" });
     const navs: string[] = [];
     renderGate(state, root, hostFor(state, root, navs));
-    expect(navs).toEqual(["/register"]);
-    expect(root.querySelector('[data-action="approve"]')).toBeNull();
-    expect(root.querySelector("form")).toBeNull();
+    expect(navs).toEqual([]);
+    expect(root.querySelector("form")).not.toBeNull();
     expect(posts).toEqual([]);
+  });
+
+  test("live session on / with DEK navigates to /register", () => {
+    setDek(mintDek());
+    const root = document.createElement("div");
+    const state = makeState({ session: liveSession(), path: "/", userCode: "" });
+    const navs: string[] = [];
+    renderGate(state, root, hostFor(state, root, navs));
+    expect(navs).toEqual(["/register"]);
+    expect(root.querySelector("form")).toBeNull();
   });
 
   test("429 uses the rate sentence; other failures use the fail sentence", async () => {
@@ -393,6 +413,9 @@ describe("gate screen", () => {
     submit(root);
     await Bun.sleep(1);
     expect(getDek()).toBeUndefined();
+    expect(state.session.get()).toBeUndefined();
+    expect(navs).toEqual([]);
+    expect(root.querySelector(".error")?.textContent).toBe(FAIL_SENTENCE);
   });
 
   test("method=register + passkey never calls passkey login endpoints", async () => {
