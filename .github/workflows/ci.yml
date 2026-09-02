@@ -756,12 +756,16 @@ jobs:
           path: target/release-dist
       # GHCR 403/404/405s the hand-rolled OCI PUT/PATCH. docker login +
       # docker push is the path that published v0.1.10. Dry-run still uses
-      # the python pusher against fake-registry.
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # the python pusher against fake-registry. No docker/login-action:
+      # Actions policy is selected (GitHub-owned + two pinned patterns),
+      # and GitHub validates every uses: in this file at parse time, even
+      # on a pull request that will skip this job.
+      - name: docker login
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: push and sign the image
         id: push
         env:
