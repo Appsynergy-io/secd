@@ -227,24 +227,32 @@ def do(method, url, data=None, headers=None, retry_auth=True):
         raise RuntimeError(f"registry {method} {urlparse_path(url)} -> HTTP {e.code}") from None
 
 
+def session_url(base, loc):
+    joined = urllib.parse.urljoin(base, loc)
+    p = urllib.parse.urlparse(joined)
+    # urljoin of a GHCR PATCH Location can collapse `uploads` to `upload`,
+    # which 404s. The session from POST is `/blobs/uploads/<uuid>`.
+    path = re.sub(r"/blobs/upload/(?!s)", "/blobs/uploads/", p.path)
+    return urllib.parse.urlunparse(p._replace(path=path))
+
+
 def put_blob(digest, blob, content_type):
     start = f"{registry}/v2/{name}/blobs/uploads/"
     with do("POST", start) as resp:
         loc = resp.headers.get("Location")
         if not loc:
             raise RuntimeError("registry upload: missing Location")
-    session = urllib.parse.urljoin(start, loc)
+    session = session_url(start, loc)
     # GHCR 404s a monolithic PUT of the blob. PATCH the session, then PUT
-    # the digest with an empty body (distribution-spec chunked upload).
+    # the digest with an empty body. Complete against the POST session; a
+    # PATCH Location is a blob-store URL, not the session.
     with do(
         "PATCH",
         session,
         data=blob,
         headers={"Content-Type": "application/octet-stream"},
-    ) as resp:
-        loc2 = resp.headers.get("Location")
-    if loc2:
-        session = urllib.parse.urljoin(session, loc2)
+    ):
+        pass
     sep = "&" if "?" in session else "?"
     complete = session + sep + "digest=" + urllib.parse.quote(digest, safe=":")
     with do("PUT", complete, data=b""):
