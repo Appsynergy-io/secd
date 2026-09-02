@@ -369,9 +369,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The tags are the version, and the previous main commit is the
-          # diff base. Neither is in a shallow clone.
+          # The tags are the version and the previous main commit is the diff
+          # base, so neither a shallow clone nor the default fetch-tags: false
+          # will do. checkout fetches them with its own credentials; a later
+          # `git fetch` cannot, because persist-credentials drops them and
+          # anonymous git from a runner is refused.
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
       # The whole publish chain hangs off the tag this job may push, so this
       # is the cheap check that gates every expensive one: a merge that
@@ -417,19 +421,23 @@ jobs:
           floor="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
           [[ "$floor" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "tag: bad floor version ${floor}" >&2; exit 1; }
-          git fetch --tags --force -q origin
           # `|| true`: an empty tag list makes grep exit 1, and pipefail would
           # abort here instead of reaching the no-tags branch below.
           last="$(git tag --list 'v[0-9]*' | sed 's/^v//' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          echo "tag: $(git tag --list 'v[0-9]*' | wc -l) version tags in the checkout"
           if [ -z "$last" ]; then
+            # A repository with no release yet. On this one it would mean the
+            # checkout brought no tags, and the push below refuses a duplicate.
             next="$floor"
           else
             bumped="$(echo "$last" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
             next="$(printf '%s\n%s\n' "$floor" "$bumped" | sort -V | tail -n 1)"
           fi
           tag="v${next}"
-          if git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null; then
+          # Local, from the checkout's own fetch: no network, so this cannot
+          # be an auth failure quietly reading as "the tag is free".
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "tag: ${tag} already exists; the derivation is wrong" >&2
             exit 1
           fi
