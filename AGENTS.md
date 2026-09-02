@@ -2,7 +2,7 @@
 
 LAN-only secrets store. Humans see values in the TUI and web console; agents never see a value. There is no `secd get`.
 
-Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.17.
+Host: `secd.imabee.com` (`192.168.101.122`) tcp 443. AppSynergy CA only. Version 0.1.18.
 
 Origin: `https://github.com/Appsynergy-io/secd.git`. Image: `ghcr.io/appsynergy-io/secd-web`. Apply: `scripts/k3s-apply.sh --expect-digest` against the digest the release published; `deploy/k3s` carries the version tag and the digest is bound at apply time. NAD/PVC/TLS stay in nuc-k3s.
 
