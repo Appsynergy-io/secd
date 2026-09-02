@@ -438,9 +438,19 @@ for rel in found_pipeline:
 # gate reports success and the pull request merges. That is how a required
 # check silently becomes advisory, without anyone editing the ruleset.
 #
-# `warm` is exempt: it runs only on push to main, after the merge, so there is
-# no pull request for it to gate.
-GATE_EXEMPT = {"gate", "warm"}
+# Jobs that never report on a pull request are exempt, and each one must carry
+# an `if:` marker that is false on `pull_request`. Without the marker a new
+# job can sit in GATE_EXEMPT, run on a PR, fail, and still leave the gate green.
+GATE_EXEMPT = {
+    "gate": None,
+    "warm": "refs/heads/main",
+    "preflight": "refs/tags/v",
+    "build": "refs/tags/v",
+    "sign": "refs/tags/v",
+    "image": "refs/tags/v",
+    "publish": "refs/tags/v",
+    "advisories": "schedule",
+}
 
 
 def job_needs(block: str) -> set[str]:
@@ -469,10 +479,24 @@ for rel in found_pipeline:
     _, jobs = workflow_jobs(rel)
     names = {name for name, _ in jobs}
     if "gate" not in names:
+        errors.append(f"{rel}: no job `gate`; the ruleset requires that check")
         continue
-    gate_block = next(block for name, block in jobs if name == "gate")
+    blocks = dict(jobs)
+    for name, marker in GATE_EXEMPT.items():
+        if name == "gate":
+            continue
+        if name not in blocks:
+            errors.append(f"{rel}: GATE_EXEMPT job `{name}` is not a job")
+            continue
+        if marker not in blocks[name]:
+            errors.append(
+                f"{rel}: exempt job `{name}` is missing if: marker {marker!r}; "
+                "without it the job can run on a pull request and still sit "
+                "outside gate.needs"
+            )
+    gate_block = blocks["gate"]
     needs = job_needs(gate_block)
-    unreached = sorted(names - GATE_EXEMPT - needs)
+    unreached = sorted(names - set(GATE_EXEMPT) - needs)
     if unreached:
         errors.append(
             f"{rel}: job `gate` does not depend on "
@@ -484,6 +508,18 @@ for rel in found_pipeline:
         errors.append(
             f"{rel}: job `gate` depends on " + ", ".join(phantom) + ", which is not a job"
         )
+
+# 14. one workflow file.
+#
+# GitHub treats every YAML under .github/workflows/ as a named workflow (a
+# notification stream, a check, a bill). Jobs skip by if:; they are not split
+# into files. A generator that writes a second system is a liability.
+wf = [p for p in found_pipeline if p.startswith(".github/workflows/")]
+if wf != [".github/workflows/ci.yml"]:
+    errors.append(
+        "exactly one workflow file allowed (.github/workflows/ci.yml); found: "
+        + (", ".join(wf) if wf else "none")
+    )
 
 if errors:
     sys.stderr.write("plan-contract:\n")

@@ -1,15 +1,34 @@
 name: ci
+# One workflow. GitHub treats every YAML under .github/workflows/ as a named
+# workflow (a notification stream, a check, a bill). Jobs skip by if:; a
+# second file is a second pipeline and plan-contract.sh refuses it.
+#
+# pull_request / merge_group / dispatch (no tag) → validate, once per SHA.
+# push to main → warm the cache. Does not rerun the suite.
+# push of v*.*.* / dispatch with tag → publish. Never cancel mid-publish.
+# schedule → cargo-audit. Advisories land between commits; this is the one
+# clock-driven job, and it opens an issue rather than reddening a PR.
 on:
   pull_request:
   merge_group:
   push:
     branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: existing tag to publish; empty runs the validate path
+        required: false
+        type: string
+        default: ""
 
 concurrency:
-  # Per pull request, so a force-push cancels its own predecessor and nothing
-  # else. Never cancel on main: `warm` is the only job that writes the cache.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Per pull request, so a force-push cancels its own predecessor. Tag,
+  # main and schedule share a group with cancel-in-progress off: never
+  # cancel a publish or the only cache write.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -27,7 +46,7 @@ jobs:
   # Reports in about a minute, so the cheap mistakes never cost a test run.
   fast:
     name: fast — contract, shell, workflow, fmt
-    if: github.event_name != 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -53,7 +72,7 @@ jobs:
   # commit.
   secrets:
     name: secrets — gitleaks over the tree and the history
-    if: github.event_name != 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -69,7 +88,7 @@ jobs:
   # cannot be resolved, everything is considered changed.
   changes:
     name: changes — what this pull request touches
-    if: github.event_name != 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -113,7 +132,7 @@ jobs:
   # is a prerequisite of every cargo job rather than a peer lane.
   ui:
     name: ui — bun console into ui/dist
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -132,7 +151,7 @@ jobs:
 
   bun-audit:
     name: bun-audit — bun audit against ui/bun.lock
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -145,7 +164,7 @@ jobs:
 
   crypto-parity:
     name: crypto-parity — bun dist matches secd-core vectors
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -158,7 +177,7 @@ jobs:
 
   clippy:
     name: clippy — workspace, all targets, warnings denied
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -178,7 +197,7 @@ jobs:
 
   test:
     name: test — workspace, debug
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -205,7 +224,7 @@ jobs:
 
   test-release:
     name: test-release — workspace, release profile
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [ui, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -231,7 +250,7 @@ jobs:
   # Only needs secd-core, so no ui dependency.
   compile-fail:
     name: compile-fail — Secret stays unprintable
-    if: github.event_name != 'push' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')) && needs.changes.outputs.code == 'true'
     needs: [fast, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -248,7 +267,7 @@ jobs:
   # is worth running even for a change the filter calls documentation.
   release-dry:
     name: release-dry — the release path against a local registry
-    if: github.event_name != 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')
     needs: [fast]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -473,26 +492,23 @@ jobs:
           )
           PY
 
-  # There is deliberately no dependency-review job here, and this is now a
-  # permanent exclusion rather than a wait. The dependency graph it needs is
-  # enabled -- scripts/repo-settings.sh --apply turned it on, which was the
-  # condition the earlier note left open -- and the job is still not worth
-  # having: scripts/audit.sh reports a strict superset of what dependency
-  # review would flag, from the same advisory database, and audit.yml already
-  # files what it finds as an issue rather than turning a pull request red for
-  # a dependency nobody in it touched. Two checks reading one database, one of
-  # which can only duplicate the other, is a slower gate and not a stricter
-  # one.
+  # There is deliberately no dependency-review job here. scripts/audit.sh
+  # reports a strict superset of what dependency review would flag, from the
+  # same advisory database, and the `advisories` job in this file files what
+  # it finds as an issue rather than turning a pull request red for a
+  # dependency nobody in it touched.
   #
   # `gate` is the only job named in branch protection, so its name is that
-  # check's context and cannot change. Every other job is a `needs` of this
-  # one -- plan-contract.sh proves it, because a job outside this list can
-  # fail while the gate reports success -- and that is what makes treating
-  # "skipped" as acceptable safe: a job skipped because its dependency failed
-  # is always accompanied by that dependency reporting "failure" here.
+  # check's context and cannot change. Every job that reports on a pull
+  # request is a `needs` of this one -- plan-contract.sh proves it, because a
+  # job outside this list can fail while the gate reports success -- and that
+  # is what makes treating "skipped" as acceptable safe: a job skipped
+  # because its dependency failed is always accompanied by that dependency
+  # reporting "failure" here. Tag, schedule and `warm` are exempt: they never
+  # report on a pull request.
   gate:
     name: gate
-    if: always() && github.event_name != 'push'
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == ''))
     needs:
       - changes
       - fast
@@ -544,13 +560,14 @@ jobs:
   # main only, and not part of the gate. This is the sole writer of the shared
   # cache: caches are branch-scoped, so without a run on the default branch
   # every pull request starts cold. Running every lane means the saved target/
-  # holds the debug and release artifact sets the lanes restore.
+  # holds the debug and release artifact sets the lanes restore. A tag push
+  # does not warm: the suite already ran on the PR that produced the SHA.
   #
   # fetch-depth: 0 because every lane includes `secrets`, whose history half
   # refuses a shallow clone.
   warm:
     name: warm — every lane on main, writes the shared cache
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -573,3 +590,306 @@ jobs:
         run: |
           keyctl new_session
           scripts/check.sh
+
+  # Tag (or a dispatch that names one). Cheap refusals, then the matrix,
+  # then sign / image / publish. Compile jobs hold no secret and no write.
+  # Fail-fast on the billed matrix: one bad OS kills the rest.
+  #
+  # The PR already validated this SHA. preflight proves that, and that the
+  # tag matches Cargo.toml, rather than running the suite again.
+  preflight:
+    name: preflight — tag, version and a green gate
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Version agreement across all seven files that restate it, plus the
+      # pipeline pin. A release built from a half-bumped tree would name an
+      # image tag that does not exist.
+      - run: scripts/check.sh contract
+      - name: tag matches the version and descends from main
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ver="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
+          [ "$TAG" = "v${ver}" ] || { echo "tag ${TAG} is not v${ver}" >&2; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SHA" origin/main \
+            || { echo "${SHA} is not an ancestor of main" >&2; exit 1; }
+      # The gate is what makes "PR ci is the test gate" true for this commit.
+      - name: ci was green for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name == "gate") | .conclusion] | index("success")' \
+            | grep -q . || { echo "no successful ci gate for ${SHA}" >&2; exit 1; }
+
+  # Compilation. No secrets, no write permission: build.rs from every
+  # transitive dependency runs here, so this job must be powerless.
+  build:
+    name: build — ${{ matrix.target }}
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    needs: [preflight]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            image: "yes"
+          - os: macos-14
+            target: aarch64-apple-darwin
+            image: "no"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: target
+        env:
+          TRIPLE: ${{ matrix.target }}
+        run: rustup target add "$TRIPLE"
+      - if: matrix.image == 'yes'
+        run: |
+          command -v musl-gcc >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          }
+      - if: matrix.image == 'yes'
+        run: scripts/check.sh ui
+      - name: build
+        env:
+          TRIPLE: ${{ matrix.target }}
+          WANT_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          args=(--target "$TRIPLE" --build-only)
+          [ "$WANT_IMAGE" = "yes" ] || args+=(--no-image)
+          scripts/release.sh "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: build-${{ matrix.target }}
+          path: target/release-dist/
+          if-no-files-found: error
+          # These hand one job's output to the next; the release itself is
+          # where the bytes live afterwards. The default of 90 days keeps
+          # signed binaries and the digest sitting in Actions storage for a
+          # quarter for no reason.
+          retention-days: 7
+
+  # Signing. Holds the cosign key and compiles nothing.
+  sign:
+    name: sign — cosign over both binaries
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: target/release-dist
+      - name: sign
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for triple in x86_64-unknown-linux-musl aarch64-apple-darwin; do
+            scripts/release.sh --target "$triple" --sign-only --no-image
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed
+          path: target/release-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # GHCR. Holds packages: write and compiles nothing. The image is signed
+  # here, because it is what actually runs and what the deploy pins.
+  image:
+    name: image — push and sign the GHCR manifest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      # Provenance only. Contract rule 10 keeps these off anything that compiles.
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: build-x86_64-unknown-linux-musl
+          path: target/release-dist
+      # GHCR 403/404/405s the hand-rolled OCI PUT/PATCH. docker login +
+      # docker push is the path that published v0.1.10. Dry-run still uses
+      # the python pusher against fake-registry.
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: push and sign the image
+        id: push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SECD_PUSH_WITH_DOCKER: "1"
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          digest="$(scripts/push-image.sh \
+            --binary target/release-dist/secd-web \
+            --image "ghcr.io/appsynergy-io/secd-web:${ver}" \
+            --extra-tag "sha-${GITHUB_SHA}")"
+          scripts/ensure-cosign.sh
+          cosign sign --key env://COSIGN_KEY --yes --tlog-upload=false \
+            "ghcr.io/appsynergy-io/secd-web@${digest}"
+          printf '%s\n' "$digest" > image-digest.txt
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/appsynergy-io/secd-web
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-digest
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job with contents: write. Draft, upload, verify, then publish.
+  publish:
+    name: publish — draft, verify, then release
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    needs: [preflight, sign, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed
+          path: target/release-dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-digest
+          path: target/release-dist
+      - name: sbom
+        run: scripts/sbom.sh target/release-dist/secd-sbom.cyclonedx.json
+      # Explicit paths rather than a glob: the two released binaries, and not
+      # their .sig files.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            target/release-dist/secd-x86_64-unknown-linux-musl
+            target/release-dist/secd-aarch64-apple-darwin
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: scripts/publish-release.sh --tag "$TAG" --target "$SHA"
+
+  # Weekly. rustsec can change with no commit. Files an issue; does not
+  # compile (the binary is pinned) and does not fail a pull request.
+  advisories:
+    name: advisories — cargo-audit, weekly
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # No setup action: this job compiles nothing and must not write the
+      # shared cache. scripts/audit.sh installs a pinned cargo-audit binary.
+      # This job holds issues: write, so it must not compile anything. It used
+      # to build cargo-audit from source here, which runs build.rs from that
+      # crate's whole dependency tree beside a token that can write to this
+      # repository -- and at whatever version crates.io served that morning.
+      - name: cargo-audit
+        id: audit
+        run: |
+          set -uo pipefail
+          scripts/audit.sh --json audit.json
+          echo "status=$?" >>"$GITHUB_OUTPUT"
+      - name: open an issue for anything found
+        if: steps.audit.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          summary="$(python3 - <<'PY'
+          import json
+
+          with open("audit.json", encoding="utf-8") as f:
+              report = json.load(f)
+          rows = []
+          for entry in report.get("vulnerabilities", {}).get("list", []):
+              advisory = entry.get("advisory", {})
+              package = entry.get("package", {})
+              rows.append(
+                  f"- `{package.get('name')} {package.get('version')}` — "
+                  f"{advisory.get('id')}: {advisory.get('title')}"
+              )
+          print("\n".join(rows) or "cargo-audit reported a problem with no advisory list.")
+          PY
+          )"
+          # One open issue at a time; a second week of the same advisories
+          # should update the conversation, not start a new one.
+          existing="$(gh -R "$REPO" issue list --state open --label advisory --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh -R "$REPO" issue comment "$existing" --body "$(printf 'Still open as of %s\n\n%s' "$RUN_URL" "$summary")"
+          else
+            gh -R "$REPO" issue create --label advisory \
+              --title "cargo-audit advisories" \
+              --body "$(printf '%s\n\n%s' "$summary" "$RUN_URL")"
+          fi

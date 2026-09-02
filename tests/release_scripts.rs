@@ -183,11 +183,26 @@ fn T_DEPLOY_DIGEST_BINDING() {
         "k3s-apply.sh no longer rolls back a failed rollout"
     );
 
-    let release =
-        fs::read_to_string(root().join(".github/workflows/release.yml")).expect("release.yml");
+    let ci = fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("ci.yml");
     assert!(
-        release.contains("image-digest.txt"),
+        ci.contains("image-digest.txt"),
         "the release no longer publishes the digest the deploy binds to"
+    );
+
+    let workflows: Vec<_> = fs::read_dir(root().join(".github/workflows"))
+        .expect("workflows dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x == "yml" || x == "yaml")
+        })
+        .collect();
+    assert_eq!(
+        workflows.len(),
+        1,
+        "a second workflow file is a second pipeline; found {workflows:?}"
     );
 
     let agent = fs::read_to_string(root().join("deploy/agent/secd-agent.sh"))
