@@ -450,6 +450,7 @@ GATE_EXEMPT = {
     "sign": "refs/tags/v",
     "image": "refs/tags/v",
     "publish": "refs/tags/v",
+    "ghcr-public": "ghcr-public",
 }
 
 

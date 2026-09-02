@@ -60,6 +60,7 @@ if [[ "${SECD_PUSH_WITH_DOCKER:-0}" == "1" ]]; then
   # Image expose stays off (no EXPOSE).
   cat >"$ctx/Dockerfile" <<'EOF'
 FROM scratch
+LABEL org.opencontainers.image.source="https://github.com/Appsynergy-io/secd"
 COPY secd-web /secd-web
 USER 1000
 ENTRYPOINT ["/secd-web"]

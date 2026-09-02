@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: existing tag to publish; empty runs the validate path
+        description: vX.Y.Z publishes; empty validates; ghcr-public sets the image public
         required: false
         type: string
         default: ""
@@ -405,7 +405,7 @@ jobs:
   # tag matches Cargo.toml, rather than running the suite again.
   preflight:
     name: preflight — tag matches version and is on main
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -435,7 +435,7 @@ jobs:
   # transitive dependency runs here, so this job must be powerless.
   build:
     name: build — ${{ matrix.target }}
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     needs: [preflight]
     permissions:
       contents: read
@@ -491,7 +491,7 @@ jobs:
   # Signing. Holds the cosign key and compiles nothing.
   sign:
     name: sign — cosign over both binaries
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -527,7 +527,7 @@ jobs:
   # here, because it is what actually runs and what the deploy pins.
   image:
     name: image — push and sign the GHCR manifest
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     needs: [build, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -580,6 +580,15 @@ jobs:
             "ghcr.io/appsynergy-io/secd-web@${digest}"
           printf '%s\n' "$digest" > image-digest.txt
           echo "digest=$digest" >>"$GITHUB_OUTPUT"
+      - name: package visibility public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set +e
+          gh api --method PATCH "orgs/${OWNER}/packages/container/secd-web" -f visibility=public
+          gh api "orgs/${OWNER}/packages/container/secd-web" --jq .visibility
+          set -e
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/appsynergy-io/secd-web
@@ -595,7 +604,7 @@ jobs:
   # The only job with contents: write. Draft, upload, verify, then publish.
   publish:
     name: publish — draft, verify, then release
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     needs: [preflight, sign, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -693,3 +702,38 @@ jobs:
               --title "cargo-audit advisories" \
               --body "$(printf '%s\n\n%s' "$summary" "$RUN_URL")"
           fi
+
+  # GHCR packages default private. k3s-apply and the cluster pull anonymously.
+  # GITHUB_TOKEN in this repository can manage the package this workflow pushed.
+  # Dispatch with tag=ghcr-public. Does not compile.
+  ghcr-public:
+    name: ghcr-public — secd-web package visibility
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag == 'ghcr-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: set secd-web public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          pkg="orgs/${OWNER}/packages/container/secd-web"
+          echo "GET ${pkg}"
+          gh api "$pkg" --jq '{name,visibility,repository:.repository.full_name}' || true
+          # Try every documented and observed visibility endpoint.
+          set +e
+          gh api --method PATCH "$pkg" -f visibility=public
+          echo "PATCH package: $?"
+          gh api --method PUT "$pkg" -f visibility=public
+          echo "PUT package: $?"
+          gh api --method PUT "${pkg}/settings" -f visibility=public
+          echo "PUT settings: $?"
+          gh api --method POST "${pkg}/visibility" -f visibility=public
+          echo "POST visibility: $?"
+          set -e
+          echo "GET after"
+          gh api "$pkg" --jq '{name,visibility,repository:.repository.full_name}'
