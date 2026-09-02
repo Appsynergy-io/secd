@@ -10,19 +10,27 @@ Type=oneshot
 # Adjust to wherever the checkout lives on the cluster host.
 WorkingDirectory=/opt/secd
 ExecStart=/opt/secd/deploy/agent/secd-agent.sh --once
-# The agent needs kubectl and the cluster's kubeconfig, nothing else. It holds
-# no GitHub credential: the digest it reads is a public release asset.
+# The agent needs kubectl and the cluster's kubeconfig. The digest it reads is
+# a public release asset, so no credential is needed for that; a private GHCR
+# package is the exception, and takes a read:packages GHCR_TOKEN in a drop-in
+# beside this file, which k3s-apply.sh uses for the registry and for cosign.
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 # k3s-apply.sh verifies the image signature and refuses to apply without
 # cosign, which scripts/ensure-cosign.sh fetches pinned and checksummed. It
 # needs somewhere to install it: ProtectHome=yes makes the default unwritable,
 # so give it the unit's own state directory.
 StateDirectory=secd
+# The agent moves this checkout to the released tag before it converges, so the
+# deploy logic and the image are the same release. ProtectSystem=strict makes
+# the whole tree read-only without this, and the checkout would never move.
+# Same path as WorkingDirectory; change both together.
+ReadWritePaths=/opt/secd
 Environment=CARGO_HOME=/var/lib/secd/cargo
 TimeoutStartSec=600
 Nice=10
 
-# It only ever reads the repo and talks to the cluster.
+# It talks to the cluster, and writes nothing outside its checkout and its
+# state directory.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

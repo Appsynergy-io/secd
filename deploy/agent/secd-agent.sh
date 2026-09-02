@@ -84,6 +84,37 @@ ver="${loc##*/v}"
 [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
   || secd_die "could not read the released version from ${loc:-<no redirect>}"
 
+# The deploy logic is this checkout, and nothing else updates it: k3s-apply.sh,
+# ensure-cosign.sh and keys/cosign.pub all run from here, so a fix to any of
+# them would need a person on the host. Move to the tag the release names, and
+# the release becomes the one record of what runs -- image and deploy alike.
+#
+# It runs the tag's code, which is the same trust as running the tag's image:
+# both are what the gate and the ruleset let onto main. Detached on purpose,
+# so a local edit is a refusal here rather than a merge conflict at 3am.
+if [[ "${SECD_SELF_UPDATE:-1}" == "1" ]] && [[ -d "$root/.git" ]]; then
+  if ! git -C "$root" diff --quiet HEAD -- 2>/dev/null; then
+    secd_die "$root has uncommitted changes; refusing to move it to v${ver}"
+  fi
+  at="$(git -C "$root" rev-parse -q --verify HEAD 2>/dev/null || true)"
+  want="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
+  if [[ -z "$want" ]]; then
+    git -C "$root" fetch --tags --quiet origin \
+      || secd_die "could not fetch tags into $root"
+    want="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
+  fi
+  [[ -n "$want" ]] || secd_die "v${ver} is not a tag in $root"
+  if [[ "$at" != "$want" ]]; then
+    echo "secd-agent: ${root} ${at:0:12} -> v${ver} (${want:0:12})"
+    git -C "$root" checkout --quiet --detach "$want" \
+      || secd_die "could not move $root to v${ver} -- under ProtectSystem=strict the unit needs ReadWritePaths=${root}"
+    # Re-exec: every script below this line just changed underneath us.
+    again=()
+    [[ "$dry_run" -eq 1 ]] && again+=(--dry-run)
+    exec "$root/deploy/agent/secd-agent.sh" "${again[@]}"
+  fi
+fi
+
 # k3s-apply.sh re-resolves the tag, refuses a digest that does not match this
 # one, verifies the image signature against keys/cosign.pub, bounds the rollout
 # and rolls back on failure. The agent adds no deployment logic of its own.

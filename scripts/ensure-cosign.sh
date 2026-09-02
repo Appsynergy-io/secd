@@ -13,7 +13,16 @@ export SECD_ROOT SECD_TOOL_TAG
 
 COSIGN_PINNED="v2.5.0"
 
-if command -v cosign >/dev/null 2>&1; then
+cosign_version() {
+  cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | cut -d+ -f1
+}
+
+# By version, not by presence -- the way scripts/audit.sh and scripts/sbom.sh
+# check theirs. A cluster host with a distribution cosign on PATH used to send
+# this straight to exit 0, and cosign 3 refuses a key signature that 2.5.0
+# verifies ("expected key signature, not certificate"), so the deploy failed
+# claiming the image was unsigned.
+if [[ "$(cosign_version)" == "$COSIGN_PINNED" ]]; then
   exit 0
 fi
 
@@ -41,4 +50,9 @@ curl -fsSL --proto '=https' -o "$tmp" \
 printf '%s  %s\n' "$sha" "$tmp" | secd_sha256 -c - >/dev/null \
   || secd_die "checksum mismatch for cosign ${COSIGN_PINNED}"
 install -m 0755 "$tmp" "$dest/cosign"
-echo "ensure-cosign: ${dest}/cosign" >&2
+# Installing it is not the same as it being the one that runs: another cosign
+# earlier on PATH would still win, silently, which is the bug this replaces.
+if [[ "$(cosign_version)" != "$COSIGN_PINNED" ]]; then
+  secd_die "cosign on PATH is $(cosign_version) not ${COSIGN_PINNED}; put ${dest} first"
+fi
+echo "ensure-cosign: ${dest}/cosign ${COSIGN_PINNED}" >&2
