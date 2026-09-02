@@ -319,19 +319,21 @@ pub(crate) fn last_audit_hash(db: &Db) -> anyhow::Result<String> {
 
 pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
     db.with(|conn| {
-        let stmt = conn
-            .prepare("SELECT action, session_id, names, prev_hash, hash FROM audit ORDER BY seq")?;
+        let stmt = conn.prepare(
+            "SELECT seq, action, session_id, names, prev_hash, hash FROM audit ORDER BY seq",
+        )?;
         let mut out = Vec::new();
         loop {
             match stmt.step()? {
                 Step::Done => break,
                 Step::Row => {
                     out.push(AuditRow {
-                        action: stmt.text(0).unwrap_or_default(),
-                        session_id: stmt.text(1),
-                        names: stmt.text(2).unwrap_or_else(|| "[]".into()),
-                        prev_hash: stmt.text(3).unwrap_or_default(),
-                        hash: stmt.text(4).unwrap_or_default(),
+                        seq: stmt.i64_at(0),
+                        action: stmt.text(1).unwrap_or_default(),
+                        session_id: stmt.text(2),
+                        names: stmt.text(3).unwrap_or_else(|| "[]".into()),
+                        prev_hash: stmt.text(4).unwrap_or_default(),
+                        hash: stmt.text(5).unwrap_or_default(),
                     });
                 }
             }
@@ -341,6 +343,7 @@ pub(crate) fn list_audit(db: &Db) -> anyhow::Result<Vec<AuditRow>> {
 }
 
 pub(crate) struct AuditRow {
+    pub seq: i64,
     pub action: String,
     pub session_id: Option<String>,
     pub names: String,
@@ -364,20 +367,27 @@ async fn get_audit(State(state): State<AppState>, headers: HeaderMap) -> Respons
         Ok(r) => r,
         Err(_) => return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     };
+    let head = rows.last().map_or_else(zero_hash, |row| row.hash.clone());
     let events: Vec<Value> = rows
         .into_iter()
         .map(|row| {
             let names: Value = serde_json::from_str(&row.names).unwrap_or_else(|_| json!([]));
             let mut m = serde_json::Map::new();
+            m.insert("seq".into(), json!(row.seq));
             m.insert("action".into(), json!(row.action));
             m.insert("names".into(), names);
             if let Some(id) = row.session_id {
                 m.insert("session_id".into(), json!(id));
             }
+            m.insert("prev".into(), json!(row.prev_hash));
+            m.insert("hash".into(), json!(row.hash));
             Value::Object(m)
         })
         .collect();
-    json_value(StatusCode::OK, json!({ "events": events }))
+    json_value(
+        StatusCode::OK,
+        json!({ "events": events, "head": head, "verified": state.audit.verify() }),
+    )
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -475,6 +485,8 @@ pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::db::Step;
+    use crate::state::AppState;
+    use axum::http::{header, HeaderValue};
 
     fn fresh_dir(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -496,6 +508,79 @@ mod tests {
             }
         })
         .expect("count")
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(f)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer"),
+        );
+        h
+    }
+
+    async fn get_audit_json(state: &AppState, token: &str) -> Value {
+        let res = get_audit(State(state.clone()), bearer(token)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The route is the chain: every row in order with its seq and hashes,
+    /// the head the next append will link to, and the verify verdict.
+    #[test]
+    fn T_AUDIT_GET_CHAIN() {
+        let dir = fresh_dir("audit-get");
+        let state = AppState::open(&dir).expect("state");
+        let (_id, token) = state
+            .sessions
+            .create_console("op@secd.test")
+            .expect("console");
+
+        let empty = block_on(get_audit_json(&state, &token));
+        assert_eq!(empty["events"], json!([]));
+        assert_eq!(empty["head"], json!(zero_hash()));
+        assert_eq!(empty["verified"], json!(true));
+
+        state
+            .audit
+            .record_names("vault.put", Some("s-1"), &["kv/a"])
+            .expect("first");
+        state.audit.record("session.revoke", None).expect("second");
+        let appended = state.audit.events();
+        assert_eq!(appended.len(), 2);
+
+        let body = block_on(get_audit_json(&state, &token));
+        let events = body["events"].as_array().expect("events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["seq"], json!(1));
+        assert_eq!(events[0]["action"], json!("vault.put"));
+        assert_eq!(events[0]["names"], json!(["kv/a"]));
+        assert_eq!(events[0]["session_id"], json!("s-1"));
+        assert_eq!(events[0]["prev"], json!(zero_hash()));
+        assert_eq!(events[0]["hash"], json!(appended[0].hash));
+        assert_eq!(events[1]["seq"], json!(2));
+        assert_eq!(events[1]["action"], json!("session.revoke"));
+        assert_eq!(events[1]["names"], json!([]));
+        assert!(events[1].get("session_id").is_none());
+        assert_eq!(events[1]["prev"], json!(appended[0].hash));
+        assert_eq!(events[1]["hash"], json!(appended[1].hash));
+        assert_eq!(body["head"], json!(appended[1].hash));
+        assert_eq!(body["verified"], json!(true));
+
+        let denied = block_on(get_audit(State(state.clone()), HeaderMap::new()));
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A head the chain cannot read is an error, never a chain that starts
