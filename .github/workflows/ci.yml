@@ -752,7 +752,16 @@ jobs:
             || { echo "ghcr-public: bad digest ${digest}" >&2; exit 1; }
           echo "digest=${digest}"
           docker pull "ghcr.io/appsynergy-io/secd-web@${digest}"
-          docker save "ghcr.io/appsynergy-io/secd-web@${digest}" -o secd-web.tar
+          # A digest-only save writes RepoTags:null; ctr import then has no
+          # name kubelet will use, and IfNotPresent still hits GHCR.
+          loc="$(curl -fsSIL https://github.com/Appsynergy-io/secd/releases/latest \
+            | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}')"
+          ver="${loc##*/v}"
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] \
+            || { echo "ghcr-public: bad latest tag ${loc}" >&2; exit 1; }
+          docker tag "ghcr.io/appsynergy-io/secd-web@${digest}" \
+            "ghcr.io/appsynergy-io/secd-web:${ver}"
+          docker save "ghcr.io/appsynergy-io/secd-web:${ver}" -o secd-web.tar
           gzip -n secd-web.tar
           printf '%s\n' "$digest" > image-digest.txt
           ls -l secd-web.tar.gz image-digest.txt
