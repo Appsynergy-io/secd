@@ -233,10 +233,21 @@ def put_blob(digest, blob, content_type):
         loc = resp.headers.get("Location")
         if not loc:
             raise RuntimeError("registry upload: missing Location")
-    upload = urllib.parse.urljoin(start, loc)
-    sep = "&" if "?" in upload else "?"
-    upload = upload + sep + "digest=" + urllib.parse.quote(digest, safe=":")
-    with do("PUT", upload, data=blob, headers={"Content-Type": content_type}):
+    session = urllib.parse.urljoin(start, loc)
+    # GHCR 404s a monolithic PUT of the blob. PATCH the session, then PUT
+    # the digest with an empty body (distribution-spec chunked upload).
+    with do(
+        "PATCH",
+        session,
+        data=blob,
+        headers={"Content-Type": "application/octet-stream"},
+    ) as resp:
+        loc2 = resp.headers.get("Location")
+    if loc2:
+        session = urllib.parse.urljoin(session, loc2)
+    sep = "&" if "?" in session else "?"
+    complete = session + sep + "digest=" + urllib.parse.quote(digest, safe=":")
+    with do("PUT", complete, data=b""):
         pass
 
 

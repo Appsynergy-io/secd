@@ -13,6 +13,8 @@ could plausibly make:
   * the token endpoint asserts the requested scope;
   * blob uploads return a *relative* Location, which is what GHCR sends and
     the shape most likely to be mishandled by urljoin;
+  * PATCH writes the blob, PUT with digest and an empty body completes it
+    (GHCR 404s a monolithic PUT);
   * every blob body is re-hashed and rejected on mismatch, which is what makes
     a gzip-determinism regression visible;
   * a manifest referencing an unknown blob, or naming the wrong size, is
@@ -140,6 +142,22 @@ class Handler(BaseHTTPRequestHandler):
             202, b"", {"Location": f"/v2/{m['name']}/blobs/uploads/{token}"}
         )
 
+    def do_PATCH(self):
+        if not self.authorized():
+            return self.refuse_or_challenge()
+        path, _, _ = self.path.partition("?")
+        m = re.fullmatch(r"/v2/(?P<name>.+)/blobs/uploads/(?P<token>[^/]+)", path)
+        if not m:
+            return self.fail(404, "not found")
+        data = self.body()
+        with LOCK:
+            if m["token"] not in UPLOADS:
+                return self.fail(404, "unknown upload")
+            UPLOADS[m["token"]] = data
+        return self.send(
+            202, b"", {"Location": f"/v2/{m['name']}/blobs/uploads/{m['token']}"}
+        )
+
     def do_PUT(self):
         if not self.authorized():
             return self.refuse_or_challenge()
@@ -148,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v2/(?P<name>.+)/blobs/uploads/(?P<token>[^/]+)", path)
         if m:
             want = (urllib.parse.parse_qs(query).get("digest") or [""])[0]
-            data = self.body()
+            data = self.body() or UPLOADS.get(m["token"], b"")
             got = "sha256:" + hashlib.sha256(data).hexdigest()
             if got != want:
                 return self.fail(400, f"digest {want} does not match body {got}")
