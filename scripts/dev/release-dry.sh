@@ -114,6 +114,32 @@ if grep -q "upload ${tag} draft=False" "$SECD_GH_DIR/transitions.log"; then
 fi
 echo "release-dry: draft -> upload -> verify -> publish, in that order"
 
+# ---------------------------------------------------------------- stamp
+
+# The tag the pipeline pushes is the first thing that ever runs the stamp, and
+# a tag cannot be taken back. Prove it here instead, over a copy of the tracked
+# tree so this lane never touches the working one, and assert the result is a
+# tree the contract still accepts -- that is exactly what preflight checks
+# before the build matrix costs anything.
+stamped="$work/stamped"
+mkdir -p "$stamped"
+git -C "$root" ls-files -z | tar -c --null -T - -f - | tar -x -C "$stamped"
+next="$(echo "$ver" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
+"$stamped/scripts/stamp-version.sh" "$next" >/dev/null
+# The same sites plan-contract.sh rule 9 requires to agree. A site added there
+# without being added to stamp-version.sh fails here, on the pull request,
+# rather than on a tag that has already been pushed.
+for f in Cargo.toml crates/secd-core/Cargo.toml crates/secd-web/Cargo.toml \
+  tools/import-legacy/Cargo.toml CLAUDE.md AGENTS.md \
+  deploy/k3s/deployment.yaml deploy/k3s/kustomization.yaml Cargo.lock; do
+  grep -qF -- "$next" "$stamped/$f" \
+    || secd_die "stamp-version did not write ${next} into ${f}"
+done
+if grep -qF -- "\"$ver\"" "$stamped/Cargo.toml"; then
+  secd_die "stamp-version left ${ver} in Cargo.toml"
+fi
+echo "release-dry: stamp-version ${ver} -> ${next} across every file that restates it"
+
 # ---------------------------------------------------------------- refusals
 
 expect_failure() {

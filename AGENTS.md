@@ -56,6 +56,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `scripts/push-image.sh` | deterministic scratch-image push; prints the manifest digest |
 | `scripts/ensure-cosign.sh` | pinned, checksummed cosign on PATH |
 | `scripts/sbom.sh` | pinned syft; CycloneDX SBOM to a chosen path |
+| `scripts/stamp-version.sh` | write the released version into every file that restates it; the publish chain runs it, no commit |
 | `scripts/repo-settings.sh` | the ruleset and settings the workflows cannot set themselves; dry run by default |
 | `scripts/publish-release.sh` | draft → upload → verify → publish, once |
 | `scripts/dev/` | local stand-ins: strict OCI registry, `gh`, and the release dry run |
@@ -77,7 +78,8 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
 - Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
 - No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
-- A version is a promise about bytes. The PR bumps Cargo.toml. Push to `main` tags `v` from that file with `TAG_TOKEN` (`GITHUB_TOKEN` never retriggers). The tag push publishes. Nothing uses `--clobber`.
+- A version is a promise about bytes, and the pipeline owns it. Push to `main` tags the next patch above the highest `v*` tag with `TAG_TOKEN` (`GITHUB_TOKEN` never retriggers), but only when the merge touched `src/ crates/ tools/ scripts/ deploy/ packaging/ keys/ ui/ Cargo.* rust-toolchain.toml`. The tag push publishes. Nothing uses `--clobber`.
+- Cargo.toml's version is the floor, not the answer. Raise it in a pull request only to force a minor or major; the publish chain stamps the tag over every file that restates it with `scripts/stamp-version.sh`, and never commits to `main`.
 - The release is the record of what should be deployed: the image job publishes image-digest.txt, and the apply refuses any digest that does not match it. `deploy/agent/` converges the cluster on a timer, pulling rather than being pushed to, so no cluster credential leaves the LAN.
 - A released binary carries no path from the machine that built it. The release refuses one that does.
 - Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
