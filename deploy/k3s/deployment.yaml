@@ -27,7 +27,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: secd-web
-          image: ghcr.io/appsynergy-io/secd-web:0.1.13
+          image: ghcr.io/appsynergy-io/secd-web:0.1.14
           imagePullPolicy: IfNotPresent
           args:
             - --hostname

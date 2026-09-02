@@ -6,8 +6,10 @@ let a broken pusher pass. It reproduces the parts of GHCR that the hand-rolled
 pusher in scripts/release.sh actually depends on, and rejects the mistakes it
 could plausibly make:
 
-  * the first request is answered 401 with a Bearer challenge, so
+  * GET /v2/ without Authorization is answered 401 with a Bearer challenge, so
     fetch_bearer()/parse_challenge() are exercised rather than skipped;
+  * a GitHub PAT sent as a registry Bearer is answered 403 (GHCR's shape),
+    so a pusher that only retries on 401 cannot pass;
   * the token endpoint asserts the requested scope;
   * blob uploads return a *relative* Location, which is what GHCR sends and
     the shape most likely to be mishandled by urljoin;
@@ -81,6 +83,12 @@ class Handler(BaseHTTPRequestHandler):
             {"WWW-Authenticate": f'Bearer realm="{realm}",service="fake-registry"'},
         )
 
+    def refuse_or_challenge(self):
+        auth = self.headers.get("Authorization")
+        if auth and not self.authorized():
+            return self.send(403, b"")
+        return self.challenge()
+
     def body(self) -> bytes:
         return self.rfile.read(int(self.headers.get("Content-Length", "0")))
 
@@ -94,8 +102,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.fail(400, f"unexpected scope {scope!r}")
             return self.send(200, json.dumps({"token": TOKEN}).encode())
 
+        if self.path in ("/v2", "/v2/"):
+            if not self.authorized():
+                return self.refuse_or_challenge()
+            return self.send(200, b"{}")
+
         if not self.authorized():
-            return self.challenge()
+            return self.refuse_or_challenge()
 
         m = re.fullmatch(r"/v2/(?P<name>.+)/manifests/(?P<ref>[^/]+)", self.path)
         if m:
@@ -115,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self.authorized():
-            return self.challenge()
+            return self.refuse_or_challenge()
         m = re.fullmatch(r"/v2/(?P<name>.+)/blobs/uploads/", self.path)
         if not m:
             return self.fail(404, "not found")
@@ -129,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self.authorized():
-            return self.challenge()
+            return self.refuse_or_challenge()
         path, _, query = self.path.partition("?")
 
         m = re.fullmatch(r"/v2/(?P<name>.+)/blobs/uploads/(?P<token>[^/]+)", path)

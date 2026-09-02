@@ -6,4 +6,4 @@ resources:
 images:
   - name: ghcr.io/appsynergy-io/secd-web
     newName: ghcr.io/appsynergy-io/secd-web
-    newTag: "0.1.13"
+    newTag: "0.1.14"
