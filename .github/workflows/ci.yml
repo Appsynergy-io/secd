@@ -142,7 +142,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: scripts/check.sh ui
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-dist
           path: ui/dist
@@ -356,7 +356,7 @@ jobs:
       - name: re-pin contract.toml [pipeline]
         if: ${{ !cancelled() }}
         run: scripts/check.sh pipeline --update
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
           name: dependabot-contract-toml
@@ -683,7 +683,7 @@ jobs:
           args=(--target "$TRIPLE" --build-only)
           [ "$WANT_IMAGE" = "yes" ] || args+=(--no-image)
           scripts/release.sh "${args[@]}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-${{ matrix.target }}
           path: target/release-dist/
@@ -722,7 +722,7 @@ jobs:
           for triple in x86_64-unknown-linux-musl aarch64-apple-darwin; do
             scripts/release.sh --target "$triple" --sign-only --no-image
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: signed
           path: target/release-dist/
@@ -791,7 +791,7 @@ jobs:
           subject-name: ghcr.io/appsynergy-io/secd-web
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-digest
           path: image-digest.txt
