@@ -12,9 +12,11 @@ pub fn router() -> Router<AppState> {
     let mut r = Router::new()
         .route_service("/", get(index))
         .route_service("/device", get(index))
-        .route_service("/register", get(index))
+        .route_service("/vault", get(index))
+        .route_service("/providers", get(index))
+        .route_service("/devices", get(index))
         .route_service("/activity", get(index))
-        .route_service("/account", get(index));
+        .route_service("/access", get(index));
     for path in ASSET_PATHS {
         r = r.route_service(path, get(asset));
     }
