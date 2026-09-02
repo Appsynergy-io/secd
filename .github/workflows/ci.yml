@@ -4,18 +4,17 @@ name: ci
 # second file is a second pipeline and plan-contract.sh refuses it.
 #
 # pull_request / merge_group / dispatch (no tag) → validate, once per SHA.
-# push to main → warm the cache. Does not rerun the suite.
+# push to main → seed cache and tag v from Cargo.toml. Does not rerun the suite.
+#   TAG_TOKEN (PAT) pushes the tag so this same file retriggers; GITHUB_TOKEN
+#   never does.
 # push of v*.*.* / dispatch with tag → publish. Never cancel mid-publish.
-# schedule → cargo-audit. Advisories land between commits; this is the one
-# clock-driven job, and it opens an issue rather than reddening a PR.
+# No schedule.
 on:
   pull_request:
   merge_group:
   push:
     branches: [main]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
-  schedule:
-    - cron: "17 6 * * 1"
   workflow_dispatch:
     inputs:
       tag:
@@ -25,9 +24,9 @@ on:
         default: ""
 
 concurrency:
-  # Per pull request, so a force-push cancels its own predecessor. Tag,
-  # main and schedule share a group with cancel-in-progress off: never
-  # cancel a publish or the only cache write.
+  # Per pull request, so a force-push cancels its own predecessor. Tag and
+  # main share a group with cancel-in-progress off: never cancel a publish
+  # or the only cache write.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -504,8 +503,8 @@ jobs:
   # job outside this list can fail while the gate reports success -- and that
   # is what makes treating "skipped" as acceptable safe: a job skipped
   # because its dependency failed is always accompanied by that dependency
-  # reporting "failure" here. Tag, schedule and `warm` are exempt: they never
-  # report on a pull request.
+  # reporting "failure" here. `warm` and `tag` (push to main) and the publish
+  # chain (tag v*) are exempt: they never report on a pull request.
   gate:
     name: gate
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == ''))
@@ -521,6 +520,7 @@ jobs:
       - test-release
       - compile-fail
       - release-dry
+      - advisories
       - dependabot-update
       - dependabot
     runs-on: ubuntu-24.04
@@ -557,39 +557,59 @@ jobs:
           print("gate: ok")
           PY
 
-  # main only, and not part of the gate. This is the sole writer of the shared
-  # cache: caches are branch-scoped, so without a run on the default branch
-  # every pull request starts cold. Running every lane means the saved target/
-  # holds the debug and release artifact sets the lanes restore. A tag push
-  # does not warm: the suite already ran on the PR that produced the SHA.
-  #
-  # fetch-depth: 0 because every lane includes `secrets`, whose history half
-  # refuses a shallow clone.
+  # main only, and not part of the gate. Seeds the shared cache: caches are
+  # branch-scoped, so without a run on the default branch every pull request
+  # starts cold. Does not rerun the suite; the merge queue already did.
   warm:
-    name: warm — every lane on main, writes the shared cache
+    name: warm — seed the shared cache
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: shellcheck
-        run: |
-          command -v shellcheck >/dev/null 2>&1 || {
-            sudo apt-get update
-            sudo apt-get install -y shellcheck
-          }
-      - uses: ./.github/actions/testdeps
-        id: testdeps
-      - name: check
+      - run: cargo fetch --locked
+
+  # main only. Tags v from Cargo.toml if that tag does not exist. TAG_TOKEN
+  # is a PAT so the tag push retriggers this file (publish jobs). The default
+  # GITHUB_TOKEN never does. Never clobber an existing tag.
+  tag:
+    name: tag — v from Cargo.toml
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: tag if missing
         env:
-          SECD_BROWSER: ${{ steps.testdeps.outputs.browser }}
+          GH_TOKEN: ${{ secrets.TAG_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
-          keyctl new_session
-          scripts/check.sh
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || {
+            echo "tag: secrets.TAG_TOKEN is empty; GITHUB_TOKEN cannot retrigger this workflow" >&2
+            exit 1
+          }
+          ver="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] \
+            || { echo "tag: bad version ${ver}" >&2; exit 1; }
+          tag="v${ver}"
+          if gh api "repos/${REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag: ${tag} exists"
+            exit 0
+          fi
+          obj="$(gh api "repos/${REPO}/git/tags" \
+            -f tag="$tag" -f message="$tag" -f object="$SHA" -f type=commit \
+            --jq .sha)"
+          gh api "repos/${REPO}/git/refs" -f ref="refs/tags/${tag}" -f sha="$obj"
+          echo "tag: pushed ${tag} at ${SHA}"
 
   # Tag (or a dispatch that names one). Cheap refusals, then the matrix,
   # then sign / image / publish. Compile jobs hold no secret and no write.
@@ -837,11 +857,13 @@ jobs:
           SHA: ${{ github.sha }}
         run: scripts/publish-release.sh --tag "$TAG" --target "$SHA"
 
-  # Weekly. rustsec can change with no commit. Files an issue; does not
-  # compile (the binary is pinned) and does not fail a pull request.
+  # Cheap. rustsec can change with no commit; this still runs on the PR so
+  # there is no clock. Files an issue; does not compile (the binary is pinned)
+  # and does not fail the job, so a dependency nobody touched does not redden
+  # the gate. It is still a needs of gate so a crash here cannot hide.
   advisories:
-    name: advisories — cargo-audit, weekly
-    if: github.event_name == 'schedule'
+    name: advisories — cargo-audit
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
