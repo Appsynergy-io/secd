@@ -1711,3 +1711,75 @@ select {
     margin-left: 0;
   }
 }
+
+/* screen: gate */
+
+.gate-field {
+  margin-top: 22px;
+}
+
+.gate-field .input,
+.gate-field .gate-pw,
+.gate-field .gate-account {
+  margin-top: 6px;
+}
+
+.gate-field + .gate-field {
+  margin-top: 14px;
+}
+
+.gate-account {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  font-size: 13px;
+  color: var(--color-text-2);
+  overflow-wrap: anywhere;
+}
+
+.gate-pw {
+  position: relative;
+}
+
+.gate-pw .input {
+  margin-top: 0;
+  padding-right: 60px;
+}
+
+.gate-pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+}
+
+.gate-alert {
+  margin-top: 12px;
+}
+
+.gate-primary {
+  margin-top: 16px;
+}
+
+.gate-links {
+  margin-top: 14px;
+  text-align: center;
+}
+
+.gate-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gate-link:hover {
+  color: var(--color-accent-text-hover);
+  text-decoration: underline;
+}
