@@ -108,7 +108,7 @@ SELECTED_ACTIONS=$(
 {
   "github_owned_allowed": true,
   "verified_allowed": false,
-  "patterns_allowed": ["Swatinem/rust-cache@*", "dependabot/fetch-metadata@*"]
+  "patterns_allowed": ["Swatinem/rust-cache@*"]
 }
 JSON
 )
@@ -202,12 +202,6 @@ if [[ "$apply" -eq 0 ]]; then
   say ""
   say "Also not doable by API: TAG_TOKEN, a PAT with contents:write that is not"
   say "GITHUB_TOKEN, so the tag job on push to main retriggers this workflow."
-  say ""
-  say "Also not doable by API: the GitHub App the ci 'dependabot' job signs in"
-  say "as. A dependabot-triggered run reads Dependabot secrets, not Actions"
-  say "secrets, so DEPENDABOT_APP_ID and DEPENDABOT_APP_PRIVATE_KEY go under"
-  say "Settings > Secrets and variables > Dependabot. The app needs contents:"
-  say "write and pull-requests: write on this repository and nothing else."
   exit 0
 fi
 
