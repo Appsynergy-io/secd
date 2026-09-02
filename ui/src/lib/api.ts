@@ -5,6 +5,9 @@ export const RATE_SENTENCE = "Too many attempts. Wait a minute.";
 export const EMAIL_AUTOCOMPLETE = "username webauthn";
 export const LAST_KEY = "secd.last";
 export const BREAKPOINT_PX = 900;
+/** Above this the vault list pane widens; above HINT_PX the header shows its hint. */
+export const WIDE_PX = 1120;
+export const HINT_PX = 1040;
 export const REMEMBER_DAYS = 30;
 export const NO_DEK_SENTENCE =
   "This browser holds no vault key. Sign out and sign in again, then retry.";
@@ -86,6 +89,18 @@ export function providersUrl(): string {
 
 export function auditUrl(): string {
   return "/api/v1/audit";
+}
+
+export function devicePendingUrl(): string {
+  return "/api/v1/device/pending";
+}
+
+export function deviceDenyUrl(): string {
+  return "/api/v1/device/deny";
+}
+
+export function providerDeletePath(name: string): string {
+  return `/api/v1/providers/${utf8PercentEncode(name)}`;
 }
 
 export function deviceApproveUrl(): string {

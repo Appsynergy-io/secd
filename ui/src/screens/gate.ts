@@ -1,10 +1,9 @@
-/** Sign-in: email, then passkey PRF or argon2id password. */
+/** Sign-in: email, then passkey PRF or argon2id password. The first sign-in
+ *  creates the vault. Paints into the bare shell; the DEK never leaves this tab. */
 
 import {
   EMAIL_AUTOCOMPLETE,
   FAIL_SENTENCE,
-  LAST_KEY,
-  RATE_SENTENCE,
   REMEMBER_DAYS,
   logoutUrl,
   passkeyLoginFinishUrl,
@@ -16,8 +15,31 @@ import {
   req,
   startUrl,
 } from "../lib/api.ts";
-import { getDek } from "../lib/crypto.ts";
-import { copyText } from "../lib/clipboard.ts";
+import {
+  clearDek,
+  emailOk,
+  getDek,
+  mintDek,
+  passwordOk,
+  setDek,
+  toHex,
+  unwrapAny,
+  wrapPasskey,
+  wrapPassword,
+  wrapToJson,
+  wrapsFromJson,
+  zeroizeBytes,
+} from "../lib/crypto.ts";
+import { asInput, el } from "../lib/dom.ts";
+import { currentLogoutGen } from "../lib/gen.ts";
+import type { AppState, AuthMethod, Host, SessionInfo } from "../lib/host.ts";
+import {
+  forgetRemember,
+  loadRemember,
+  saveRemember,
+  sentenceFor,
+  type Remembered,
+} from "../lib/remember.ts";
 import type { Signal } from "../lib/signal.ts";
 import {
   coercePublicKey,
@@ -27,20 +49,24 @@ import {
   serializeCredential,
 } from "../lib/webauthn.ts";
 
-export type AuthMethod = "register" | "passkey" | "password" | "either";
-
-export type SessionInfo = {
-  email: string;
-  has_passkey: boolean;
-  has_password: boolean;
-  session_id: string;
-};
-
-export type Remembered = {
-  email: string;
-  has_passkey: boolean;
-  at: string;
-};
+export const TITLE = "Sign in";
+export const SUB = "Unlocking derives the vault key in this browser. The server never sees it.";
+export const WELCOME_TITLE = "Welcome back.";
+export const PASSKEY_SUB = "Use your passkey.";
+export const PASSWORD_SUB = "Enter your password.";
+export const REGISTER_TITLE = "Create your vault";
+export const REGISTER_SUB =
+  "No vault exists yet. A password or a passkey derives its key in this browser. The server never sees it.";
+export const PASSKEY_LABEL = "Continue with passkey";
+export const PASSWORD_LABEL = "Use password";
+export const SIGN_IN_LABEL = "Sign in";
+export const CREATE_LABEL = "Create vault";
+export const CREATE_PASSKEY_LABEL = "Create passkey instead";
+export const DIFFERENT_LABEL = "Use a different account";
+export const PENDING_LABEL = "Signing in…";
+export const SHORT_SENTENCE = "Use at least 12 characters.";
+export const MISMATCH_SENTENCE = "The passwords do not match.";
+export const BRAND = "secd console";
 
 export type GateKind =
   | "approve-only"
@@ -49,111 +75,41 @@ export type GateKind =
   | "cold"
   | "identity";
 
+/** Which factor the primary button drives. */
+export type GateMode = "passkey" | "password" | "register";
+
 export type GateView = {
   kind: GateKind;
+  mode: GateMode;
   showEmail: boolean;
-  showPassword: boolean;
-  showPasskey: boolean;
-  showApprove: boolean;
-  emailAutocomplete: string | undefined;
   emailPrefill: string | undefined;
+  /** The factor the button under "or" switches to; undefined hides it. */
+  alternate: "passkey" | "password" | undefined;
   showUseDifferentAccount: boolean;
-  showUsePasswordInstead: boolean;
   userCode: string | undefined;
 };
 
-export type GateState = {
-  path: Signal<string>;
-  email: Signal<string>;
+export type GateCopy = {
+  title: string;
+  sub: string;
+  primary: string;
+  secondary: string | undefined;
+};
+
+type Store = {
+  root: HTMLElement;
+  host: Host;
   password: Signal<string>;
-  error: Signal<string | undefined>;
-  pending: Signal<boolean>;
-  session: Signal<SessionInfo | undefined>;
-  method: Signal<AuthMethod | undefined>;
-  different: Signal<boolean>;
-  revealPassword: Signal<boolean>;
-  userCode: Signal<string>;
+  confirm: string;
+  shown: boolean;
+  focus: "email" | "password" | "confirm" | undefined;
 };
 
-export type GateHost = {
-  navigate(to: string): void;
-  redraw(): void;
-  loadSession(): Promise<void>;
-};
-
-export function leaveGate(state: { password: Signal<string> }): void {
-  state.password.set("");
-}
-
-export const CLIP_FAIL_SENTENCE =
-  "The browser refused the clipboard. Select the value and copy it.";
-
-const clipFails = new WeakMap<object, boolean>();
-const focusHints = new WeakMap<object, "email" | "password" | "copy">();
+const stores = new WeakMap<object, Store>();
 
 function rememberIsFresh(atIso: string, nowMs: number): boolean {
   const at = Date.parse(atIso);
-  if (Number.isNaN(at)) {
-    return false;
-  }
-  return nowMs - at <= REMEMBER_DAYS * 24 * 60 * 60 * 1000;
-}
-
-export function loadRemember(): Remembered | undefined {
-  try {
-    const raw = localStorage.getItem(LAST_KEY);
-    if (!raw) {
-      return undefined;
-    }
-    const v = JSON.parse(raw) as unknown;
-    if (typeof v !== "object" || v === null) {
-      return undefined;
-    }
-    const rec = v as Record<string, unknown>;
-    if (typeof rec["email"] !== "string" || typeof rec["has_passkey"] !== "boolean") {
-      return undefined;
-    }
-    if (typeof rec["at"] !== "string") {
-      return undefined;
-    }
-    return {
-      email: rec["email"],
-      has_passkey: rec["has_passkey"],
-      at: rec["at"],
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-export function saveRemember(email: string, hasPasskey: boolean): void {
-  try {
-    localStorage.setItem(
-      LAST_KEY,
-      JSON.stringify({
-        email,
-        has_passkey: hasPasskey,
-        at: new Date().toISOString(),
-      }),
-    );
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
-
-export function forgetRemember(): void {
-  try {
-    localStorage.removeItem(LAST_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-export function sentenceFor(status: number): string {
-  if (status === 429) {
-    return RATE_SENTENCE;
-  }
-  return FAIL_SENTENCE;
+  return !Number.isNaN(at) && nowMs - at <= REMEMBER_DAYS * 24 * 60 * 60 * 1000;
 }
 
 export function resolveGate(q: {
@@ -170,20 +126,17 @@ export function resolveGate(q: {
   if (q.session && q.unlocked) {
     return {
       kind: "approve-only",
+      mode: "passkey",
       showEmail: false,
-      showPassword: false,
-      showPasskey: false,
-      showApprove: true,
-      emailAutocomplete: undefined,
       emailPrefill: undefined,
+      alternate: undefined,
       showUseDifferentAccount: false,
-      showUsePasswordInstead: false,
       userCode: q.userCode,
     };
   }
   const now = q.nowMs ?? Date.now();
   const fromSession =
-    q.session && !q.unlocked && !q.useDifferentAccount
+    q.session && !q.useDifferentAccount
       ? {
           email: q.session.email,
           has_passkey: q.session.has_passkey,
@@ -197,208 +150,105 @@ export function resolveGate(q: {
       : undefined);
   if (remembered) {
     if (remembered.has_passkey) {
+      const password = Boolean(q.revealPassword);
       return {
         kind: "remembered-passkey",
+        mode: password ? "password" : "passkey",
         showEmail: false,
-        showPassword: false,
-        showPasskey: true,
-        showApprove: false,
-        emailAutocomplete: undefined,
         emailPrefill: remembered.email,
+        alternate: password ? "passkey" : "password",
         showUseDifferentAccount: true,
-        showUsePasswordInstead: false,
         userCode: q.userCode,
       };
     }
     return {
       kind: "remembered-password",
+      mode: "password",
       showEmail: false,
-      showPassword: true,
-      showPasskey: false,
-      showApprove: false,
-      emailAutocomplete: undefined,
       emailPrefill: remembered.email,
+      alternate: undefined,
       showUseDifferentAccount: true,
-      showUsePasswordInstead: false,
       userCode: q.userCode,
     };
   }
+  const prefill = q.email ?? q.remember?.email;
   if (q.method) {
-    const showPassword =
-      q.method === "password" ||
-      q.method === "register" ||
-      (q.method === "either" && Boolean(q.revealPassword));
-    const showPasskey =
-      q.method === "passkey" || q.method === "register" || q.method === "either";
-    const showUsePassword = q.method === "either" && !q.revealPassword;
+    let mode: GateMode;
+    let alternate: GateView["alternate"];
+    switch (q.method) {
+      case "register":
+        mode = "register";
+        alternate = "passkey";
+        break;
+      case "password":
+        mode = "password";
+        alternate = undefined;
+        break;
+      case "passkey":
+        mode = "passkey";
+        alternate = undefined;
+        break;
+      default:
+        mode = q.revealPassword ? "password" : "passkey";
+        alternate = q.revealPassword ? "passkey" : "password";
+    }
     return {
       kind: "identity",
+      mode,
       showEmail: true,
-      showPassword,
-      showPasskey,
-      showApprove: false,
-      emailAutocomplete: EMAIL_AUTOCOMPLETE,
-      emailPrefill: q.email ?? q.remember?.email,
+      emailPrefill: prefill,
+      alternate,
       showUseDifferentAccount: Boolean(q.remember),
-      showUsePasswordInstead: showUsePassword,
       userCode: q.userCode,
     };
   }
   return {
     kind: "cold",
+    mode: q.revealPassword ? "password" : "passkey",
     showEmail: true,
-    showPassword: false,
-    showPasskey: false,
-    showApprove: false,
-    emailAutocomplete: EMAIL_AUTOCOMPLETE,
-    emailPrefill: q.email ?? q.remember?.email,
+    emailPrefill: prefill,
+    alternate: q.revealPassword ? "passkey" : "password",
     showUseDifferentAccount: false,
-    showUsePasswordInstead: false,
     userCode: q.userCode,
   };
 }
 
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string | boolean | undefined> = {},
-  children: Array<Node | string> = [],
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === false) {
-      continue;
-    }
-    if (v === true) {
-      node.setAttribute(k, "");
-      if (k === "disabled" && "disabled" in node) {
-        (node as HTMLButtonElement).disabled = true;
-      }
-      if (k === "readonly" && "readOnly" in node) {
-        (node as HTMLInputElement).readOnly = true;
-      }
-      continue;
-    }
-    node.setAttribute(k, v);
-    if (k === "value" && (tag === "input" || tag === "textarea")) {
-      (node as HTMLInputElement).value = v;
-    }
+/** Titles and button labels for a view. */
+export function copyFor(view: GateView, pending: boolean): GateCopy {
+  const remembered = view.kind === "remembered-passkey" || view.kind === "remembered-password";
+  let title = TITLE;
+  let sub = SUB;
+  if (view.mode === "register") {
+    title = REGISTER_TITLE;
+    sub = REGISTER_SUB;
+  } else if (remembered) {
+    title = WELCOME_TITLE;
+    sub = view.mode === "password" ? PASSWORD_SUB : PASSKEY_SUB;
   }
-  for (const child of children) {
-    node.append(typeof child === "string" ? document.createTextNode(child) : child);
+  let primary: string;
+  if (pending) {
+    primary = PENDING_LABEL;
+  } else if (view.mode === "register") {
+    primary = CREATE_LABEL;
+  } else if (view.mode === "password") {
+    primary = SIGN_IN_LABEL;
+  } else {
+    primary = PASSKEY_LABEL;
   }
-  return node;
+  let secondary: string | undefined;
+  if (view.alternate === "passkey") {
+    secondary = view.mode === "register" ? CREATE_PASSKEY_LABEL : PASSKEY_LABEL;
+  } else if (view.alternate === "password") {
+    secondary = PASSWORD_LABEL;
+  }
+  return { title, sub, primary, secondary };
 }
 
-function disable(btn: HTMLButtonElement, on: boolean): void {
-  btn.disabled = on;
-  if (on) {
-    btn.setAttribute("disabled", "");
-    return;
-  }
-  if (typeof btn.removeAttribute === "function") {
-    btn.removeAttribute("disabled");
-  }
+export function afterLoginPath(userCode: string): string {
+  return userCode === "" ? "/vault" : "/device";
 }
 
-function refreshGateControls(
-  page: HTMLElement,
-  view: GateView,
-  pending: boolean,
-  email: string,
-  password: string,
-  err: string | undefined,
-): void {
-  const reason = reasonFor({
-    pending,
-    showEmail: view.showEmail,
-    showPassword: view.showPassword,
-    email,
-    password,
-  });
-  const form = page.querySelector("form");
-  if (form instanceof HTMLElement) {
-    if (pending) {
-      form.setAttribute("aria-busy", "true");
-    } else if (typeof form.removeAttribute === "function") {
-      form.removeAttribute("aria-busy");
-    }
-  }
-  if (view.showEmail || view.showPassword) {
-    const cont = page.querySelector('button[type="submit"]');
-    if (cont instanceof HTMLButtonElement) {
-      const blocked =
-        pending ||
-        (view.showEmail && email === "") ||
-        (view.showPassword && password === "");
-      disable(cont, blocked);
-    }
-  }
-  const pk = page.querySelector('[data-action="passkey"]');
-  if (pk instanceof HTMLButtonElement) {
-    disable(pk, pending);
-  }
-  page.setAttribute(
-    "data-state",
-    pending ? "loading" : err ? "error" : reason ? "empty" : "ready",
-  );
-  const existing = page.querySelector("[data-reason]");
-  if (reason) {
-    if (existing) {
-      existing.textContent = reason;
-    } else {
-      page.append(el("p", { "data-reason": "" }, [reason]));
-    }
-  } else if (existing) {
-    existing.remove();
-  }
-}
-
-function afterLoginPath(userCode: string): string {
-  return userCode === "" ? "/register" : "/device";
-}
-
-function copyControl(value: string, onFail: () => void): HTMLElement {
-  const row = el("div", { class: "row" });
-  const field = el("input", {
-    class: "mono",
-    readonly: true,
-    autocomplete: "off",
-    "data-copy": "value",
-    "aria-label": "Error text",
-    value,
-  });
-  const btn = el(
-    "button",
-    {
-      type: "button",
-      class: "secondary",
-      "data-action": "copy",
-      "aria-label": "Copy error",
-    },
-    ["Copy"],
-  );
-  let copying = false;
-  btn.addEventListener("click", () => {
-    void (async () => {
-      if (copying) {
-        return;
-      }
-      copying = true;
-      const ok = await copyText(value);
-      if (ok) {
-        btn.textContent = "Copied";
-      } else {
-        btn.textContent = "Copy";
-        onFail();
-      }
-      copying = false;
-    })();
-  });
-  row.append(field, btn);
-  return row;
-}
-
-function viewOf(state: GateState): GateView {
+function viewOf(state: AppState): GateView {
   return resolveGate({
     session: state.session.get(),
     remember: loadRemember(),
@@ -411,502 +261,599 @@ function viewOf(state: GateState): GateView {
   });
 }
 
-async function rejectUnlockedSession(
-  state: GateState,
-  crypto: { clearDek: () => void },
-): Promise<void> {
-  try {
-    await req("POST", logoutUrl());
-  } catch {
-    /* cookie drop is best-effort; the tab must not stay unlocked */
+export function leaveGate(state: object): void {
+  const store = stores.get(state);
+  if (store) {
+    store.password.set("");
+    store.confirm = "";
+    store.shown = false;
+    stores.delete(state);
   }
-  crypto.clearDek();
-  state.session.set(undefined);
-  state.error.set(FAIL_SENTENCE);
-}
-
-function titleFor(kind: GateKind): string {
-  if (kind === "remembered-passkey" || kind === "remembered-password") {
-    return "Welcome back.";
-  }
-  if (kind === "identity") {
-    return "Continue.";
-  }
-  return "Sign in.";
-}
-
-function subFor(kind: GateKind): string {
-  switch (kind) {
-    case "cold":
-      return "Enter your email to continue.";
-    case "remembered-passkey":
-      return "Use your passkey.";
-    case "remembered-password":
-      return "Enter your password.";
-    case "identity":
-      return "Choose a factor.";
-    default:
-      return "";
+  const pw = (state as { password?: Signal<string> }).password;
+  if (pw !== undefined) {
+    pw.set("");
   }
 }
 
-function reasonFor(q: {
-  pending: boolean;
-  showEmail: boolean;
-  showPassword: boolean;
-  email: string;
-  password: string;
-}): string | undefined {
-  if (q.pending) {
-    return "Signing in.";
-  }
-  if (q.showEmail && q.email === "") {
-    return "Enter your email.";
-  }
-  if (q.showPassword && q.password === "") {
-    return "Enter your password.";
-  }
-  return undefined;
-}
-
-export function renderGate(state: GateState, root: HTMLElement, host: GateHost): void {
-  if (
-    state.session.get() !== undefined &&
-    getDek() !== undefined &&
-    state.path.get() === "/"
-  ) {
+export function renderGate(state: AppState, root: HTMLElement, host: Host): void {
+  if (state.session.get() !== undefined && getDek() !== undefined) {
     host.navigate(afterLoginPath(state.userCode.get()));
     return;
   }
-
-  const prevActive = document.activeElement;
-  const prevId =
-    prevActive instanceof HTMLElement &&
-    prevActive.id !== "" &&
-    root.contains(prevActive)
-      ? prevActive.id
-      : undefined;
-  const hadPassword = root.querySelector("#password") !== null;
-  const hadEmail = root.querySelector("#email") !== null;
-
-  const remember = loadRemember();
-  if (state.email.get() === "" && remember?.email) {
-    state.email.set(remember.email);
+  let store = stores.get(state);
+  if (!store) {
+    store = {
+      root,
+      host,
+      password: state.password,
+      confirm: "",
+      shown: false,
+      focus: undefined,
+    };
+    stores.set(state, store);
+  } else {
+    store.root = root;
+    store.host = host;
   }
-  const view = resolveGate({
-    session: state.session.get(),
-    remember,
-    email: state.email.get() || undefined,
-    method: state.method.get(),
-    useDifferentAccount: state.different.get(),
-    revealPassword: state.revealPassword.get(),
-    userCode: state.userCode.get() || undefined,
-    unlocked: getDek() !== undefined,
+  paint(state, store);
+}
+
+function passwordField(
+  q: {
+    id: "password" | "confirm";
+    label: string;
+    autocomplete: string;
+    value: string;
+    shown: boolean;
+  },
+  onInput: (value: string) => void,
+  onToggle: () => void,
+): HTMLElement {
+  const input = el("input", {
+    id: q.id,
+    name: q.id,
+    class: "input input-lg",
+    type: q.shown ? "text" : "password",
+    autocomplete: q.autocomplete,
+    spellcheck: "false",
   });
-  if (view.emailPrefill && state.email.get() === "") {
+  input.value = q.value;
+  input.addEventListener("input", () => {
+    onInput(input.value);
+  });
+  const toggle = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn-xs gate-pw-toggle",
+      "data-action": `${q.id}-toggle`,
+      "aria-label": q.shown ? `Hide ${q.label.toLowerCase()}` : `Show ${q.label.toLowerCase()}`,
+      "aria-pressed": q.shown ? "true" : "false",
+    },
+    [q.shown ? "Hide" : "Show"],
+  );
+  toggle.addEventListener("click", onToggle);
+  return el("div", { class: "gate-field" }, [
+    el("label", { class: "label label-lg", for: q.id }, [q.label]),
+    el("div", { class: "gate-pw" }, [input, toggle]),
+  ]);
+}
+
+function paint(state: AppState, store: Store): void {
+  const { root, host } = store;
+  const prev = document.activeElement;
+  const prevId =
+    prev instanceof HTMLElement && prev.id !== "" && root.contains(prev) ? prev.id : undefined;
+  const hadPassword = root.querySelector("#password") !== null;
+
+  const view = viewOf(state);
+  if (view.emailPrefill !== undefined && state.email.get() === "") {
     state.email.set(view.emailPrefill);
   }
-
   const pending = state.pending.get();
-  const reason = reasonFor({
-    pending,
-    showEmail: view.showEmail,
-    showPassword: view.showPassword,
-    email: state.email.get(),
-    password: state.password.get(),
-  });
+  const copy = copyFor(view, pending);
+  const err = state.error.get();
+
   const form = el("form", {
-    class: "secd-auth-form",
+    class: "gate-card",
+    "data-kind": view.kind,
+    "data-mode": view.mode,
     "aria-busy": pending ? "true" : undefined,
   });
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    const emailInput = form.querySelector("#email");
-    const passwordInput = form.querySelector("#password");
-    if (emailInput instanceof HTMLInputElement) {
-      state.email.set(emailInput.value);
-    }
-    if (passwordInput instanceof HTMLInputElement) {
-      state.password.set(passwordInput.value);
-    }
     if (state.pending.get()) {
       return;
     }
-    if (view.showEmail || view.showPassword) {
-      void onContinue(state, host);
-      return;
-    }
-    if (view.showPasskey) {
+    if (view.mode === "passkey") {
       void onPasskey(state, host);
+    } else {
+      void onContinue(state, host);
     }
   });
+  form.append(
+    el("div", { class: "gate-title" }, [copy.title]),
+    el("div", { class: "gate-sub" }, [copy.sub]),
+  );
 
-  if (view.emailPrefill && !view.showEmail && view.kind !== "approve-only") {
+  if (view.showEmail) {
+    const email = el("input", {
+      id: "email",
+      name: "email",
+      class: "input input-lg",
+      type: "email",
+      autocomplete: EMAIL_AUTOCOMPLETE,
+      placeholder: "you@company.com",
+      spellcheck: "false",
+    });
+    email.value = state.email.get();
+    email.addEventListener("input", () => {
+      state.email.set(email.value);
+    });
     form.append(
-      el("div", { class: "mono", "data-remembered": view.emailPrefill }, [view.emailPrefill]),
+      el("div", { class: "gate-field" }, [
+        el("label", { class: "label label-lg", for: "email" }, ["Email"]),
+        email,
+      ]),
+    );
+  } else if (view.emailPrefill !== undefined) {
+    form.append(
+      el("div", { class: "gate-field" }, [
+        el("div", { class: "label label-lg" }, ["Email"]),
+        el("div", { class: "gate-account mono", "data-remembered": "" }, [view.emailPrefill]),
+      ]),
     );
   }
-  if (view.showEmail) {
-    const input = el("input", {
-      id: "email",
-      type: "email",
-      name: "email",
-      class: "mono",
-      autocomplete: view.emailAutocomplete ?? EMAIL_AUTOCOMPLETE,
-      required: true,
-      value: view.emailPrefill ?? state.email.get(),
-    });
-    input.addEventListener("input", () => {
-      state.email.set(input.value);
-      const pageEl = input.closest("[data-page]");
-      if (pageEl instanceof HTMLElement) {
-        refreshGateControls(
-          pageEl,
-          view,
-          state.pending.get(),
-          state.email.get(),
-          state.password.get(),
-          state.error.get(),
-        );
-      }
-    });
-    form.append(el("label", { for: "email" }, ["Email"]), input);
+
+  if (view.mode === "password" || view.mode === "register") {
+    form.append(
+      passwordField(
+        {
+          id: "password",
+          label: "Password",
+          autocomplete: view.mode === "register" ? "new-password" : "current-password",
+          value: state.password.get(),
+          shown: store.shown,
+        },
+        (v) => {
+          state.password.set(v);
+        },
+        () => {
+          store.shown = !store.shown;
+          store.focus = "password";
+          paint(state, store);
+        },
+      ),
+    );
   }
-  if (view.showPassword) {
-    const input = el("input", {
-      id: "password",
-      type: "password",
-      name: "password",
-      autocomplete: "current-password",
-      required: true,
-    });
-    input.value = state.password.get();
-    input.addEventListener("input", () => {
-      state.password.set(input.value);
-      const pageEl = input.closest("[data-page]");
-      if (pageEl instanceof HTMLElement) {
-        refreshGateControls(
-          pageEl,
-          view,
-          state.pending.get(),
-          state.email.get(),
-          state.password.get(),
-          state.error.get(),
-        );
-      }
-    });
-    form.append(el("label", { for: "password" }, ["Password"]), input);
+  if (view.mode === "register") {
+    form.append(
+      passwordField(
+        {
+          id: "confirm",
+          label: "Confirm password",
+          autocomplete: "new-password",
+          value: store.confirm,
+          shown: store.shown,
+        },
+        (v) => {
+          store.confirm = v;
+        },
+        () => {
+          store.shown = !store.shown;
+          store.focus = "confirm";
+          paint(state, store);
+        },
+      ),
+    );
   }
 
-  if (view.showPasskey) {
-    const pk = el(
+  if (err !== undefined) {
+    form.append(el("div", { class: "alert alert-danger gate-alert", role: "alert" }, [err]));
+  }
+
+  const primary = el(
+    "button",
+    {
+      type: "submit",
+      class: "btn btn-primary btn-lg btn-block gate-primary",
+      "data-action": view.mode === "passkey" ? "passkey" : "continue",
+      disabled: pending,
+    },
+    [copy.primary],
+  );
+  primary.disabled = pending;
+  form.append(primary);
+
+  if (view.alternate !== undefined && copy.secondary !== undefined) {
+    const alternate = view.alternate;
+    const secondary = el(
       "button",
       {
-        type: view.showEmail || view.showPassword ? "button" : "submit",
-        "data-action": "passkey",
+        type: "button",
+        class: "btn btn-lg btn-block",
+        "data-action": alternate === "passkey" ? "passkey" : "password",
+        disabled: pending,
       },
-      ["Use a passkey"],
-    ) as HTMLButtonElement;
-    disable(pk, pending);
-    pk.addEventListener("click", (ev) => {
-      if (pk.type === "submit") {
+      [copy.secondary],
+    );
+    secondary.disabled = pending;
+    secondary.addEventListener("click", () => {
+      if (state.pending.get()) {
         return;
       }
-      ev.preventDefault();
-      const emailInput = form.querySelector("#email");
-      if (emailInput instanceof HTMLInputElement) {
-        state.email.set(emailInput.value);
+      if (alternate === "passkey") {
+        void onPasskey(state, host);
+        return;
       }
-      void onPasskey(state, host);
-    });
-    form.append(pk);
-  }
-
-  if (view.showEmail || view.showPassword) {
-    const cont = el("button", { type: "submit" }, ["Continue"]) as HTMLButtonElement;
-    const blocked =
-      pending ||
-      (view.showEmail && state.email.get() === "") ||
-      (view.showPassword && state.password.get() === "");
-    disable(cont, blocked);
-    form.append(cont);
-  }
-
-  if (view.showUsePasswordInstead) {
-    const pw = el(
-      "button",
-      { type: "button", class: "secondary", "data-action": "password" },
-      ["Use a password instead"],
-    );
-    pw.addEventListener("click", () => {
       state.revealPassword.set(true);
-      focusHints.set(state, "password");
-      host.redraw();
+      store.focus = "password";
+      paint(state, store);
     });
-    form.append(pw);
+    form.append(el("div", { class: "divider" }, ["or"]), secondary);
   }
+
   if (view.showUseDifferentAccount) {
-    const diff = el(
+    const different = el(
       "button",
-      { type: "button", class: "secondary", "data-action": "different" },
-      ["Use a different account"],
+      { type: "button", class: "gate-link", "data-action": "different" },
+      [DIFFERENT_LABEL],
     );
-    diff.addEventListener("click", () => {
+    different.addEventListener("click", () => {
+      forgetRemember();
       state.different.set(true);
       state.method.set(undefined);
+      state.revealPassword.set(false);
       state.password.set("");
-      focusHints.set(state, "email");
-      host.redraw();
+      state.email.set("");
+      state.error.set(undefined);
+      store.confirm = "";
+      store.focus = "email";
+      paint(state, store);
     });
-    form.append(diff);
+    form.append(el("div", { class: "gate-links" }, [different]));
   }
 
-  const err = state.error.get();
-  if (err === undefined) {
-    clipFails.delete(state);
-  }
-  const clipFail = clipFails.get(state) === true;
-  const sub = subFor(view.kind);
-  const page = el(
-    "div",
-    {
-      class: "app",
-      "data-page": "gate",
-      "data-kind": view.kind,
-      "data-state": pending ? "loading" : err ? "error" : reason ? "empty" : "ready",
-    },
-    [el("h1", {}, [titleFor(view.kind)]), sub ? el("p", {}, [sub]) : "", form],
-  );
-  if (reason) {
-    page.append(el("p", { "data-reason": "" }, [reason]));
-  }
-  if (err) {
-    page.append(
-      el("p", { class: "error", role: "alert" }, [clipFail ? CLIP_FAIL_SENTENCE : err]),
-      copyControl(err, () => {
-        clipFails.set(state, true);
-        focusHints.set(state, "copy");
-        host.redraw();
-      }),
-    );
-  }
+  const page = el("div", { class: "gate", "data-page": "gate" }, [
+    el("div", { class: "gate-wrap" }, [
+      el("div", { class: "gate-brand" }, [
+        el("div", { class: "brand-mark brand-mark-lg", "aria-hidden": "true" }, ["s"]),
+        el("div", {}, [BRAND]),
+      ]),
+      form,
+      el("div", { class: "gate-foot" }, [
+        `LAN only · ${globalThis.location?.host ?? ""} · TLS 1.3`,
+      ]),
+    ]),
+  ]);
   root.replaceChildren(page);
 
-  const hint = focusHints.get(state);
-  focusHints.delete(state);
-  const passwordJustRevealed = view.showPassword && !hadPassword;
-  const emailJustRevealed = view.showEmail && !hadEmail;
-  let target: HTMLElement | null = null;
-  if (passwordJustRevealed || hint === "password") {
-    target = page.querySelector("#password");
-  } else if (hint === "email" || emailJustRevealed) {
-    target = page.querySelector("#email");
-  } else if (hint === "copy" || clipFail) {
-    target = page.querySelector('[data-copy="value"]');
+  const hint = store.focus;
+  store.focus = undefined;
+  let targetId: string | undefined;
+  if (hint !== undefined) {
+    targetId = hint;
+  } else if ((view.mode === "password" || view.mode === "register") && !hadPassword) {
+    targetId = "password";
   } else if (prevId !== undefined) {
-    target = page.querySelector(`#${prevId}`);
+    targetId = prevId;
+  } else if (view.showEmail && state.email.get() === "") {
+    targetId = "email";
   }
+  const target = targetId === undefined ? null : asInput(page.querySelector(`#${targetId}`));
   if (target !== null && typeof target.focus === "function") {
     target.focus();
   }
 }
 
-export async function onContinue(state: GateState, host: GateHost): Promise<void> {
-  if (state.pending.get()) {
-    return;
-  }
-  state.pending.set(true);
-  state.error.set(undefined);
-  host.redraw();
-  try {
-    const crypto = await import("../lib/crypto.ts");
-    crypto.clearDek();
-    const view = viewOf(state);
-    const email = state.email.get();
-    const password = state.password.get();
-    if (view.showPassword && password !== "") {
-      const isRegister = state.method.get() === "register";
-      if (isRegister) {
-        const fresh = crypto.mintDek();
-        const pwBytes = new TextEncoder().encode(password);
-        try {
-          let body: Record<string, unknown>;
-          try {
-            const wrap = crypto.wrapPassword(fresh, pwBytes);
-            body = { email, password, wrap: crypto.wrapToJson(wrap) };
-          } catch {
-            state.password.set("");
-            state.error.set(FAIL_SENTENCE);
-            return;
-          }
-          const res = await req("POST", passwordRegisterUrl(), body);
-          state.password.set("");
-          if (res.status !== 200) {
-            state.error.set(sentenceFor(res.status));
-            return;
-          }
-          crypto.setDek(fresh);
-        } finally {
-          crypto.zeroizeBytes(fresh);
-          crypto.zeroizeBytes(pwBytes);
-        }
-      } else {
-        const res = await req("POST", passwordLoginUrl(), { email, password });
-        state.password.set("");
-        if (res.status !== 200) {
-          state.error.set(sentenceFor(res.status));
-          return;
-        }
-        const pwBytes = new TextEncoder().encode(password);
-        let opened: Uint8Array | undefined;
-        try {
-          opened = crypto.unwrapAny(crypto.wrapsFromJson(res.data), pwBytes, undefined);
-          if (opened !== undefined) {
-            crypto.setDek(opened);
-          }
-        } finally {
-          crypto.zeroizeBytes(pwBytes);
-          if (opened !== undefined) {
-            crypto.zeroizeBytes(opened);
-          }
-        }
-        if (getDek() === undefined) {
-          await rejectUnlockedSession(state, crypto);
-          return;
-        }
-      }
-      await host.loadSession();
-      if (state.session.get() === undefined || getDek() === undefined) {
-        await rejectUnlockedSession(state, crypto);
-        return;
-      }
-      saveRemember(email, false);
-      host.navigate(afterLoginPath(state.userCode.get()));
-      return;
-    }
-    const res = await req("POST", startUrl(), { email });
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-      return;
-    }
-    const data = res.data as { method?: string };
-    const method = data.method;
-    if (method === "passkey" || method === "password" || method === "either" || method === "register") {
-      state.method.set(method);
-    }
-  } catch {
-    state.error.set(FAIL_SENTENCE);
-  } finally {
-    state.pending.set(false);
-    host.redraw();
+function repaint(state: AppState): void {
+  const store = stores.get(state);
+  if (store) {
+    paint(state, store);
   }
 }
 
-export async function onPasskey(state: GateState, host: GateHost): Promise<void> {
+async function rejectUnlockedSession(state: AppState): Promise<void> {
+  try {
+    await req("POST", logoutUrl());
+  } catch {
+    /* cookie drop is best-effort; the tab must not stay unlocked */
+  }
+  clearDek();
+  state.session.set(undefined);
+  state.error.set(FAIL_SENTENCE);
+}
+
+async function resolveMethod(state: AppState, email: string): Promise<AuthMethod | undefined> {
+  const known = state.method.get();
+  if (known !== undefined) {
+    return known;
+  }
+  const res = await req("POST", startUrl(), { email });
+  if (res.status !== 200) {
+    state.error.set(sentenceFor(res.status));
+    return undefined;
+  }
+  const method = (res.data as { method?: unknown }).method;
+  if (method === "passkey" || method === "password" || method === "either" || method === "register") {
+    state.method.set(method);
+    return method;
+  }
+  state.error.set(FAIL_SENTENCE);
+  return undefined;
+}
+
+/** After the DEK is set: confirm the cookie session, remember the account, leave the gate. */
+async function finishUnlock(state: AppState, host: Host, email: string, viaPasskey: boolean): Promise<boolean> {
+  await host.loadSession();
+  if (state.session.get() === undefined || getDek() === undefined) {
+    await rejectUnlockedSession(state);
+    return false;
+  }
+  saveRemember(email, viaPasskey);
+  host.navigate(afterLoginPath(state.userCode.get()));
+  return true;
+}
+
+async function passwordRegister(state: AppState, email: string, password: string): Promise<boolean> {
+  const fresh = mintDek();
+  const pwBytes = new TextEncoder().encode(password);
+  try {
+    let body: Record<string, unknown>;
+    try {
+      body = { email, password, wrap: wrapToJson(wrapPassword(fresh, pwBytes)) };
+    } catch {
+      state.error.set(FAIL_SENTENCE);
+      return false;
+    }
+    const res = await req("POST", passwordRegisterUrl(), body);
+    if (res.status !== 200) {
+      state.error.set(sentenceFor(res.status));
+      return false;
+    }
+    setDek(fresh);
+    return true;
+  } finally {
+    zeroizeBytes(fresh);
+    zeroizeBytes(pwBytes);
+  }
+}
+
+async function passwordLogin(state: AppState, email: string, password: string): Promise<boolean> {
+  const res = await req("POST", passwordLoginUrl(), { email, password });
+  if (res.status !== 200) {
+    state.error.set(sentenceFor(res.status));
+    return false;
+  }
+  const pwBytes = new TextEncoder().encode(password);
+  let opened: Uint8Array | undefined;
+  try {
+    opened = unwrapAny(wrapsFromJson(res.data), pwBytes, undefined);
+    if (opened !== undefined) {
+      setDek(opened);
+    }
+  } finally {
+    zeroizeBytes(pwBytes);
+    if (opened !== undefined) {
+      zeroizeBytes(opened);
+    }
+  }
+  if (getDek() === undefined) {
+    await rejectUnlockedSession(state);
+    return false;
+  }
+  return true;
+}
+
+/** The primary button in password or register mode; resolves the method first when unknown. */
+export async function onContinue(state: AppState, host: Host): Promise<void> {
   if (state.pending.get()) {
     return;
   }
-  state.password.set("");
+  const email = emailOk(state.email.get());
+  if (email === undefined) {
+    state.error.set(FAIL_SENTENCE);
+    repaint(state);
+    return;
+  }
+  const view = viewOf(state);
+  const gen = currentLogoutGen();
   state.pending.set(true);
   state.error.set(undefined);
-  host.redraw();
+  repaint(state);
+  const store = stores.get(state);
   try {
-    const crypto = await import("../lib/crypto.ts");
-    crypto.clearDek();
-    const email = state.email.get();
-    if (state.method.get() === "register") {
-      const start = await req("POST", passkeyRegisterStartUrl(), { email });
-      if (start.status !== 200) {
-        state.error.set(sentenceFor(start.status));
-        return;
-      }
-      const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialCreationOptions;
-      const cred = await createPasskey(pk);
-      const prf = prfBytes(cred);
-      if (prf === undefined) {
-        state.error.set(FAIL_SENTENCE);
-        return;
-      }
-      const handle =
-        typeof (start.data as { handle?: unknown }).handle === "string"
-          ? (start.data as { handle: string }).handle
-          : "";
-      const fresh = crypto.mintDek();
-      try {
-        const wrap = crypto.wrapPasskey(fresh, prf, crypto.toHex(new Uint8Array(cred.rawId)));
-        const finish = await req("POST", passkeyRegisterFinishUrl(), {
-          handle,
-          credential: serializeCredential(cred),
-          wrap: crypto.wrapToJson(wrap),
-          email,
-        });
-        if (finish.status !== 200) {
-          state.error.set(sentenceFor(finish.status));
-          return;
-        }
-        crypto.setDek(fresh);
-      } finally {
-        crypto.zeroizeBytes(fresh);
-        crypto.zeroizeBytes(prf);
-      }
-    } else {
-      const start = await req("POST", passkeyLoginStartUrl(), {
-        email: email || undefined,
-      });
-      if (start.status !== 200) {
-        state.error.set(sentenceFor(start.status));
-        return;
-      }
-      const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialRequestOptions;
-      const cred = await getPasskey(pk, false);
-      const prf = prfBytes(cred);
-      if (prf === undefined) {
-        state.error.set(FAIL_SENTENCE);
-        return;
-      }
-      try {
-        const handle =
-          typeof (start.data as { handle?: unknown }).handle === "string"
-            ? (start.data as { handle: string }).handle
-            : "";
-        const finish = await req("POST", passkeyLoginFinishUrl(), {
-          handle,
-          credential: serializeCredential(cred),
-        });
-        if (finish.status !== 200) {
-          state.error.set(sentenceFor(finish.status));
-          return;
-        }
-        let opened: Uint8Array | undefined;
-        try {
-          opened = crypto.unwrapAny(crypto.wrapsFromJson(finish.data), undefined, prf);
-          if (opened !== undefined) {
-            crypto.setDek(opened);
-          }
-        } finally {
-          if (opened !== undefined) {
-            crypto.zeroizeBytes(opened);
-          }
-        }
-        if (getDek() === undefined) {
-          await rejectUnlockedSession(state, crypto);
-          return;
-        }
-      } finally {
-        crypto.zeroizeBytes(prf);
-      }
-    }
-    await host.loadSession();
-    if (state.session.get() === undefined || getDek() === undefined) {
-      await rejectUnlockedSession(state, crypto);
+    clearDek();
+    const knownPassword =
+      view.kind === "remembered-password" ||
+      (view.kind === "remembered-passkey" && view.mode === "password");
+    const method = knownPassword ? "password" : await resolveMethod(state, email);
+    if (gen !== currentLogoutGen()) {
       return;
     }
-    saveRemember(email, true);
-    host.navigate(afterLoginPath(state.userCode.get()));
+    if (method === undefined) {
+      return;
+    }
+    const password = state.password.get();
+    if (method === "register") {
+      if (view.mode !== "register") {
+        return;
+      }
+      if (!passwordOk(password)) {
+        state.error.set(password === "" ? FAIL_SENTENCE : SHORT_SENTENCE);
+        return;
+      }
+      if (store === undefined || store.confirm !== password) {
+        state.error.set(MISMATCH_SENTENCE);
+        return;
+      }
+      const ok = await passwordRegister(state, email, password);
+      state.password.set("");
+      store.confirm = "";
+      if (!ok || gen !== currentLogoutGen()) {
+        return;
+      }
+      await finishUnlock(state, host, email, false);
+      return;
+    }
+    if (method === "passkey") {
+      state.password.set("");
+      state.revealPassword.set(false);
+      return;
+    }
+    if (password === "") {
+      state.error.set(FAIL_SENTENCE);
+      return;
+    }
+    const ok = await passwordLogin(state, email, password);
+    state.password.set("");
+    if (!ok || gen !== currentLogoutGen()) {
+      return;
+    }
+    await finishUnlock(state, host, email, false);
+  } catch {
+    state.password.set("");
+    state.error.set(FAIL_SENTENCE);
+  } finally {
+    if (gen === currentLogoutGen()) {
+      state.pending.set(false);
+      repaint(state);
+    }
+  }
+}
+
+async function passkeyRegister(state: AppState, email: string): Promise<boolean> {
+  const start = await req("POST", passkeyRegisterStartUrl(), { email });
+  if (start.status !== 200) {
+    state.error.set(sentenceFor(start.status));
+    return false;
+  }
+  const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialCreationOptions;
+  const cred = await createPasskey(pk);
+  const prf = prfBytes(cred);
+  if (prf === undefined) {
+    state.error.set(FAIL_SENTENCE);
+    return false;
+  }
+  const handle =
+    typeof (start.data as { handle?: unknown }).handle === "string"
+      ? (start.data as { handle: string }).handle
+      : "";
+  const fresh = mintDek();
+  try {
+    const wrap = wrapPasskey(fresh, prf, toHex(new Uint8Array(cred.rawId)));
+    const finish = await req("POST", passkeyRegisterFinishUrl(), {
+      handle,
+      credential: serializeCredential(cred),
+      wrap: wrapToJson(wrap),
+      email,
+    });
+    if (finish.status !== 200) {
+      state.error.set(sentenceFor(finish.status));
+      return false;
+    }
+    setDek(fresh);
+    return true;
+  } finally {
+    zeroizeBytes(fresh);
+    zeroizeBytes(prf);
+  }
+}
+
+async function passkeyLogin(state: AppState, email: string): Promise<boolean> {
+  const start = await req("POST", passkeyLoginStartUrl(), { email });
+  if (start.status !== 200) {
+    state.error.set(sentenceFor(start.status));
+    return false;
+  }
+  const pk = coercePublicKey(start.data) as unknown as PublicKeyCredentialRequestOptions;
+  const cred = await getPasskey(pk, false);
+  const prf = prfBytes(cred);
+  if (prf === undefined) {
+    state.error.set(FAIL_SENTENCE);
+    return false;
+  }
+  try {
+    const handle =
+      typeof (start.data as { handle?: unknown }).handle === "string"
+        ? (start.data as { handle: string }).handle
+        : "";
+    const finish = await req("POST", passkeyLoginFinishUrl(), {
+      handle,
+      credential: serializeCredential(cred),
+      email,
+    });
+    if (finish.status !== 200) {
+      state.error.set(sentenceFor(finish.status));
+      return false;
+    }
+    let opened: Uint8Array | undefined;
+    try {
+      opened = unwrapAny(wrapsFromJson(finish.data), undefined, prf);
+      if (opened !== undefined) {
+        setDek(opened);
+      }
+    } finally {
+      if (opened !== undefined) {
+        zeroizeBytes(opened);
+      }
+    }
+    if (getDek() === undefined) {
+      await rejectUnlockedSession(state);
+      return false;
+    }
+    return true;
+  } finally {
+    zeroizeBytes(prf);
+  }
+}
+
+/** The passkey button: registers the first passkey when the vault is new, else signs in. */
+export async function onPasskey(state: AppState, host: Host): Promise<void> {
+  if (state.pending.get()) {
+    return;
+  }
+  const email = emailOk(state.email.get());
+  if (email === undefined) {
+    state.error.set(FAIL_SENTENCE);
+    repaint(state);
+    return;
+  }
+  const gen = currentLogoutGen();
+  state.password.set("");
+  const store = stores.get(state);
+  if (store) {
+    store.confirm = "";
+  }
+  state.pending.set(true);
+  state.error.set(undefined);
+  repaint(state);
+  try {
+    clearDek();
+    const remembered = viewOf(state).kind === "remembered-passkey";
+    const method = remembered ? "passkey" : await resolveMethod(state, email);
+    if (gen !== currentLogoutGen() || method === undefined) {
+      return;
+    }
+    if (method === "password") {
+      state.revealPassword.set(true);
+      if (store) {
+        store.focus = "password";
+      }
+      return;
+    }
+    const ok =
+      method === "register" ? await passkeyRegister(state, email) : await passkeyLogin(state, email);
+    if (!ok || gen !== currentLogoutGen()) {
+      return;
+    }
+    await finishUnlock(state, host, email, true);
   } catch {
     state.error.set(FAIL_SENTENCE);
   } finally {
-    state.pending.set(false);
-    host.redraw();
+    if (gen === currentLogoutGen()) {
+      state.pending.set(false);
+      repaint(state);
+    }
   }
 }

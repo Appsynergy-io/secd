@@ -26,6 +26,10 @@ secd_ensure_bun
 [[ "$(bun --version 2>/dev/null)" == "$BUN_PINNED" ]] \
   || secd_die "bun $(bun --version 2>/dev/null) is not pinned ${BUN_PINNED}"
 
+# The sidebar's version chip is the workspace version, bound at build time.
+version="$(sed -nE 's/^version = "([^"]+)"/\1/p' "$root/Cargo.toml" | head -n 1)"
+[[ -n "$version" ]] || secd_die "build-ui: no version in Cargo.toml"
+
 ui="$root/ui"
 cd "$ui"
 bun install --frozen-lockfile --ignore-scripts
@@ -40,7 +44,8 @@ bun build ./index.html \
   --entry-naming "[name].[ext]" \
   --chunk-naming "[name]-[hash].[ext]" \
   --asset-naming "[name].[ext]" \
-  --external="*.woff2"
+  --external="*.woff2" \
+  --define "SECD_VERSION=\"$version\""
 mkdir -p dist/fonts
 cp -a fonts/*.woff2 fonts/OFL.txt dist/fonts/
 [[ -f dist/fonts/geist-latin-wght-normal.woff2 && -f dist/fonts/geist-mono-latin-wght-normal.woff2 ]] \

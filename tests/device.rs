@@ -109,6 +109,11 @@ async fn post_json(
     (s, h, v)
 }
 
+async fn get_json(app: &Router, path: &str, cookie: Option<&str>) -> (StatusCode, Value) {
+    let (s, _, b) = exchange(app, Method::GET, path, None, None, cookie, None).await;
+    (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+}
+
 fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let raw = headers.get(header::SET_COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
@@ -173,6 +178,19 @@ async fn start_ok(h: &H) -> Value {
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     v
+}
+
+fn looks_rfc3339(s: &str) -> bool {
+    let Some((date, rest)) = s.split_once('T') else {
+        return false;
+    };
+    date.len() == 10 && (rest.ends_with('Z') || rest.contains('+'))
+}
+
+fn lowercase_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn open_sealed(sealed: &Value, secret: &x25519_dalek::StaticSecret) -> Option<[u8; 32]> {
@@ -564,6 +582,140 @@ fn T_DEV_APPROVE_BAD_SEALED() {
         )
         .await;
         assert_eq!(s, StatusCode::OK);
+    });
+}
+
+#[test]
+fn T_DEVICE_PENDING_LIST() {
+    block_on(async {
+        let h = fresh();
+        let eph_a = "aa".repeat(32);
+        let eph_b = "BB".repeat(32);
+        let (s, _, a) = post_json(
+            &h.app,
+            "/api/v1/device/start",
+            &json!({"eph_pub": eph_a, "device_id": "dev-a", "hostname": "host-a"}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{a}");
+        let code_a = a["user_code"].as_str().expect("code a").to_string();
+        let (s, _, b) = post_json(
+            &h.app,
+            "/api/v1/device/start",
+            &json!({"eph_pub": eph_b, "device_id": "dev-b", "hostname": "host-b"}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let code_b = b["user_code"].as_str().expect("code b").to_string();
+
+        let (s, v) = get_json(&h.app, "/api/v1/device/pending", None).await;
+        assert!(
+            s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN,
+            "{s} {v}"
+        );
+
+        let cookie = login(&h).await;
+        let (s, v) = get_json(&h.app, "/api/v1/device/pending", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let rows = v["pending"].as_array().expect("pending");
+        assert_eq!(rows.len(), 2, "{v}");
+        assert_eq!(rows[0]["user_code"], code_a);
+        assert_eq!(rows[0]["hostname"], "host-a");
+        assert_eq!(rows[1]["user_code"], code_b);
+        assert_eq!(rows[1]["hostname"], "host-b");
+        for (row, want_eph) in [(&rows[0], "aa".repeat(32)), (&rows[1], "bb".repeat(32))] {
+            let eph = row["eph_pub"].as_str().expect("eph_pub");
+            assert!(lowercase_hex64(eph), "{eph}");
+            assert_eq!(eph, want_eph);
+            let created = row["created"].as_str().expect("created");
+            assert!(looks_rfc3339(created), "{created}");
+            let expires = row["expires_in"].as_u64().expect("expires_in");
+            assert!(expires > 0 && expires <= 600, "{expires}");
+        }
+
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/device/approve",
+            &json!({"user_code": code_a, "sealed_dek": seal_to(&eph_a, &[0x21; 32])}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, v) = get_json(&h.app, "/api/v1/device/pending", Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let rows = v["pending"].as_array().expect("pending");
+        assert_eq!(rows.len(), 1, "{v}");
+        assert_eq!(rows[0]["user_code"], code_b);
+        assert_eq!(rows[0]["hostname"], "host-b");
+    });
+}
+
+#[test]
+fn T_DEVICE_DENY() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let start = start_ok(&h).await;
+        let code = start["user_code"].as_str().expect("code").to_string();
+
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/deny",
+            &json!({"user_code": code}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v, json!({"ok": true}));
+
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/approve",
+            &json!({"user_code": code, "sealed_dek": seal_to(EPH, &[0x21; 32])}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+        assert_eq!(v, json!({"error": "denied"}));
+
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/poll",
+            &json!({"user_code": code}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v, json!({"status": "denied"}));
+
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/poll",
+            &json!({"user_code": code}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+
+        let (s, _, v) = post_json(
+            &h.app,
+            "/api/v1/device/deny",
+            &json!({"user_code": "XXXX-YYYY"}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(v, json!({"error": "not found"}));
     });
 }
 

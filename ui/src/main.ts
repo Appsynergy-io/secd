@@ -1,163 +1,156 @@
+/** The console shell: routing, the sidebar and header, the toast, sign-out.
+ *  Screens paint into the content pane through the contract in lib/host.ts. */
+
 import {
   BREAKPOINT_PX,
   FAIL_SENTENCE,
+  HINT_PX,
+  WIDE_PX,
+  auditUrl,
   deviceQuery,
-  layoutMode,
   logoutUrl,
-  removePasskeyEnabled,
+  providersUrl,
   req,
   sessionUrl,
-  type LayoutMode,
+  sessionsUrl,
+  vaultUrl,
 } from "./lib/api.ts";
+import { dekRemainingMs, getDek } from "./lib/crypto.ts";
+import { el } from "./lib/dom.ts";
+import { bumpLogoutGen, currentLogoutGen } from "./lib/gen.ts";
+import type { AppState, Host, NavCounts, Screen, SessionInfo } from "./lib/host.ts";
+import { forgetRemember, loadRemember, sentenceFor } from "./lib/remember.ts";
 import { signal } from "./lib/signal.ts";
-import {
-  bumpLogoutGen,
-  currentLogoutGen,
-  leaveAccount,
-  renderAccount as renderAccountScreen,
-} from "./screens/account.ts";
-import { leaveActivity, renderActivity as renderActivityScreen } from "./screens/activity.ts";
-import { renderDevice } from "./screens/device.ts";
-import { abandonRegister, renderRegister as renderRegisterScreen } from "./screens/register.ts";
-import { getDek } from "./lib/crypto.ts";
-import {
-  forgetRemember,
-  leaveGate,
-  loadRemember,
-  renderGate,
-  resolveGate,
-  sentenceFor,
-  type AuthMethod,
-  type GateHost,
-  type GateKind,
-  type GateView,
-  type SessionInfo,
-} from "./screens/gate.ts";
+import { remainingLabel } from "./lib/time.ts";
+import { leaveAccess, renderAccess } from "./screens/access.ts";
+import { leaveActivity, renderActivity } from "./screens/activity.ts";
+import { leaveApprove, renderApprove } from "./screens/approve.ts";
+import { leaveDevices, renderDevices } from "./screens/devices.ts";
+import { leaveGate, renderGate } from "./screens/gate.ts";
+import { leaveProviders, renderProviders } from "./screens/providers.ts";
+import { leaveVault, renderVault } from "./screens/vault.ts";
 
-export { resolveGate, type AuthMethod, type GateKind, type GateView, type SessionInfo };
+export type { AppState, Host, NavCounts, Screen, SessionInfo } from "./lib/host.ts";
 
-export type Screen = "gate" | "device" | "register" | "activity" | "account";
+declare const SECD_VERSION: string | undefined;
+
+/** Bound by scripts/build-ui.sh from Cargo.toml; "dev" under bun test. */
+export const VERSION: string = typeof SECD_VERSION === "string" ? SECD_VERSION : "dev";
+export const TOAST_MS = 1900;
+export const KEY_TICK_MS = 30_000;
+export const NO_KEY_LABEL = "no vault key in this tab";
+
+export type ShellScreen = Exclude<Screen, "gate" | "approve">;
+
+export const NAV: ReadonlyArray<[ShellScreen, string]> = [
+  ["vault", "Vault"],
+  ["providers", "Providers"],
+  ["devices", "Devices"],
+  ["activity", "Activity"],
+  ["access", "Access"],
+];
+
+export const HINTS: Readonly<Record<ShellScreen, string>> = {
+  vault: "ciphertext at rest · opened in this tab only",
+  providers: "field schemas and the env vars the CLI exports",
+  devices: "CLI approvals and long-lived device sessions",
+  activity: "append-only, hash-chained, value-free",
+  access: "factors, sessions and the key held by this tab",
+};
 
 export const SCREENS: readonly Screen[] = [
   "gate",
-  "device",
-  "register",
+  "approve",
+  "vault",
+  "providers",
+  "devices",
   "activity",
-  "account",
+  "access",
 ];
 
 export function hrefFor(screen: Screen): string {
   switch (screen) {
-    case "device":
+    case "approve":
       return "/device";
-    case "register":
-      return "/register";
+    case "vault":
+      return "/vault";
+    case "providers":
+      return "/providers";
+    case "devices":
+      return "/devices";
     case "activity":
       return "/activity";
-    case "account":
-      return "/account";
+    case "access":
+      return "/access";
     default:
       return "/";
   }
 }
 
-export type DekFactor = "passkey" | "password";
-
-export function dekFactors(q: {
-  has_passkey: boolean;
-  has_password: boolean;
-}): DekFactor[] {
-  const out: DekFactor[] = [];
-  if (q.has_passkey) {
-    out.push("passkey");
-  }
-  if (q.has_password) {
-    out.push("password");
-  }
-  return out;
-}
-
-export function lastFactor(factors: readonly DekFactor[]): boolean {
-  return factors.length === 1;
-}
-
-export function currentLayout(widthPx = globalThis.innerWidth): LayoutMode {
-  const w =
-    typeof widthPx === "number" && Number.isFinite(widthPx) && widthPx > 0
-      ? widthPx
-      : BREAKPOINT_PX;
-  return layoutMode(w);
-}
-
-export { layoutMode, removePasskeyEnabled };
-
 export function screenFromPath(path: string): Screen {
   switch (path) {
+    case "/device":
+      return "approve";
+    case "/vault":
+      return "vault";
+    case "/providers":
+      return "providers";
+    case "/devices":
+      return "devices";
     case "/activity":
       return "activity";
-    case "/account":
-      return "account";
-    case "/device":
-      return "device";
-    case "/register":
-      return "register";
+    case "/access":
+      return "access";
     default:
       return "gate";
   }
 }
 
-/** A CLI approval link carries a user code; it lands on the device screen. */
+/** A CLI approval link carries a user code; it lands on the approval page. */
 export function initialPath(path: string, userCode: string): string {
   return userCode === "" ? path : "/device";
 }
 
-
-export type PasskeyRow = {
-  id: string;
-  created: string;
-};
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string | boolean | undefined> = {},
-  children: Array<Node | string> = [],
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === false) {
-      continue;
-    }
-    if (v === true) {
-      node.setAttribute(k, "");
-    } else {
-      node.setAttribute(k, v);
-    }
-  }
-  for (const child of children) {
-    node.append(typeof child === "string" ? document.createTextNode(child) : child);
-  }
-  return node;
+/** Where a fresh unlock goes: the approval it came for, else the vault. */
+export function afterLoginPath(userCode: string): string {
+  return userCode === "" ? "/vault" : "/device";
 }
 
-export type AppState = {
-  path: ReturnType<typeof signal<string>>;
-  email: ReturnType<typeof signal<string>>;
-  password: ReturnType<typeof signal<string>>;
-  error: ReturnType<typeof signal<string | undefined>>;
-  pending: ReturnType<typeof signal<boolean>>;
-  session: ReturnType<typeof signal<SessionInfo | undefined>>;
-  method: ReturnType<typeof signal<AuthMethod | undefined>>;
-  different: ReturnType<typeof signal<boolean>>;
-  revealPassword: ReturnType<typeof signal<boolean>>;
-  userCode: ReturnType<typeof signal<string>>;
-  eph: ReturnType<typeof signal<string>>;
-  passkeys: ReturnType<typeof signal<PasskeyRow[] | undefined>>;
-};
+export function initials(email: string): string {
+  return email.slice(0, 2).toUpperCase();
+}
+
+export function titleFor(screen: ShellScreen): string {
+  return NAV.find(([id]) => id === screen)?.[1] ?? "";
+}
+
+export function keyLabel(remainingMs: number): string {
+  return remainingMs > 0 ? `vault key · ${remainingLabel(remainingMs)}` : NO_KEY_LABEL;
+}
+
+export function layoutFlags(widthPx: number): { split: boolean; wide: boolean; hint: boolean } {
+  return { split: widthPx >= BREAKPOINT_PX, wide: widthPx >= WIDE_PX, hint: widthPx >= HINT_PX };
+}
 
 let mounted: HTMLElement | undefined;
+let unsubCounts: (() => void) | undefined;
+let unsubToast: (() => void) | undefined;
+let keyTimer: ReturnType<typeof setInterval> | undefined;
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
+function widthNow(): number {
+  const w = globalThis.innerWidth;
+  return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : WIDE_PX;
+}
 
-function gateHost(state: AppState): GateHost {
+function applyLayout(shell: HTMLElement): void {
+  const f = layoutFlags(widthNow());
+  shell.setAttribute("data-split", String(f.split));
+  shell.setAttribute("data-wide", String(f.wide));
+  shell.setAttribute("data-hint", String(f.hint));
+}
+
+function hostFor(state: AppState, actions: HTMLElement): Host {
   return {
     navigate(to) {
       navigate(state, to);
@@ -165,74 +158,169 @@ function gateHost(state: AppState): GateHost {
     redraw() {
       render(state);
     },
+    flash(message) {
+      flash(state, message);
+    },
+    signOut() {
+      return signOut(state);
+    },
     loadSession() {
       return loadSession(state);
     },
+    actions,
   };
 }
 
-function nav(state: AppState, screen: Screen): HTMLElement {
-  const items: Array<[Screen, string]> = [
-    ["register", "Register"],
-    ["activity", "Activity"],
-    ["account", "Account"],
-  ];
-  const bar = el(
-    "nav",
-    { class: "nav", "aria-label": "Console" },
-    items.map(([id, label]) =>
-      el(
-        "a",
-        {
-          href: hrefFor(id),
-          "aria-current": screen === id ? "page" : undefined,
-        },
-        [label],
-      ),
-    ),
-  );
-  if (state.session.get() !== undefined) {
-    const out = el(
-      "button",
-      { type: "button", class: "secondary", "data-action": "logout" },
-      ["Sign out"],
-    );
-    out.addEventListener("click", () => {
-      void onLogout(state);
-    });
-    bar.append(out);
+export function flash(state: AppState, message: string): void {
+  state.toast.set(message);
+  if (toastTimer !== undefined) {
+    clearTimeout(toastTimer);
   }
-  return bar;
+  toastTimer = setTimeout(() => {
+    toastTimer = undefined;
+    state.toast.set("");
+  }, TOAST_MS);
 }
 
-export function renderRegister(state: AppState, root: HTMLElement): void {
-  const host = state as AppState & { onLogout?: () => void };
-  host.onLogout = () => {
-    void onLogout(state);
+function toastEl(state: AppState): HTMLElement {
+  const node = el("div", { class: "toast", role: "status", "aria-live": "polite", hidden: true });
+  const paint = (msg: string): void => {
+    node.textContent = msg;
+    node.hidden = msg === "";
   };
-  renderRegisterScreen(host, root);
+  paint(state.toast.get());
+  unsubToast?.();
+  unsubToast = state.toast.subscribe(paint);
+  return node;
 }
 
-function renderActivity(state: AppState, root: HTMLElement): void {
-  renderActivityScreen(state, root, nav(state, "activity"));
-}
+function sideEl(state: AppState, screen: ShellScreen, host: Host): HTMLElement {
+  const session = state.session.get();
+  const email = session?.email ?? "";
+  const nav = el("nav", { class: "side-nav", "aria-label": "Console" });
+  const countNodes = new Map<ShellScreen, HTMLElement>();
+  for (const [id, label] of NAV) {
+    const count = el("span", { class: "nav-count", "data-count": id });
+    countNodes.set(id, count);
+    const btn = el(
+      "a",
+      {
+        class: "nav-item",
+        href: hrefFor(id),
+        "aria-current": screen === id ? "page" : undefined,
+      },
+      [el("span", { class: "nav-dot" }), el("span", {}, [label]), count],
+    );
+    nav.append(btn);
+  }
+  const paintCounts = (c: NavCounts): void => {
+    for (const [id, node] of countNodes) {
+      const v = id === "access" ? undefined : c[id];
+      node.textContent = v === undefined ? "" : String(v);
+    }
+  };
+  paintCounts(state.counts.get());
+  unsubCounts?.();
+  unsubCounts = state.counts.subscribe(paintCounts);
 
-export function renderAccount(state: AppState, root: HTMLElement): void {
-  mounted = root;
-  renderAccountScreen(state, root, nav(state, "account"), {
-    onLogout: () => {
-      void onLogout(state);
-    },
-    loadSession: () => loadSession(state),
-    wipeDek,
-    redraw: () => {
-      render(state);
-    },
+  const key = el("div", { class: "who-key", "data-key": "" }, [keyLabel(dekRemainingMs())]);
+  if (keyTimer !== undefined) {
+    clearInterval(keyTimer);
+  }
+  keyTimer = setInterval(() => {
+    key.textContent = keyLabel(dekRemainingMs());
+  }, KEY_TICK_MS);
+
+  const out = el("button", { type: "button", class: "btn btn-block", "data-action": "logout" }, [
+    "Sign out",
+  ]);
+  out.addEventListener("click", () => {
+    void host.signOut();
   });
+
+  return el("aside", { class: "side" }, [
+    el("div", { class: "side-brand" }, [
+      el("div", { class: "brand-mark", "aria-hidden": "true" }, ["s"]),
+      el("div", { class: "brand-name" }, ["secd"]),
+      el("div", { class: "chip-version", "data-version": "" }, [VERSION]),
+    ]),
+    nav,
+    el("div", { class: "side-foot" }, [
+      el("div", { class: "who" }, [
+        el("div", { class: "avatar", "aria-hidden": "true" }, [initials(email)]),
+        el("div", { class: "truncate" }, [
+          el("div", { class: "who-email truncate", "data-email": "" }, [email]),
+          key,
+        ]),
+      ]),
+      out,
+    ]),
+  ]);
+}
+
+function topEl(screen: ShellScreen, actions: HTMLElement): HTMLElement {
+  const right = el("div", { class: "top-actions" }, [
+    actions,
+    el("div", { class: "chip chip-live", "data-source": "live" }, ["live"]),
+    el("div", { class: "chip", "data-host": "" }, [
+      el("span", { class: "dot", "aria-hidden": "true" }),
+      globalThis.location?.host ?? "",
+    ]),
+  ]);
+  return el("header", { class: "top" }, [
+    el("div", { class: "top-title" }, [titleFor(screen)]),
+    el("div", { class: "top-hint" }, [HINTS[screen]]),
+    right,
+  ]);
+}
+
+function paintShell(state: AppState, root: HTMLElement, screen: ShellScreen): void {
+  const actions = el("div", { class: "hrow", "data-actions": "" });
+  const host = hostFor(state, actions);
+  const content = el("div", {
+    class: "content",
+    "data-screen": screen,
+    "data-scroll": screen === "vault" ? "hidden" : "auto",
+  });
+  const shell = el("div", { class: "shell" }, [
+    sideEl(state, screen, host),
+    el("main", { class: "main" }, [topEl(screen, actions), content]),
+  ]);
+  applyLayout(shell);
+  root.replaceChildren(shell, toastEl(state));
+  switch (screen) {
+    case "vault":
+      renderVault(state, content, host);
+      break;
+    case "providers":
+      renderProviders(state, content, host);
+      break;
+    case "devices":
+      renderDevices(state, content, host);
+      break;
+    case "activity":
+      renderActivity(state, content, host);
+      break;
+    default:
+      renderAccess(state, content, host);
+  }
+}
+
+function paintBare(state: AppState, root: HTMLElement, screen: "gate" | "approve"): void {
+  const actions = el("div", { class: "hrow", "data-actions": "" });
+  const host = hostFor(state, actions);
+  const shell = el("div", { class: "shell", "data-screen": screen });
+  applyLayout(shell);
+  root.replaceChildren(shell, toastEl(state));
+  if (screen === "approve") {
+    renderApprove(state, shell, host);
+  } else {
+    renderGate(state, shell, host);
+  }
 }
 
 export function render(state: AppState): void {
-  const root = mounted ?? document.getElementById("app");
+  const root = mounted?.isConnected ? mounted : document.getElementById("app");
   if (!root) {
     return;
   }
@@ -241,48 +329,50 @@ export function render(state: AppState): void {
   if (screen !== "gate") {
     leaveGate(state);
   }
-  if (screen !== "register") {
-    abandonRegister(state);
+  if (screen !== "approve") {
+    leaveApprove(state);
   }
-  if (screen !== "account") {
-    leaveAccount(state);
+  if (screen !== "vault") {
+    leaveVault(state);
+  }
+  if (screen !== "providers") {
+    leaveProviders(state);
+  }
+  if (screen !== "devices") {
+    leaveDevices(state);
   }
   if (screen !== "activity") {
     leaveActivity(state);
   }
+  if (screen !== "access") {
+    leaveAccess(state);
+  }
+  const session = state.session.get();
+  const unlocked = session !== undefined && getDek() !== undefined;
   switch (screen) {
-    case "device":
-      if (state.session.get() === undefined || getDek() === undefined) {
-        renderGate(state, root, gateHost(state));
-      } else {
-        renderDevice(state, root, () => {
-          navigate(state, "/register");
-        });
+    case "gate":
+      if (unlocked) {
+        navigate(state, afterLoginPath(state.userCode.get()));
+        return;
       }
+      paintBare(state, root, "gate");
       break;
-    case "register":
-      if (getDek() === undefined) {
-        renderGate(state, root, gateHost(state));
+    case "approve":
+    case "vault":
+      if (!unlocked) {
+        paintBare(state, root, "gate");
+      } else if (screen === "approve") {
+        paintBare(state, root, "approve");
       } else {
-        renderRegister(state, root);
-      }
-      break;
-    case "activity":
-      if (state.session.get() === undefined) {
-        renderGate(state, root, gateHost(state));
-      } else {
-        renderActivity(state, root);
-      }
-      break;
-    case "account":
-      if (state.session.get() === undefined) {
-        renderGate(state, root, gateHost(state));
-      } else {
-        renderAccount(state, root);
+        paintShell(state, root, "vault");
       }
       break;
     default:
-      renderGate(state, root, gateHost(state));
+      if (session === undefined) {
+        paintBare(state, root, "gate");
+      } else {
+        paintShell(state, root, screen);
+      }
   }
 }
 
@@ -293,7 +383,7 @@ export function navigate(state: AppState, to: string): void {
   state.path.set(to);
 }
 
-async function onLogout(state: AppState): Promise<void> {
+export async function signOut(state: AppState): Promise<void> {
   state.pending.set(true);
   state.error.set(undefined);
   bumpLogoutGen();
@@ -308,14 +398,14 @@ async function onLogout(state: AppState): Promise<void> {
 }
 
 function signOutLocal(state: AppState): void {
-  leaveAccount(state);
-  leaveGate(state);
   forgetRemember();
   state.session.set(undefined);
   state.pending.set(false);
   state.error.set(undefined);
   state.method.set(undefined);
   state.different.set(false);
+  state.password.set("");
+  state.counts.set({});
   navigate(state, "/");
   render(state);
 }
@@ -329,7 +419,7 @@ async function wipeDek(): Promise<void> {
   }
 }
 
-async function loadSession(state: AppState): Promise<void> {
+export async function loadSession(state: AppState): Promise<void> {
   const gen = currentLogoutGen();
   const res = await req("GET", sessionUrl());
   if (gen !== currentLogoutGen()) {
@@ -353,10 +443,14 @@ async function loadSession(state: AppState): Promise<void> {
     state.error.set(FAIL_SENTENCE);
     return;
   }
+  const fresh = state.session.get()?.session_id !== data.session_id;
   state.session.set(data);
+  if (fresh) {
+    void seedCounts(state);
+  }
 }
 
-function asSession(v: unknown): SessionInfo | undefined {
+export function asSession(v: unknown): SessionInfo | undefined {
   const rec = typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
   if (!rec) {
     return undefined;
@@ -374,13 +468,65 @@ function asSession(v: unknown): SessionInfo | undefined {
   };
 }
 
-function boot(root: HTMLElement): void {
-  const { code, eph } = deviceQuery(globalThis.location.search);
-  const bootPath = initialPath(globalThis.location.pathname, code);
-  if (bootPath !== globalThis.location.pathname) {
-    globalThis.history.replaceState(null, "", bootPath);
+function lengthOf(data: unknown, key: string): number | undefined {
+  const rec = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : undefined;
+  const rows = rec?.[key];
+  return Array.isArray(rows) ? rows.length : undefined;
+}
+
+function deviceCount(data: unknown): number | undefined {
+  const rec = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : undefined;
+  const rows = rec?.["sessions"];
+  if (!Array.isArray(rows)) {
+    return undefined;
   }
-  const state: AppState = {
+  return rows.filter(
+    (r) => typeof r === "object" && r !== null && (r as Record<string, unknown>)["kind"] === "device",
+  ).length;
+}
+
+/** One pass over the four lists the sidebar counts. Failures leave a count blank. */
+export async function seedCounts(state: AppState): Promise<void> {
+  const gen = currentLogoutGen();
+  const settle = async (url: string): Promise<unknown> => {
+    try {
+      const res = await req("GET", url);
+      return res.status === 200 ? res.data : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const [vault, providers, sessions, audit] = await Promise.all([
+    settle(vaultUrl()),
+    settle(providersUrl()),
+    settle(sessionsUrl()),
+    settle(auditUrl()),
+  ]);
+  if (gen !== currentLogoutGen() || state.session.get() === undefined) {
+    return;
+  }
+  const next: NavCounts = { ...state.counts.get() };
+  const v = lengthOf(vault, "entries");
+  const p = lengthOf(providers, "providers");
+  const d = deviceCount(sessions);
+  const a = lengthOf(audit, "events");
+  if (v !== undefined) {
+    next.vault = v;
+  }
+  if (p !== undefined) {
+    next.providers = p;
+  }
+  if (d !== undefined) {
+    next.devices = d;
+  }
+  if (a !== undefined) {
+    next.activity = a;
+  }
+  state.counts.set(next);
+}
+
+export function freshState(bootPath = "/", code = "", eph = ""): AppState {
+  return {
     path: signal(bootPath),
     email: signal(loadRemember()?.email ?? ""),
     password: signal(""),
@@ -392,8 +538,18 @@ function boot(root: HTMLElement): void {
     revealPassword: signal(false),
     userCode: signal(code),
     eph: signal(eph),
-    passkeys: signal(undefined),
+    counts: signal({}),
+    toast: signal(""),
   };
+}
+
+function boot(root: HTMLElement): void {
+  const { code, eph } = deviceQuery(globalThis.location.search);
+  const bootPath = initialPath(globalThis.location.pathname, code);
+  if (bootPath !== globalThis.location.pathname) {
+    globalThis.history.replaceState(null, "", bootPath);
+  }
+  const state = freshState(bootPath, code, eph);
   mounted = root;
   state.path.subscribe(() => {
     render(state);
@@ -427,11 +583,10 @@ function boot(root: HTMLElement): void {
   globalThis.addEventListener("popstate", () => {
     state.path.set(globalThis.location.pathname);
   });
-  const mq = globalThis.matchMedia?.(`(min-width: ${BREAKPOINT_PX}px)`);
-  mq?.addEventListener("change", (ev) => {
-    const node = mounted?.querySelector("[data-layout]");
-    if (node) {
-      node.setAttribute("data-layout", ev.matches ? "list-inspector" : "list-only");
+  globalThis.addEventListener("resize", () => {
+    const shell = mounted?.querySelector(".shell");
+    if (shell instanceof HTMLElement) {
+      applyLayout(shell);
     }
   });
   void (async () => {

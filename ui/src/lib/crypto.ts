@@ -78,6 +78,11 @@ export function getDek(): Uint8Array | undefined {
   return dek;
 }
 
+/** Milliseconds until the tab drops its DEK; 0 when it holds none. */
+export function dekRemainingMs(): number {
+  return dek === undefined ? 0 : Math.max(0, dekDeadline - Date.now());
+}
+
 /** Fired after the tab DEK is dropped (TTL, sign-out, failed unwrap). Not on replace. */
 export function onDekClear(fn: () => void): () => void {
   dekClearListeners.add(fn);

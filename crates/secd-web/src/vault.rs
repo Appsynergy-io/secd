@@ -22,6 +22,8 @@ pub struct VaultEntry {
     pub meta: Value,
     /// Current version number; 1 for entries that predate any change.
     pub version: i64,
+    /// `created` of the newest version row; None for an entry without one.
+    pub updated: Option<String>,
 }
 
 pub struct VersionRow {
@@ -54,7 +56,9 @@ impl VaultStore {
         self.db.with(|conn| {
             let stmt = conn.prepare(
                 "SELECT e.name, e.ciphertext, e.meta, \
-                 COALESCE((SELECT MAX(v.seq) FROM versions v WHERE v.name = e.name), 1) \
+                 COALESCE((SELECT MAX(v.seq) FROM versions v WHERE v.name = e.name), 1), \
+                 (SELECT v.created FROM versions v WHERE v.name = e.name \
+                  ORDER BY v.seq DESC LIMIT 1) \
                  FROM entries e ORDER BY e.name",
             )?;
             let mut out = Vec::new();
@@ -69,6 +73,7 @@ impl VaultStore {
                             .text(3)
                             .and_then(|s| s.parse::<i64>().ok())
                             .unwrap_or(1);
+                        let updated = stmt.text(4);
                         let ciphertext = serde_json::from_str(&ct_raw).unwrap_or(Value::Null);
                         let meta = serde_json::from_str(&meta_raw).unwrap_or_else(|_| json!({}));
                         out.push(VaultEntry {
@@ -76,6 +81,7 @@ impl VaultStore {
                             ciphertext,
                             meta,
                             version,
+                            updated,
                         });
                     }
                 }
@@ -471,6 +477,7 @@ async fn get_vault(State(state): State<AppState>, headers: HeaderMap) -> Respons
                         "ciphertext": e.ciphertext,
                         "meta": e.meta,
                         "version": e.version,
+                        "updated": e.updated,
                     })
                 })
                 .collect();
@@ -537,6 +544,7 @@ async fn put_vault(
             ciphertext,
             meta,
             version: 0,
+            updated: None,
         });
     }
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -615,5 +623,103 @@ async fn post_rollback(
         Ok(true) => json_value(StatusCode::OK, json!({ "ok": true })),
         Ok(false) => json_status(StatusCode::NOT_FOUND, "version"),
         Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+    }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use axum::http::{header, HeaderValue};
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "secd-u-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("test dir");
+        p
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(f)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer"),
+        );
+        h
+    }
+
+    async fn body_json(res: Response) -> Value {
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// `updated` is the newest version's `created`, and null for an entry
+    /// that has no version row.
+    #[test]
+    fn T_VAULT_ENTRY_UPDATED() {
+        let dir = fresh_dir("vault-updated");
+        let state = AppState::open(&dir).expect("state");
+        let (_id, token) = state
+            .sessions
+            .create_console("op@secd.test")
+            .expect("console");
+
+        for ct in ["aa", "bb"] {
+            let res = block_on(put_vault(
+                State(state.clone()),
+                bearer(&token),
+                Json(json!({"entries": [{"name": "kv/a", "ciphertext": ct, "meta": {}}]})),
+            ));
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+        Db::open(&dir)
+            .expect("db")
+            .with(|conn| {
+                conn.exec(
+                    "INSERT INTO entries (name, ciphertext, meta) \
+                     VALUES ('kv/legacy', '\"cc\"', '{}')",
+                )
+            })
+            .expect("entry without a version row");
+
+        let mut versions = bearer(&token);
+        versions.insert("x-secd-name", HeaderValue::from_static("kv/a"));
+        let versions =
+            block_on(async { body_json(get_versions(State(state.clone()), versions).await).await });
+        let versions = versions["versions"].as_array().expect("versions");
+        assert_eq!(versions.len(), 2);
+        let newest = versions[1]["created"].as_str().expect("created");
+        assert_eq!(
+            newest,
+            state.vault.versions_of("kv/a").expect("store")[1].created
+        );
+
+        let vault = block_on(async {
+            body_json(get_vault(State(state.clone()), bearer(&token)).await).await
+        });
+        let entries = vault["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], json!("kv/a"));
+        assert_eq!(entries[0]["version"], json!(2));
+        assert_eq!(entries[0]["updated"], json!(newest));
+        assert_eq!(entries[1]["name"], json!("kv/legacy"));
+        assert_eq!(entries[1]["version"], json!(1));
+        assert_eq!(entries[1]["updated"], Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
