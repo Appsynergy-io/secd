@@ -73,7 +73,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - `Secret`: no `Display`/`Serialize`/`Deref`; `Debug` redacts bytes; `mlock` + `Zeroize`.
 - Unlock: passkey PRF and/or password (argon2id). Terminal never prompts.
 - Home: `$SECD_HOME` else `$XDG_DATA_HOME/secd` else `~/.local/share/secd`. Files: `login.session` (0600), `login.device`.
-- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`, which runs the gate; GitHub performs the merge itself once the ruleset's required `gate` status is green. The one caller of `gh pr merge` is ci's `dependabot` job, and `--auto` arms rather than merges: GitHub still does the merging, still only on a green gate.
+- Branch `dev-{8hex}` from `main`. Merge only via `scripts/merge.sh`, which runs the gate; GitHub performs the merge itself once the ruleset's required `gate` status is green.
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
 - Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
 - No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
@@ -91,4 +91,4 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.
 - `gate` is the only check the ruleset requires, so every job that reports on a pull request is one of its `needs`; `warm`/`tag` (push to `main`) and the publish chain (tag `v*`) are exempt. `plan-contract.sh` proves both, and that `.github/workflows/` holds only `ci.yml`. Push to `main` does not rerun the suite.
-- Dependabot opens minor and patch bumps grouped. ci re-pins `[pipeline]` on the bot's branch with a GitHub App token — a `GITHUB_TOKEN` push starts no run — and arms auto-merge. Anything not minor or patch stays for a human.
+
