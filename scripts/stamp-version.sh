@@ -64,11 +64,11 @@ import sys
 path, old, ver = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path, encoding="utf-8") as f:
     text = f.read()
-want = f"Version {old}."
+want = f"Version floor {old}."
 if want not in text:
     raise SystemExit(f"stamp-version: {path} does not say `{want}`")
 with open(path, "w", encoding="utf-8") as f:
-    f.write(text.replace(want, f"Version {ver}.", 1))
+    f.write(text.replace(want, f"Version floor {ver}.", 1))
 PY
 done
 
