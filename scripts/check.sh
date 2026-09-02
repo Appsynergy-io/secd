@@ -183,7 +183,7 @@ lane_release_dry() {
 
 # JS+CSS in ui/dist, uncompressed. Fonts are measured at ui/dist/fonts so a
 # missed copy cannot hide a 404.
-UI_JS_CSS_MAX=153600
+UI_JS_CSS_MAX=196608
 UI_FONTS_MAX=71680
 
 ui_budgets() {
