@@ -177,6 +177,14 @@ jobs:
         with:
           name: build-x86_64-unknown-linux-musl
           path: target/release-dist
+      # GHCR 403/404/405s the hand-rolled OCI PUT/PATCH. docker login +
+      # docker push is the path that published v0.1.10. Dry-run still uses
+      # the python pusher against fake-registry.
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: push and sign the image
         id: push
         env:
@@ -184,6 +192,7 @@ jobs:
           COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SECD_PUSH_WITH_DOCKER: "1"
         run: |
           set -euo pipefail
           ver="${TAG#v}"
