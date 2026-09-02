@@ -16,6 +16,7 @@ import {
   vaultUrl,
 } from "./lib/api.ts";
 import { clearDek, dekRemainingMs, getDek } from "./lib/crypto.ts";
+import { el } from "./lib/dom.ts";
 import { bumpLogoutGen, currentLogoutGen } from "./lib/gen.ts";
 import type { AppState, Host, NavCounts, Screen, SessionInfo } from "./lib/host.ts";
 import { forgetRemember, loadRemember, sentenceFor } from "./lib/remember.ts";
@@ -129,24 +130,6 @@ export function keyLabel(remainingMs: number): string {
 
 export function layoutFlags(widthPx: number): { split: boolean; wide: boolean; hint: boolean } {
   return { split: widthPx >= BREAKPOINT_PX, wide: widthPx >= WIDE_PX, hint: widthPx >= HINT_PX };
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string | boolean | undefined> = {},
-  children: Array<Node | string> = [],
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === false) {
-      continue;
-    }
-    node.setAttribute(k, v === true ? "" : v);
-  }
-  for (const child of children) {
-    node.append(typeof child === "string" ? document.createTextNode(child) : child);
-  }
-  return node;
 }
 
 let mounted: HTMLElement | undefined;
