@@ -447,9 +447,9 @@ jobs:
   # Fail-fast on the billed matrix: one bad OS kills the rest.
   #
   # The PR already validated this SHA. preflight proves that, and that the
-  # tag matches Cargo.toml, rather than running the suite again.
+  # tag stamps the tree cleanly, rather than running the suite again.
   preflight:
-    name: preflight — tag matches version and is on main
+    name: preflight — tag is on main and stamps clean
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
