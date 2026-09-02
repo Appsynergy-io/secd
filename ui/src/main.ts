@@ -15,7 +15,7 @@ import {
   sessionsUrl,
   vaultUrl,
 } from "./lib/api.ts";
-import { clearDek, dekRemainingMs, getDek } from "./lib/crypto.ts";
+import { dekRemainingMs, getDek } from "./lib/crypto.ts";
 import { el } from "./lib/dom.ts";
 import { bumpLogoutGen, currentLogoutGen } from "./lib/gen.ts";
 import type { AppState, Host, NavCounts, Screen, SessionInfo } from "./lib/host.ts";
@@ -393,11 +393,11 @@ export async function signOut(state: AppState): Promise<void> {
     /* POST /logout still signs out; do not paint FAIL_SENTENCE on the gate. */
   } finally {
     signOutLocal(state);
+    await wipeDek();
   }
 }
 
 function signOutLocal(state: AppState): void {
-  clearDek();
   forgetRemember();
   state.session.set(undefined);
   state.pending.set(false);
@@ -410,6 +410,15 @@ function signOutLocal(state: AppState): void {
   render(state);
 }
 
+async function wipeDek(): Promise<void> {
+  try {
+    const crypto = await import("./lib/crypto.ts");
+    crypto.clearDek();
+  } catch {
+    /* session is already cleared */
+  }
+}
+
 export async function loadSession(state: AppState): Promise<void> {
   const gen = currentLogoutGen();
   const res = await req("GET", sessionUrl());
@@ -419,6 +428,7 @@ export async function loadSession(state: AppState): Promise<void> {
   if (res.status === 401 || res.status === 403) {
     if (state.session.get() !== undefined) {
       signOutLocal(state);
+      await wipeDek();
     } else {
       state.session.set(undefined);
     }
