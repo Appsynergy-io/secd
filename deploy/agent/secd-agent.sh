@@ -96,17 +96,19 @@ if [[ "${SECD_SELF_UPDATE:-1}" == "1" ]] && [[ -d "$root/.git" ]]; then
   if ! git -C "$root" diff --quiet HEAD -- 2>/dev/null; then
     secd_die "$root has uncommitted changes; refusing to move it to v${ver}"
   fi
-  at="$(git -C "$root" rev-parse -q --verify HEAD 2>/dev/null || true)"
-  want="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
-  if [[ -z "$want" ]]; then
+  # Never `want`: that is the released digest, and this block used to clobber
+  # it with a commit, so k3s-apply was handed a git SHA as --expect-digest.
+  head_commit="$(git -C "$root" rev-parse -q --verify HEAD 2>/dev/null || true)"
+  tag_commit="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
+  if [[ -z "$tag_commit" ]]; then
     git -C "$root" fetch --tags --quiet origin \
       || secd_die "could not fetch tags into $root"
-    want="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
+    tag_commit="$(git -C "$root" rev-parse -q --verify "refs/tags/v${ver}^{commit}" 2>/dev/null || true)"
   fi
-  [[ -n "$want" ]] || secd_die "v${ver} is not a tag in $root"
-  if [[ "$at" != "$want" ]]; then
-    echo "secd-agent: ${root} ${at:0:12} -> v${ver} (${want:0:12})"
-    git -C "$root" checkout --quiet --detach "$want" \
+  [[ -n "$tag_commit" ]] || secd_die "v${ver} is not a tag in $root"
+  if [[ "$head_commit" != "$tag_commit" ]]; then
+    echo "secd-agent: ${root} ${head_commit:0:12} -> v${ver} (${tag_commit:0:12})"
+    git -C "$root" checkout --quiet --detach "$tag_commit" \
       || secd_die "could not move $root to v${ver} -- under ProtectSystem=strict the unit needs ReadWritePaths=${root}"
     # Re-exec: every script below this line just changed underneath us.
     again=()
@@ -118,6 +120,8 @@ fi
 # k3s-apply.sh re-resolves the tag, refuses a digest that does not match this
 # one, verifies the image signature against keys/cosign.pub, bounds the rollout
 # and rolls back on failure. The agent adds no deployment logic of its own.
+[[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || secd_die "refusing to apply: expected digest is not a digest (${want})"
 exec "$root/scripts/k3s-apply.sh" \
   --image "ghcr.io/appsynergy-io/secd-web:${ver}" \
   --expect-digest "$want"
