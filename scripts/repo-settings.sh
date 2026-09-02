@@ -133,9 +133,9 @@ SECURITY_ANALYSIS=$(
 JSON
 )
 
-# CodeQL default setup. `actions` scans the workflows themselves, which is the
-# language most of this repository's supply-chain surface is written in.
-CODEQL='{"state": "configured", "languages": ["actions", "rust"]}'
+# CodeQL default setup is a second named workflow GitHub injects on every
+# push. One pipeline: ci.yml. Leave default setup off.
+CODEQL='{"state": "not-configured"}'
 
 # A fork pull request runs this repository's workflows. Public repo, so this
 # applies: nobody outside gets a runner without a maintainer saying so.
@@ -199,6 +199,9 @@ if [[ "$apply" -eq 0 ]]; then
   say "     because ci.yml's sign/image jobs declare environment: release"
   say "  2. Settings > Environments > release > add both secrets, then delete"
   say "     them from Settings > Secrets and variables > Actions"
+  say ""
+  say "Also not doable by API: TAG_TOKEN, a PAT with contents:write that is not"
+  say "GITHUB_TOKEN, so the tag job on push to main retriggers this workflow."
   say ""
   say "Also not doable by API: the GitHub App the ci 'dependabot' job signs in"
   say "as. A dependabot-triggered run reads Dependabot secrets, not Actions"
@@ -310,12 +313,12 @@ scan="$(gh api "repos/${REPO}" --jq '
   || secd_die "secret scanning reads ${scan:-<unknown>}, expected all four enabled"
 say "repo-settings: secret scanning, push protection, non-provider patterns, validity checks"
 
-# CodeQL default setup. The API answers 202 and runs the first scan itself.
+# CodeQL default setup is a second named workflow. Leave it off.
 printf '%s' "$CODEQL" \
   | gh api --method PATCH "repos/${REPO}/code-scanning/default-setup" --input - --silent
 ql="$(gh api "repos/${REPO}/code-scanning/default-setup" --jq '.state' 2>/dev/null || true)"
-[[ "$ql" == "configured" ]] || secd_die "CodeQL default setup is ${ql:-<unknown>}"
-say "repo-settings: CodeQL default setup configured for rust and actions"
+[[ "$ql" == "not-configured" ]] || secd_die "CodeQL default setup is ${ql:-<unknown>}, expected not-configured"
+say "repo-settings: CodeQL default setup off"
 
 # The signing key lives in this environment. A workflow_dispatch names a ref,
 # so without this any branch could reach it.

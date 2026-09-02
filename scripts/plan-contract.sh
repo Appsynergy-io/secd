@@ -444,12 +444,12 @@ for rel in found_pipeline:
 GATE_EXEMPT = {
     "gate": None,
     "warm": "refs/heads/main",
+    "tag": "refs/heads/main",
     "preflight": "refs/tags/v",
     "build": "refs/tags/v",
     "sign": "refs/tags/v",
     "image": "refs/tags/v",
     "publish": "refs/tags/v",
-    "advisories": "schedule",
 }
 
 

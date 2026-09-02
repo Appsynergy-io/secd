@@ -62,7 +62,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `scripts/k3s-apply.sh` | digest-pin GHCR image and apply `deploy/k3s` |
 | `deploy/k3s` | Deployment; the digest is bound at apply time, not committed |
 | `deploy/agent/` | pull-based CD for the cluster host: systemd timer, no inbound access |
-| `.github/workflows/ci.yml` | the pipeline. PR/merge-queue: `gate`. `push` to `main`: `warm`. tag `v*`: publish. Weekly: cargo-audit. |
+| `.github/workflows/ci.yml` | the pipeline. PR/merge-queue: `gate`. `push` to `main`: cache + tag. tag `v*`: publish. |
 | `keys/cosign.pub` | verify key for `secd update` |
 | `skills/` | grok ≡ claude (later) |
 
@@ -77,7 +77,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - Forge is GitHub. `secd update` / `install.sh` fetch `https://github.com/Appsynergy-io/secd/releases/latest/download/…`.
 - Release secrets: `COSIGN_KEY`, `COSIGN_PASSWORD`, scoped to the `release` environment. Cosign is `sign-blob` on the two CLI binaries and `sign` on the image manifest, all with `--tlog-upload=false`.
 - No job that compiles third-party code holds a secret or a write scope: `build.rs` from every transitive dependency runs in it. `scripts/plan-contract.sh` enforces this.
-- A version is a promise about bytes. Releases are tag-triggered, built once, and published only after the draft's assets verify. Nothing uses `--clobber`.
+- A version is a promise about bytes. The PR bumps Cargo.toml. Push to `main` tags `v` from that file with `TAG_TOKEN` (`GITHUB_TOKEN` never retriggers). The tag push publishes. Nothing uses `--clobber`.
 - The release is the record of what should be deployed: the image job publishes image-digest.txt, and the apply refuses any digest that does not match it. `deploy/agent/` converges the cluster on a timer, pulling rather than being pushed to, so no cluster credential leaves the LAN.
 - A released binary carries no path from the machine that built it. The release refuses one that does.
 - Do not move cosign to keyless/OIDC. `src/update.rs` verifies against a pubkey compiled into the binary with no transparency-log access; keyless would need Rekor and break `secd update` on a LAN.
@@ -90,5 +90,5 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 - `ui/dist` is a build input for `secd-web`. `build.rs` refuses a missing or stale one and never invokes the bundler; run `scripts/check.sh ui` first.
 - A guard that can skip itself is not a guard. `SECD_REQUIRE_BROWSER=1` turns a skipped headless DOM assertion into a failure, `SECD_REQUIRE_LINTERS=1` does the same for shellcheck, actionlint, zizmor and gitleaks. CI sets both.
 - The `secrets` lane is required, never advisory: gitleaks over the working tree and over every commit that produced it, redacted, and it refuses a shallow clone rather than reporting a pass over one commit. CI gives that job `fetch-depth: 0`.
-- `gate` is the only check the ruleset requires, so every job that reports on a pull request is one of its `needs`; tag, schedule and `warm` are exempt. `plan-contract.sh` proves both, and that `.github/workflows/` holds only `ci.yml`.
+- `gate` is the only check the ruleset requires, so every job that reports on a pull request is one of its `needs`; `warm`/`tag` (push to `main`) and the publish chain (tag `v*`) are exempt. `plan-contract.sh` proves both, and that `.github/workflows/` holds only `ci.yml`. Push to `main` does not rerun the suite.
 - Dependabot opens minor and patch bumps grouped. ci re-pins `[pipeline]` on the bot's branch with a GitHub App token — a `GITHUB_TOKEN` push starts no run — and arms auto-merge. Anything not minor or patch stays for a human.
