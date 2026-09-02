@@ -68,6 +68,7 @@ fi
 
 digest="$(
   python3 - "$tag" <<'PY'
+import base64
 import json
 import os
 import re
@@ -111,6 +112,13 @@ def fetch_bearer(www):
     q = urllib.parse.urlencode({"service": service, "scope": scope})
     tok_url = realm + ("&" if "?" in realm else "?") + q
     req = urllib.request.Request(tok_url, method="GET")
+    pat = os.environ.get("GHCR_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if pat:
+        user = os.environ.get("GITHUB_USER") or os.environ.get("GITHUB_ACTOR") or "x-access-token"
+        req.add_header(
+            "Authorization",
+            "Basic " + base64.b64encode(f"{user}:{pat}".encode()).decode(),
+        )
     try:
         with urllib.request.urlopen(req) as resp:
             body = json.loads(resp.read().decode())
@@ -192,6 +200,22 @@ if ! command -v cosign >/dev/null 2>&1; then
 fi
 img_host="${SECD_REGISTRY_HOST:-ghcr.io}"
 img_name="${SECD_IMAGE_NAME:-appsynergy-io/secd-web}"
+ghcr_pat="${GHCR_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
+dockercfg=""
+if [[ -n "$ghcr_pat" ]]; then
+  dockercfg="$(mktemp -d)"
+  user="${GITHUB_USER:-${GITHUB_ACTOR:-x-access-token}}"
+  python3 - "$dockercfg" "$user" "$ghcr_pat" <<'PY'
+import base64, json, os, sys
+cfg, user, pat = sys.argv[1], sys.argv[2], sys.argv[3]
+auth = base64.b64encode(f"{user}:{pat}".encode()).decode()
+os.makedirs(cfg, exist_ok=True)
+with open(os.path.join(cfg, "config.json"), "w", encoding="utf-8") as f:
+    json.dump({"auths": {"ghcr.io": {"auth": auth}}}, f)
+os.chmod(os.path.join(cfg, "config.json"), 0o600)
+PY
+  export DOCKER_CONFIG="$dockercfg"
+fi
 if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
   "${img_host}/${img_name}@${digest}" >/dev/null 2>&1; then
   echo "k3s-apply: ${digest} is not signed by keys/cosign.pub" >&2
@@ -212,7 +236,7 @@ fi
 
 tmp="$(mktemp -d)"
 cleanup() {
-  rm -rf "$tmp"
+  rm -rf "$tmp" ${dockercfg:+"$dockercfg"}
 }
 trap cleanup EXIT
 
