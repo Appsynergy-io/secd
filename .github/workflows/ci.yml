@@ -703,19 +703,21 @@ jobs:
               --body "$(printf '%s\n\n%s' "$summary" "$RUN_URL")"
           fi
 
-  # GHCR packages default private. k3s-apply and the cluster pull anonymously.
-  # GITHUB_TOKEN in this repository can manage the package this workflow pushed.
-  # Dispatch with tag=ghcr-public. Does not compile.
+  # GHCR packages default private. The Packages REST API has no visibility
+  # write (PATCH 404s). GITHUB_TOKEN can still pull what this repo pushed, so
+  # this job tries the preview PATCH, then exports the released image as a tar
+  # the LAN host can import. Dispatch with tag=ghcr-public. Does not compile.
   ghcr-public:
     name: ghcr-public — secd-web package visibility
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag == 'ghcr-public'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
     steps:
       - name: set secd-web public
+        id: vis
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
@@ -723,17 +725,42 @@ jobs:
           set -euo pipefail
           pkg="orgs/${OWNER}/packages/container/secd-web"
           echo "GET ${pkg}"
-          gh api "$pkg" --jq '{name,visibility,repository:.repository.full_name}' || true
-          # Try every documented and observed visibility endpoint.
-          set +e
-          gh api --method PATCH "$pkg" -f visibility=public
-          echo "PATCH package: $?"
-          gh api --method PUT "$pkg" -f visibility=public
-          echo "PUT package: $?"
-          gh api --method PUT "${pkg}/settings" -f visibility=public
-          echo "PUT settings: $?"
-          gh api --method POST "${pkg}/visibility" -f visibility=public
-          echo "POST visibility: $?"
-          set -e
-          echo "GET after"
           gh api "$pkg" --jq '{name,visibility,repository:.repository.full_name}'
+          set +e
+          gh api --method PATCH "$pkg" \
+            -H "Accept: application/vnd.github.package-deletes-preview+json" \
+            -f visibility=public
+          echo "PATCH preview: $?"
+          gh api graphql -f query='query { __type(name:"Mutation") { fields { name } } }' \
+            --jq '[.data.__type.fields[].name | select(test("ackage|isibility";"i"))] | .[]'
+          echo "graphql mutations: $?"
+          set -e
+          vis="$(gh api "$pkg" --jq .visibility)"
+          echo "visibility=${vis}"
+          echo "visibility=${vis}" >>"$GITHUB_OUTPUT"
+      - name: docker login
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: pull and save the released image
+        run: |
+          set -euo pipefail
+          digest="$(curl -fsSL https://github.com/Appsynergy-io/secd/releases/latest/download/image-digest.txt | tr -d '[:space:]')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "ghcr-public: bad digest ${digest}" >&2; exit 1; }
+          echo "digest=${digest}"
+          docker pull "ghcr.io/appsynergy-io/secd-web@${digest}"
+          docker save "ghcr.io/appsynergy-io/secd-web@${digest}" -o secd-web.tar
+          gzip -n secd-web.tar
+          printf '%s\n' "$digest" > image-digest.txt
+          ls -l secd-web.tar.gz image-digest.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: secd-web-image
+          path: |
+            secd-web.tar.gz
+            image-digest.txt
+          if-no-files-found: error
+          retention-days: 7
