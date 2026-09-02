@@ -371,9 +371,8 @@ jobs:
         with:
           # The tags are the version and the previous main commit is the diff
           # base, so neither a shallow clone nor the default fetch-tags: false
-          # will do. checkout fetches them with its own credentials; a later
-          # `git fetch` cannot, because persist-credentials drops them and
-          # anonymous git from a runner is refused.
+          # will do. checkout fetches them with its own credentials and then
+          # drops them; the push below brings its own.
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -418,6 +417,28 @@ jobs:
             echo "tag: secrets.TAG_TOKEN is empty; GITHUB_TOKEN cannot retrigger this workflow" >&2
             exit 1
           }
+          # A rejected token makes git fall back to a prompt, and a runner has
+          # no terminal, so the failure reads "could not read Username" and
+          # names neither the token nor what is wrong with it. Say it here
+          # instead. Verdict and metadata only -- the value is never printed.
+          seen="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}" || echo 000)"
+          may_push="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("permissions",{}).get("push"))' \
+            2>/dev/null || echo unknown)"
+          echo "tag: TAG_TOKEN reads the repository as HTTP ${seen}, push=${may_push}"
+          [ "$seen" = "200" ] || {
+            echo "tag: TAG_TOKEN is set but the API refuses it (HTTP ${seen}); it is expired or revoked" >&2
+            exit 1
+          }
+          [ "$may_push" = "True" ] || {
+            echo "tag: TAG_TOKEN cannot push to this repository; it needs contents: write" >&2
+            exit 1
+          }
           floor="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{if (match($0,/"[^"]+"/)) {print substr($0,RSTART+1,RLENGTH-2); exit}}' Cargo.toml)"
           [[ "$floor" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "tag: bad floor version ${floor}" >&2; exit 1; }
@@ -446,7 +467,14 @@ jobs:
           git config user.name secd-ci
           git config user.email secd@users.noreply.github.com
           git tag -a "$tag" "$SHA" -m "$tag"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+          # basic with the x-access-token user, which is what git's smart HTTP
+          # takes and what actions/checkout itself writes. This was `bearer`,
+          # which is the REST API's scheme: github.com 401s it, git then asks
+          # for a username on a runner that has no terminal, and every tag in
+          # this repository ended up being pushed by hand instead. Never
+          # echoed: Actions masks the token but not a transform of it.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
             push origin "refs/tags/${tag}"
           echo "tag: floor ${floor}, last ${last:-none} -> pushed ${tag} at ${SHA}"
 
