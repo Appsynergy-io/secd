@@ -22,6 +22,7 @@ import {
 } from "../lib/api.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { getDek, toHex, wrapPasskey, wrapToJson, zeroizeBytes } from "../lib/crypto.ts";
+import { forgetRemember } from "./gate.ts";
 import type { Signal } from "../lib/signal.ts";
 import {
   coercePublicKey,
@@ -561,6 +562,7 @@ async function signOut(state: AccountHost): Promise<void> {
     return;
   }
   leaveAccount(state);
+  forgetRemember();
   state.session.set(undefined);
   state.pending.set(false);
   state.error.set(undefined);

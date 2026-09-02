@@ -25,21 +25,21 @@
 :root {
   color-scheme: dark;
   --space: 8px;
-  --radius-sm: 4px;
-  --radius: 8px;
+  --radius-sm: 0;
+  --radius: 2px;
   --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --color-bg: oklch(16% 0.012 250);
-  --color-surface: oklch(19% 0.012 250);
-  --color-text: oklch(96% 0.012 250);
-  --color-text-muted: oklch(74% 0.012 250);
-  --color-text-dim: oklch(62% 0.012 250);
-  --color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 42%);
-  --color-accent: oklch(76% 0.14 78);
-  --color-accent-soft: oklch(76% 0.14 78 / 0.18);
+  --color-bg: oklch(13% 0.008 240);
+  --color-surface: oklch(16% 0.008 240);
+  --color-text: oklch(94% 0.01 90);
+  --color-text-muted: oklch(68% 0.012 240);
+  --color-text-dim: oklch(54% 0.01 240);
+  --color-border: color-mix(in oklch, var(--color-bg), var(--color-text) 28%);
+  --color-accent: oklch(62% 0.07 48);
+  --color-accent-soft: oklch(62% 0.07 48 / 0.16);
   --color-focus: var(--color-accent);
-  --color-on-accent: oklch(16% 0.012 250);
+  --color-on-accent: oklch(13% 0.008 240);
   --color-success: oklch(70% 0.15 145);
   --color-success-soft: oklch(70% 0.15 145 / 0.18);
   --color-warning: oklch(78% 0.13 80);
@@ -52,26 +52,28 @@
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
-    --color-bg: oklch(99% 0.012 250);
-    --color-surface: oklch(96% 0.012 250);
-    --color-text: oklch(16% 0.012 250);
-    --color-text-muted: oklch(38% 0.012 250);
-    --color-text-dim: oklch(50% 0.012 250);
-    --color-accent-soft: oklch(76% 0.14 78 / 0.12);
-    --color-focus: oklch(45% 0.12 78);
+    --color-bg: oklch(97% 0.008 90);
+    --color-surface: oklch(94% 0.008 90);
+    --color-text: oklch(16% 0.01 240);
+    --color-text-muted: oklch(36% 0.01 240);
+    --color-text-dim: oklch(48% 0.01 240);
+    --color-accent-soft: oklch(62% 0.07 48 / 0.12);
+    --color-focus: oklch(48% 0.08 48);
+    --color-on-accent: oklch(97% 0.008 90);
     --color-success: oklch(52% 0.15 145);
   }
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --color-bg: oklch(99% 0.012 250);
-  --color-surface: oklch(96% 0.012 250);
-  --color-text: oklch(16% 0.012 250);
-  --color-text-muted: oklch(38% 0.012 250);
-  --color-text-dim: oklch(50% 0.012 250);
-  --color-accent-soft: oklch(76% 0.14 78 / 0.12);
-  --color-focus: oklch(45% 0.12 78);
+  --color-bg: oklch(97% 0.008 90);
+  --color-surface: oklch(94% 0.008 90);
+  --color-text: oklch(16% 0.01 240);
+  --color-text-muted: oklch(36% 0.01 240);
+  --color-text-dim: oklch(48% 0.01 240);
+  --color-accent-soft: oklch(62% 0.07 48 / 0.12);
+  --color-focus: oklch(48% 0.08 48);
+  --color-on-accent: oklch(97% 0.008 90);
   --color-success: oklch(52% 0.15 145);
 }
 
@@ -110,18 +112,26 @@ body {
 
 .nav {
   display: flex;
-  gap: var(--space);
+  gap: calc(var(--space) * 2);
   flex-wrap: wrap;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: calc(var(--space) * 2);
 }
 
 .nav a {
-  color: var(--color-text);
+  color: var(--color-text-muted);
   text-decoration: none;
-  padding: var(--space);
+  padding: var(--space) 0;
 }
 
 .nav a[aria-current="page"] {
-  text-decoration: underline;
+  color: var(--color-text);
+  box-shadow: inset 0 -1px 0 var(--color-accent);
+}
+
+.nav [data-action="logout"] {
+  margin-inline-start: auto;
 }
 
 h1,
@@ -170,12 +180,18 @@ input::placeholder {
 
 button {
   font: inherit;
-  border: 0;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius);
   padding: calc(var(--space) * 1.5) calc(var(--space) * 2);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+button[type="submit"] {
   background: var(--color-accent);
   color: var(--color-on-accent);
-  cursor: pointer;
+  border-color: transparent;
 }
 
 button.secondary {
@@ -249,10 +265,10 @@ p[data-verified="0"] {
 }
 
 .card {
-  padding: calc(var(--space) * 2);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  padding: calc(var(--space) * 2) 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .workspace {
@@ -309,10 +325,10 @@ code {
   display: flex;
   flex-direction: column;
   gap: var(--space);
-  padding: calc(var(--space) * 2);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .chain-links {
@@ -329,22 +345,17 @@ code {
   display: flex;
   align-items: center;
   gap: var(--space);
-  padding: var(--space) calc(var(--space) * 2);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space) 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   position: relative;
 }
 
 .chain-link:not(:last-child)::after {
-  content: "";
-  position: absolute;
-  left: 100%;
-  top: 50%;
-  width: var(--space);
-  height: 2px;
-  background: var(--color-text);
-  transform: translateY(-50%);
+  content: "/";
+  color: var(--color-text-dim);
+  margin-inline-start: var(--space);
 }
 
 .chain[data-last="1"] .chain-link {
@@ -378,15 +389,19 @@ input:focus-visible {
 
 @media (hover: hover) {
   .nav a:hover {
-    text-decoration: underline;
+    color: var(--color-text);
   }
 
   button:hover:not(:disabled) {
-    box-shadow: 0 0 0 2px var(--color-accent);
+    border-color: var(--color-accent);
+  }
+
+  button[type="submit"]:hover:not(:disabled) {
+    box-shadow: 0 0 0 1px var(--color-accent);
   }
 
   button.secondary:hover:not(:disabled) {
-    box-shadow: 0 0 0 2px var(--color-accent);
+    border-color: var(--color-text-muted);
   }
 
   button.danger:hover:not(:disabled) {

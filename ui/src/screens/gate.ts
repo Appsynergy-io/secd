@@ -6,6 +6,7 @@ import {
   LAST_KEY,
   RATE_SENTENCE,
   REMEMBER_DAYS,
+  logoutUrl,
   passkeyLoginFinishUrl,
   passkeyLoginStartUrl,
   passkeyRegisterFinishUrl,
@@ -15,6 +16,7 @@ import {
   req,
   startUrl,
 } from "../lib/api.ts";
+import { getDek } from "../lib/crypto.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { Signal } from "../lib/signal.ts";
 import {
@@ -139,6 +141,14 @@ export function saveRemember(email: string, hasPasskey: boolean): void {
   }
 }
 
+export function forgetRemember(): void {
+  try {
+    localStorage.removeItem(LAST_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function sentenceFor(status: number): string {
   if (status === 429) {
     return RATE_SENTENCE;
@@ -155,8 +165,9 @@ export function resolveGate(q: {
   useDifferentAccount?: boolean | undefined;
   revealPassword?: boolean | undefined;
   userCode?: string | undefined;
+  unlocked?: boolean | undefined;
 }): GateView {
-  if (q.session) {
+  if (q.session && q.unlocked) {
     return {
       kind: "approve-only",
       showEmail: false,
@@ -171,10 +182,19 @@ export function resolveGate(q: {
     };
   }
   const now = q.nowMs ?? Date.now();
-  const remembered =
-    q.remember && !q.useDifferentAccount && rememberIsFresh(q.remember.at, now)
-      ? q.remember
+  const fromSession =
+    q.session && !q.unlocked && !q.useDifferentAccount
+      ? {
+          email: q.session.email,
+          has_passkey: q.session.has_passkey,
+          at: new Date(now).toISOString(),
+        }
       : undefined;
+  const remembered =
+    fromSession ??
+    (q.remember && !q.useDifferentAccount && rememberIsFresh(q.remember.at, now)
+      ? q.remember
+      : undefined);
   if (remembered) {
     if (remembered.has_passkey) {
       return {
@@ -387,7 +407,22 @@ function viewOf(state: GateState): GateView {
     useDifferentAccount: state.different.get(),
     revealPassword: state.revealPassword.get(),
     userCode: state.userCode.get() || undefined,
+    unlocked: getDek() !== undefined,
   });
+}
+
+async function rejectUnlockedSession(
+  state: GateState,
+  crypto: { clearDek: () => void },
+): Promise<void> {
+  try {
+    await req("POST", logoutUrl());
+  } catch {
+    /* cookie drop is best-effort; the tab must not stay unlocked */
+  }
+  crypto.clearDek();
+  state.session.set(undefined);
+  state.error.set(FAIL_SENTENCE);
 }
 
 function titleFor(kind: GateKind): string {
@@ -435,7 +470,11 @@ function reasonFor(q: {
 }
 
 export function renderGate(state: GateState, root: HTMLElement, host: GateHost): void {
-  if (state.session.get() !== undefined && state.path.get() === "/") {
+  if (
+    state.session.get() !== undefined &&
+    getDek() !== undefined &&
+    state.path.get() === "/"
+  ) {
     host.navigate(afterLoginPath(state.userCode.get()));
     return;
   }
@@ -462,6 +501,7 @@ export function renderGate(state: GateState, root: HTMLElement, host: GateHost):
     useDifferentAccount: state.different.get(),
     revealPassword: state.revealPassword.get(),
     userCode: state.userCode.get() || undefined,
+    unlocked: getDek() !== undefined,
   });
   if (view.emailPrefill && state.email.get() === "") {
     state.email.set(view.emailPrefill);
@@ -730,13 +770,14 @@ export async function onContinue(state: GateState, host: GateHost): Promise<void
             crypto.zeroizeBytes(opened);
           }
         }
+        if (getDek() === undefined) {
+          await rejectUnlockedSession(state, crypto);
+          return;
+        }
       }
       await host.loadSession();
-      if (state.session.get() === undefined) {
-        crypto.clearDek();
-        if (state.error.get() === undefined) {
-          state.error.set(FAIL_SENTENCE);
-        }
+      if (state.session.get() === undefined || getDek() === undefined) {
+        await rejectUnlockedSession(state, crypto);
         return;
       }
       saveRemember(email, false);
@@ -847,16 +888,17 @@ export async function onPasskey(state: GateState, host: GateHost): Promise<void>
             crypto.zeroizeBytes(opened);
           }
         }
+        if (getDek() === undefined) {
+          await rejectUnlockedSession(state, crypto);
+          return;
+        }
       } finally {
         crypto.zeroizeBytes(prf);
       }
     }
     await host.loadSession();
-    if (state.session.get() === undefined) {
-      crypto.clearDek();
-      if (state.error.get() === undefined) {
-        state.error.set(FAIL_SENTENCE);
-      }
+    if (state.session.get() === undefined || getDek() === undefined) {
+      await rejectUnlockedSession(state, crypto);
       return;
     }
     saveRemember(email, true);

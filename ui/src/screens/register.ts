@@ -45,6 +45,7 @@ export type RegisterHost = {
   path: { get(): string };
   error: { get(): string | undefined; set(v: string | undefined): void };
   pending: { get(): boolean; set(v: boolean): void };
+  onLogout?: () => void;
 };
 
 type VaultEntry = {
@@ -412,19 +413,31 @@ function currentLayout(): LayoutMode {
   );
 }
 
-function nav(): HTMLElement {
+function nav(state: RegisterHost): HTMLElement {
   const items: Array<[string, string, boolean]> = [
     ["/register", "Register", true],
     ["/activity", "Activity", false],
     ["/account", "Account", false],
   ];
-  return el(
+  const bar = el(
     "nav",
     { class: "nav", "aria-label": "Console" },
     items.map(([href, label, current]) =>
       el("a", { href, "aria-current": current ? "page" : undefined }, [label]),
     ),
   );
+  if (state.onLogout !== undefined) {
+    const out = el(
+      "button",
+      { type: "button", class: "secondary", "data-action": "logout" },
+      ["Sign out"],
+    );
+    out.addEventListener("click", () => {
+      state.onLogout?.();
+    });
+    bar.append(out);
+  }
+  return bar;
 }
 
 function stillHere(host: RegisterHost, gen: number, store: Store): boolean {
@@ -601,7 +614,7 @@ function paint(state: RegisterHost, root: HTMLElement): void {
     "data-page": "register",
     "data-layout": layout,
   });
-  page.append(nav());
+  page.append(nav(state));
   const head = el("div", { class: "secd-row" });
   head.append(el("h1", {}, ["Register"]));
   const add = el("button", { type: "button", "data-action": "add" }, ["Add"]);
