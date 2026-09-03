@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   FAIL_SENTENCE,
   RATE_SENTENCE,
-  deviceDenyUrl,
   devicePendingUrl,
   sessionRevokePath,
   sessionsUrl,
@@ -13,14 +12,12 @@ import type { AppState, AuthMethod, Host, NavCounts, SessionInfo } from "../lib/
 import { signal } from "../lib/signal.ts";
 import { ago, countdown, dayLabel } from "../lib/time.ts";
 import {
-  DENIED_TOAST,
   DEVICES_HINT,
   DEVICES_TITLE,
   EMPTY_SENTENCE,
   LOADING_SENTENCE,
   OPEN_LABEL,
   PENDING_LABEL,
-  PENDING_NOTE,
   POLL_MS,
   deviceSessions,
   failSentence,
@@ -28,6 +25,7 @@ import {
   parsePending,
   parseSessions,
   pendingMeta,
+  pendingSentence,
   renderDevices,
   revokedToast,
   sessionLabel,
@@ -255,6 +253,8 @@ describe("devices helpers", () => {
     expect(pendingMeta(PENDING, now)).toBe(
       `${HOSTNAME} · requested ${ago(CREATED, now)} · expires in ${countdown(260)}`,
     );
+    expect(pendingSentence(1)).toBe("1 device is waiting for approval.");
+    expect(pendingSentence(3)).toBe("3 devices are waiting for approval.");
     expect(sessionLabel(DEVICE_A)).toBe("nuc-k3s");
     expect(sessionLabel({ ...DEVICE_A, label: "" })).toBe("dev-a");
     expect(revokedToast(DEVICE_A)).toBe("Revoked device session nuc-k3s");
@@ -288,7 +288,7 @@ describe("devices screen", () => {
     expect(state.counts.get().devices).toBe(0);
   });
 
-  test("paints pending cards and device rows from fetched data", async () => {
+  test("paints the pending banner and device rows from fetched data", async () => {
     const calls = lists();
     state = makeState();
     const root = document.createElement("div");
@@ -296,19 +296,16 @@ describe("devices screen", () => {
     await settled();
     expect(calls.some((c) => c.method === "GET" && c.url === devicePendingUrl())).toBe(true);
     expect(calls.some((c) => c.method === "GET" && c.url === sessionsUrl())).toBe(true);
-    const card = root.querySelector(`[data-code="${CODE}"]`);
-    expect(card?.classList.contains("pending-card")).toBe(true);
-    expect(card?.querySelector(".pending-label")?.textContent).toBe(PENDING_LABEL);
-    expect(card?.querySelector(".pending-code")?.textContent).toBe(CODE);
-    expect(card?.querySelector(".pending-meta")?.textContent).toBe(pendingMeta(PENDING));
-    expect(card?.querySelector(".pending-note")?.textContent).toBe(PENDING_NOTE);
-    expect(asButton(card?.querySelector('[data-action="open"]') ?? null)?.className).toContain(
-      "btn-primary",
-    );
-    expect(asButton(card?.querySelector('[data-action="open"]') ?? null)?.textContent).toBe(
+    const banner = root.querySelector("[data-pending]");
+    expect(banner?.classList.contains("pending-card")).toBe(true);
+    expect(banner?.querySelector(".pending-label")?.textContent).toBe(PENDING_LABEL);
+    expect(banner?.querySelector(".pending-meta")?.textContent).toBe(pendingSentence(1));
+    expect(banner?.textContent).not.toContain(CODE);
+    expect(asButton(banner?.querySelector('[data-action="open"]') ?? null)?.textContent).toBe(
       OPEN_LABEL,
     );
-    expect(asButton(card?.querySelector('[data-action="deny"]') ?? null)?.textContent).toBe("Deny");
+    expect(root.querySelector('[data-action="approve"]')).toBeNull();
+    expect(root.querySelector('[data-action="deny"]')).toBeNull();
     const devices = root.querySelector('[data-card="devices"]');
     expect(devices?.querySelector(`[data-session-id="${DEVICE_A.id}"]`)?.className).toContain(
       "cols-sessions",
@@ -332,80 +329,18 @@ describe("devices screen", () => {
     expect(state.counts.get().devices).toBe(2);
   });
 
-  test("Open approval page sets the code and eph then navigates", async () => {
-    lists();
-    state = makeState();
-    const root = document.createElement("div");
-    const c = cap();
-    renderDevices(state, root, makeHost(c));
-    await settled();
-    asButton(root.querySelector('[data-action="open"]'))?.click();
-    expect(state.userCode.get()).toBe(CODE);
-    expect(state.eph.get()).toBe(EPH);
-    expect(c.navs).toEqual(["/device"]);
-  });
-
-  test("Deny POSTs the user_code, toasts, and drops the card", async () => {
+  test("Open approval page navigates to /device and touches no request", async () => {
     const calls = lists();
     state = makeState();
     const root = document.createElement("div");
     const c = cap();
     renderDevices(state, root, makeHost(c));
     await settled();
-    asButton(root.querySelector('[data-action="deny"]'))?.click();
+    asButton(root.querySelector('[data-action="open"]'))?.click();
     await settled();
-    const deny = calls.find((x) => x.method === "POST" && x.url === deviceDenyUrl());
-    expect(deny?.body).toEqual({ user_code: CODE });
-    expect(c.flash).toEqual([DENIED_TOAST]);
-    expect(root.querySelector(`[data-code="${CODE}"]`)).toBeNull();
-    expect(
-      calls.filter((x) => x.method === "GET" && x.url === devicePendingUrl()).length,
-    ).toBeGreaterThan(1);
-  });
-
-  test("deny 401 signs the tab out", async () => {
-    installFetch((c) => {
-      if (c.method === "GET" && c.url === devicePendingUrl()) {
-        return json({ pending: [PENDING] });
-      }
-      if (c.method === "GET" && c.url === sessionsUrl()) {
-        return json({ sessions: [] });
-      }
-      if (c.method === "POST" && c.url === deviceDenyUrl()) {
-        return json({ error: FAIL_SENTENCE }, 401);
-      }
-      return json({ ok: true });
-    });
-    state = makeState();
-    const root = document.createElement("div");
-    const c = cap();
-    renderDevices(state, root, makeHost(c));
-    await settled();
-    asButton(root.querySelector('[data-action="deny"]'))?.click();
-    await settled();
-    expect(c.signOut).toBe(1);
-  });
-
-  test("deny 404 paints the rejection text", async () => {
-    installFetch((c) => {
-      if (c.method === "GET" && c.url === devicePendingUrl()) {
-        return json({ pending: [PENDING] });
-      }
-      if (c.method === "GET" && c.url === sessionsUrl()) {
-        return json({ sessions: [] });
-      }
-      if (c.method === "POST" && c.url === deviceDenyUrl()) {
-        return json({ error: "not found" }, 404);
-      }
-      return json({ ok: true });
-    });
-    state = makeState();
-    const root = document.createElement("div");
-    renderDevices(state, root, makeHost(cap()));
-    await settled();
-    asButton(root.querySelector('[data-action="deny"]'))?.click();
-    await settled();
-    expect(root.querySelector(".alert-danger")?.textContent).toBe("not found");
+    expect(c.navs).toEqual(["/device"]);
+    expect(calls.some((x) => x.method === "POST")).toBe(false);
+    expect(state.userCode.get()).toBe("");
   });
 
   test("Revoke DELETEs the session and toasts the label", async () => {
@@ -500,33 +435,6 @@ describe("devices screen", () => {
     await settled();
     expect(root.querySelector(".alert-danger")?.textContent).toBe(FAIL_SENTENCE);
     expect(root.textContent).not.toContain(EMPTY_SENTENCE);
-  });
-
-  test("in-flight Deny disables the control", async () => {
-    let finish: ((value: Response) => void) | undefined;
-    installFetch((c) => {
-      if (c.method === "GET" && c.url === devicePendingUrl()) {
-        return json({ pending: [PENDING] });
-      }
-      if (c.method === "GET" && c.url === sessionsUrl()) {
-        return json({ sessions: [] });
-      }
-      if (c.method === "POST" && c.url === deviceDenyUrl()) {
-        return new Promise<Response>((resolve) => {
-          finish = resolve;
-        });
-      }
-      return json({ ok: true });
-    });
-    state = makeState();
-    const root = document.createElement("div");
-    renderDevices(state, root, makeHost(cap()));
-    await settled();
-    asButton(root.querySelector('[data-action="deny"]'))?.click();
-    await settled();
-    expect(asButton(root.querySelector('[data-action="deny"]'))?.disabled).toBe(true);
-    finish?.(json({ ok: true }));
-    await settled();
   });
 
   test("the 5s pending poll is cleared on leave and fires another GET", async () => {

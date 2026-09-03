@@ -1,9 +1,8 @@
-/** Devices: pending CLI approvals and long-lived device sessions. */
+/** Devices: long-lived device sessions. Approving happens on /device. */
 
 import {
   FAIL_SENTENCE,
   RATE_SENTENCE,
-  deviceDenyUrl,
   devicePendingUrl,
   errorMessage,
   req,
@@ -18,12 +17,9 @@ import { ago, countdown, dayLabel } from "../lib/time.ts";
 export const POLL_MS = 5_000;
 export const LOADING_SENTENCE = "Loading devices.";
 export const EMPTY_SENTENCE = "No devices yet.";
-export const DENIED_TOAST = "Request denied";
 export const DEVICES_TITLE = "Authorized devices";
 export const DEVICES_HINT = "device sessions expire after 30 days";
 export const PENDING_LABEL = "Approval requested";
-export const PENDING_NOTE =
-  "Approving seals this browser's vault key to the device's ephemeral X25519 key. Confirm the code matches the one your terminal printed.";
 export const OPEN_LABEL = "Open approval page";
 
 export type PendingRequest = {
@@ -46,7 +42,6 @@ export type SessionRow = {
 type Mem = {
   pendingRows: PendingRequest[] | undefined;
   sessions: SessionRow[] | undefined;
-  denied: Set<string>;
   revoked: Set<string>;
   error: string | undefined;
   busy: boolean;
@@ -66,7 +61,6 @@ function memOf(state: object): Mem {
     m = {
       pendingRows: undefined,
       sessions: undefined,
-      denied: new Set(),
       revoked: new Set(),
       error: undefined,
       busy: false,
@@ -150,6 +144,13 @@ export function pendingMeta(row: PendingRequest, nowMs = Date.now()): string {
   return `${row.hostname} · requested ${ago(row.created, nowMs)} · expires in ${countdown(row.expires_in)}`;
 }
 
+/** The banner on this screen; the requests themselves are listed on /device. */
+export function pendingSentence(count: number): string {
+  return count === 1
+    ? "1 device is waiting for approval."
+    : `${count} devices are waiting for approval.`;
+}
+
 export function sessionLabel(row: SessionRow): string {
   return row.label === "" ? row.id : row.label;
 }
@@ -188,7 +189,6 @@ export function leaveDevices(state: object): void {
   }
   m.pendingRows = undefined;
   m.sessions = undefined;
-  m.denied = new Set();
   m.revoked = new Set();
   m.error = undefined;
   m.busy = false;
@@ -206,10 +206,6 @@ function guard(m: Mem): () => boolean {
 
 function isAuthFail(status: number): boolean {
   return status === 401 || status === 403;
-}
-
-function applyPending(m: Mem, rows: PendingRequest[]): void {
-  m.pendingRows = rows.filter((r) => !m.denied.has(r.user_code));
 }
 
 function applySessions(state: AppState, m: Mem, rows: SessionRow[]): void {
@@ -241,7 +237,7 @@ async function loadPending(state: AppState, force = false): Promise<void> {
       m.error = failSentence(res.status, res.data);
       return;
     }
-    applyPending(m, parsePending(res.data));
+    m.pendingRows = parsePending(res.data);
   } catch {
     if (!stale()) {
       m.error = FAIL_SENTENCE;
@@ -293,45 +289,6 @@ async function loadSessions(state: AppState, force = false): Promise<void> {
   }
 }
 
-async function onDeny(state: AppState, row: PendingRequest): Promise<void> {
-  const m = memOf(state);
-  if (m.busy) {
-    return;
-  }
-  m.busy = true;
-  m.error = undefined;
-  paint(state);
-  const stale = guard(m);
-  try {
-    const res = await req("POST", deviceDenyUrl(), { user_code: row.user_code });
-    if (stale()) {
-      return;
-    }
-    if (isAuthFail(res.status)) {
-      void m.host?.signOut();
-      return;
-    }
-    if (res.status !== 200) {
-      m.error = failSentence(res.status, res.data);
-      return;
-    }
-    m.denied.add(row.user_code);
-    applyPending(m, m.pendingRows ?? []);
-    m.host?.flash(DENIED_TOAST);
-    m.busy = false;
-    await loadPending(state, true);
-  } catch {
-    if (!stale()) {
-      m.error = FAIL_SENTENCE;
-    }
-  } finally {
-    if (!stale()) {
-      m.busy = false;
-      paint(state);
-    }
-  }
-}
-
 async function onRevoke(state: AppState, row: SessionRow): Promise<void> {
   const m = memOf(state);
   if (m.busy) {
@@ -371,13 +328,6 @@ async function onRevoke(state: AppState, row: SessionRow): Promise<void> {
   }
 }
 
-function onOpen(state: AppState, row: PendingRequest): void {
-  const m = memOf(state);
-  state.userCode.set(row.user_code);
-  state.eph.set(row.eph_pub);
-  m.host?.navigate("/device");
-}
-
 function focusKey(root: HTMLElement): { action: string; row: string } | undefined {
   const active = document.activeElement;
   if (!(active instanceof HTMLElement) || !root.contains(active)) {
@@ -387,10 +337,7 @@ function focusKey(root: HTMLElement): { action: string; row: string } | undefine
   if (action === null) {
     return undefined;
   }
-  const row =
-    active.closest("[data-code]")?.getAttribute("data-code") ??
-    active.closest("[data-session-id]")?.getAttribute("data-session-id") ??
-    "";
+  const row = active.closest("[data-session-id]")?.getAttribute("data-session-id") ?? "";
   return { action, row };
 }
 
@@ -399,9 +346,7 @@ function restoreFocus(root: HTMLElement, key: { action: string; row: string } | 
     return;
   }
   const scope =
-    key.row === ""
-      ? root
-      : (root.querySelector(`[data-code="${key.row}"], [data-session-id="${key.row}"]`) ?? root);
+    key.row === "" ? root : (root.querySelector(`[data-session-id="${key.row}"]`) ?? root);
   const found = scope.querySelector(`[data-action="${key.action}"]`);
   if (found instanceof HTMLElement && !(found instanceof HTMLButtonElement && found.disabled)) {
     found.focus();
@@ -422,8 +367,9 @@ function paint(state: AppState): void {
       el("div", { class: "alert alert-danger", role: "alert", "data-error": "" }, [m.error]),
     );
   }
-  for (const row of m.pendingRows ?? []) {
-    children.push(pendingCard(state, m, row, now));
+  const waiting = m.pendingRows ?? [];
+  if (waiting.length > 0) {
+    children.push(pendingBanner(m, waiting.length));
   }
   children.push(devicesCard(state, m, now));
   root.replaceChildren(
@@ -432,28 +378,20 @@ function paint(state: AppState): void {
   restoreFocus(root, key);
 }
 
-function pendingCard(state: AppState, m: Mem, row: PendingRequest, nowMs: number): HTMLElement {
-  const open = el(
-    "button",
-    { type: "button", class: "btn btn-primary", "data-action": "open" },
-    [OPEN_LABEL],
-  );
+/** No request is approved or denied here: the banner only points at /device. */
+function pendingBanner(m: Mem, count: number): HTMLElement {
+  const open = el("button", { type: "button", class: "btn btn-primary", "data-action": "open" }, [
+    OPEN_LABEL,
+  ]);
   open.addEventListener("click", () => {
-    onOpen(state, row);
+    m.host?.navigate("/device");
   });
-  const deny = el("button", { type: "button", class: "btn", "data-action": "deny" }, ["Deny"]);
-  deny.disabled = m.busy;
-  deny.addEventListener("click", () => {
-    void onDeny(state, row);
-  });
-  return el("div", { class: "pending-card", "data-code": row.user_code }, [
+  return el("div", { class: "pending-card", "data-pending": "" }, [
     el("div", {}, [
       el("div", { class: "pending-label" }, [PENDING_LABEL]),
-      el("div", { class: "pending-code" }, [row.user_code]),
-      el("div", { class: "pending-meta" }, [pendingMeta(row, nowMs)]),
-      el("div", { class: "pending-note" }, [PENDING_NOTE]),
+      el("div", { class: "pending-meta" }, [pendingSentence(count)]),
     ]),
-    el("div", { class: "pending-actions" }, [open, deny]),
+    el("div", { class: "pending-actions" }, [open]),
   ]);
 }
 

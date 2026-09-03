@@ -4,6 +4,8 @@ import { clearDek, mintDek, setDek } from "./lib/crypto.ts";
 import type { AppState } from "./lib/host.ts";
 import { leaveAccess } from "./screens/access.ts";
 import { leaveActivity } from "./screens/activity.ts";
+import { leaveApprove } from "./screens/approve.ts";
+import { leaveDevices } from "./screens/devices.ts";
 import { leaveVault } from "./screens/vault.ts";
 import {
   HINTS,
@@ -57,6 +59,8 @@ afterEach(() => {
     leaveVault(state);
     leaveActivity(state);
     leaveAccess(state);
+    leaveApprove(state);
+    leaveDevices(state);
   }
   globalThis.fetch = origFetch;
   clearDek();
@@ -147,16 +151,14 @@ describe("shell", () => {
     expect(root.querySelector("[data-key]")?.textContent).toStartWith("vault key · ");
   });
 
-  test("/device without a code goes to the pending list, with one keeps the approval", () => {
+  test("/device stays on the approval page with or without a code", () => {
     const root = mount();
     const bare = freshState("/device");
     bare.session.set(session);
     setDek(mintDek());
     paint(bare);
-    // The redirect is a navigation; boot repaints from the path subscription.
-    expect(bare.path.get()).toBe("/devices");
-    paint(bare);
-    expect(root.querySelector('.content[data-screen="devices"]')).not.toBeNull();
+    expect(bare.path.get()).toBe("/device");
+    expect(root.querySelector('.shell[data-screen="approve"]')).not.toBeNull();
 
     const withCode = freshState("/device", "ABCD-EFGH");
     withCode.session.set(session);
