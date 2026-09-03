@@ -11,6 +11,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Position;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
@@ -18,16 +19,23 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use crate::login;
+use crate::policy::Schema;
 
+mod form;
 mod model;
 mod signin;
 mod theme;
 mod view;
 
-pub use model::{AddField, Event, Modal, Mode, Model};
+pub use form::{FieldTag, Form, FormField, Input};
+pub use model::{DetailRow, Event, Modal, Mode, Model, Picker};
 pub use signin::SignIn;
 pub use theme::{color, ACCENT, DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN};
-pub use view::{action_bar, hit_key, regions, Action, ActionHit, Rect, Regions};
+pub use view::{
+    action_bar, field_rects, form_cols, hit_key, inset, mask, modal_box, modal_buttons, regions,
+    reveal_rect, rows_at, spot_at, spot_text, toggle_text, window_start, Action, ActionHit,
+    FormCols, Rect, Regions, Spot, SpotHit,
+};
 
 /// `secd` with no args: sign-in wait, then the register.
 pub fn run() -> anyhow::Result<()> {
@@ -82,7 +90,8 @@ pub fn run() -> anyhow::Result<()> {
             let r = regions(area);
             let bar = view::action_bar_row(area, &r);
             model.set_hits(action_bar(bar, model.actions()));
-            draw(f, &model);
+            let spots = draw(f, &model);
+            model.set_spots(spots);
         })?;
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -98,9 +107,15 @@ pub fn run() -> anyhow::Result<()> {
 fn map_term(ev: TermEvent) -> Event {
     match ev {
         TermEvent::Key(k) if k.kind != KeyEventKind::Release => map_key(k),
-        TermEvent::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => Event::Click {
-            column: m.column,
-            row: m.row,
+        TermEvent::Mouse(m) => match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => Event::Click {
+                column: m.column,
+                row: m.row,
+            },
+            // The obvious thing in every mode, and no new state to hold.
+            MouseEventKind::ScrollUp => Event::Up,
+            MouseEventKind::ScrollDown => Event::Down,
+            _ => Event::Tick,
         },
         TermEvent::Resize(_, _) => Event::Resize,
         _ => Event::Tick,
@@ -108,15 +123,31 @@ fn map_term(ev: TermEvent) -> Event {
 }
 
 fn map_key(k: KeyEvent) -> Event {
-    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
-        return Event::Quit;
+    // Every Ctrl combo is swallowed here. Falling through would make Ctrl-A
+    // open the add modal and Ctrl-D the delete one.
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        return match k.code {
+            KeyCode::Char('c') => Event::Quit,
+            KeyCode::Char('r' | 'R') => Event::Reveal,
+            _ => Event::Tick,
+        };
     }
     match k.code {
         KeyCode::Esc => Event::Esc,
         KeyCode::Enter => Event::Enter,
         KeyCode::Up => Event::Up,
         KeyCode::Down => Event::Down,
+        KeyCode::Left => Event::Left,
+        KeyCode::Right => Event::Right,
+        KeyCode::Home => Event::Home,
+        KeyCode::End => Event::End,
+        KeyCode::PageUp => Event::PageUp,
+        KeyCode::PageDown => Event::PageDown,
         KeyCode::Backspace => Event::Backspace,
+        KeyCode::Delete => Event::Delete,
+        KeyCode::BackTab => Event::BackTab,
+        // Some terminals send Shift-Tab as Tab with the modifier.
+        KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Event::BackTab,
         KeyCode::Tab => Event::Tab,
         KeyCode::Char(c) => Event::Key(c),
         _ => Event::Tick,
@@ -134,17 +165,22 @@ impl Drop for Restore {
     }
 }
 
-pub fn draw(frame: &mut Frame, model: &Model) {
+/// Paint the register and return everything a click can land on. The hit table
+/// is built by the same code that draws, so the two cannot disagree.
+pub fn draw(frame: &mut Frame, model: &Model) -> Vec<SpotHit> {
     let area = Rect::from(frame.area());
     let r = regions(area);
     draw_header(frame, r.header, model);
-    draw_list(frame, r.list, model);
+    let rows = draw_list(frame, r.list, model);
     draw_detail(frame, r.detail, model);
     draw_activity(frame, r.activity, model);
     let bar = view::action_bar_row(area, &r);
     draw_action_bar(frame, bar, model.actions());
-    if let Mode::Modal(modal) = model.mode() {
-        draw_modal(frame, area, modal);
+    match model.mode() {
+        Mode::Idle => rows,
+        Mode::Modal(Modal::Add { form } | Modal::Provider { form }) => draw_form(frame, area, form),
+        Mode::Modal(Modal::Pick { pick }) => draw_picker(frame, area, model.schemas(), pick),
+        Mode::Modal(Modal::Delete { name }) => draw_confirm(frame, area, name),
     }
 }
 
@@ -190,23 +226,23 @@ fn draw_header(frame: &mut Frame, area: Rect, model: &Model) {
     );
 }
 
-fn draw_list(frame: &mut Frame, area: Rect, model: &Model) {
+fn draw_list(frame: &mut Frame, area: Rect, model: &Model) -> Vec<SpotHit> {
     if area.height == 0 || area.width == 0 {
-        return;
+        return Vec::new();
     }
     let block = Block::default()
         .borders(Borders::ALL)
         .title("names")
         .border_style(Style::default().fg(color(DIM)));
-    let inner = Rect::from(block.inner(ratatui::layout::Rect::from(area)));
     frame.render_widget(block, ratatui::layout::Rect::from(area));
-    if inner.height == 0 {
-        return;
+    let inner = view::inset(area);
+    if inner.height == 0 || inner.width == 0 {
+        return Vec::new();
     }
     let names = model.names();
     let h = inner.height as usize;
     let sel = model.selected();
-    let start = window_start(sel, names.len(), h);
+    let start = view::window_start(sel, names.len(), h);
     let items: Vec<ListItem> = names
         .iter()
         .enumerate()
@@ -224,6 +260,7 @@ fn draw_list(frame: &mut Frame, area: Rect, model: &Model) {
         })
         .collect();
     frame.render_widget(List::new(items), ratatui::layout::Rect::from(inner));
+    view::rows_at(inner, start, names.len(), Spot::Row)
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, model: &Model) {
@@ -234,9 +271,76 @@ fn draw_detail(frame: &mut Frame, area: Rect, model: &Model) {
         .borders(Borders::ALL)
         .title("detail")
         .border_style(Style::default().fg(color(DIM)));
-    let inner = block.inner(ratatui::layout::Rect::from(area));
     frame.render_widget(block, ratatui::layout::Rect::from(area));
-    frame.render_widget(Paragraph::new(model.detail_text()), inner);
+    let inner = view::inset(area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let rows = model.detail_rows();
+    let key_w = rows
+        .iter()
+        .map(|r| r.key.chars().count())
+        .max()
+        .unwrap_or(0);
+    let env_w = rows
+        .iter()
+        .map(|r| r.env.chars().count())
+        .max()
+        .unwrap_or(0);
+    // Key left, env right, the value taking what is between: the columns line
+    // up whatever the values happen to be.
+    let value_w = (inner.width as usize)
+        .saturating_sub(key_w + 1)
+        .saturating_sub(if env_w > 0 { env_w + 1 } else { 0 });
+    let mut lines: Vec<Line> = Vec::new();
+    if !model.detail_title().is_empty() {
+        lines.push(Line::from(Span::styled(
+            model.detail_title().to_string(),
+            Style::default().fg(color(DIM)),
+        )));
+    }
+    for row in rows {
+        let shown = !row.secret || model.revealed();
+        let value = if shown {
+            row.value.clone()
+        } else {
+            view::mask(row.value.chars().count())
+        };
+        let value_style = if shown {
+            Style::default()
+        } else {
+            Style::default().fg(color(DIM))
+        };
+        if row.key.is_empty() {
+            lines.push(Line::from(Span::styled(value, value_style)));
+            continue;
+        }
+        let mut spans = vec![
+            Span::styled(
+                format!("{} ", fit(&row.key, key_w)),
+                Style::default().fg(color(ACCENT)),
+            ),
+            Span::styled(fit(&value, value_w), value_style),
+        ];
+        if env_w > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                row.env.clone(),
+                Style::default().fg(color(DIM)),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    let h = inner.height as usize;
+    if lines.len() > h {
+        let more = lines.len() - (h - 1);
+        lines.truncate(h - 1);
+        lines.push(Line::from(Span::styled(
+            format!("… {more} more"),
+            Style::default().fg(color(DIM)),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), ratatui::layout::Rect::from(inner));
 }
 
 fn draw_activity(frame: &mut Frame, area: Rect, model: &Model) {
@@ -264,49 +368,316 @@ fn draw_activity(frame: &mut Frame, area: Rect, model: &Model) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
-    let w = area.width.min(56).max(area.width.min(20));
-    let h = 8u16
-        .min(area.height.saturating_sub(2))
-        .max(area.height.min(5));
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let box_r = ratatui::layout::Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    frame.render_widget(Clear, box_r);
-    let (title, body) = match modal {
-        Modal::Add { name, value, focus } => {
-            let nmark = if *focus == AddField::Name { ">" } else { " " };
-            let vmark = if *focus == AddField::Value { ">" } else { " " };
-            (
-                "add",
-                format!("{nmark} name  {name}\n{vmark} value {value}\n\nEnter save · Esc cancel"),
-            )
-        }
-        Modal::Delete { name } => ("delete", format!("{name}\n\nEnter confirm · Esc cancel")),
+/// The box, its title, and the interior split into a list area, a status row
+/// and a button row.
+fn modal_frame(frame: &mut Frame, area: Rect, rows: usize, title: &str) -> (Rect, Rect) {
+    let want = u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2);
+    let box_r = view::modal_box(area, want);
+    frame.render_widget(Clear, ratatui::layout::Rect::from(box_r));
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title.to_string())
+            .border_style(Style::default().fg(color(ACCENT))),
+        ratatui::layout::Rect::from(box_r),
+    );
+    let body = view::inset(box_r);
+    let list = Rect::new(body.x, body.y, body.width, body.height.saturating_sub(2));
+    (box_r, list)
+}
+
+fn draw_status(frame: &mut Frame, box_r: Rect, error: Option<&str>, hint: &str) {
+    let body = view::inset(box_r);
+    if body.height < 2 || body.width == 0 {
+        return;
+    }
+    let y = body.y.saturating_add(body.height.saturating_sub(2));
+    let (text, style) = match error {
+        Some(e) => (e.to_string(), Style::default().fg(color(DANGER))),
+        None => (hint.to_string(), Style::default().fg(color(DIM))),
     };
     frame.render_widget(
-        Paragraph::new(body).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(color(ACCENT))),
-        ),
-        box_r,
+        Paragraph::new(Span::styled(text, style)),
+        ratatui::layout::Rect::from(Rect::new(body.x, y, body.width, 1)),
     );
 }
 
-fn window_start(sel: usize, len: usize, h: usize) -> usize {
-    if h == 0 || len <= h {
-        return 0;
+fn draw_buttons(frame: &mut Frame, box_r: Rect, commit: &str) -> Vec<SpotHit> {
+    let hits = view::modal_buttons(box_r, commit);
+    for hit in &hits {
+        let label = match hit.spot {
+            Spot::Cancel => view::spot_text("cancel"),
+            _ => view::spot_text(commit),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                label,
+                Style::default()
+                    .fg(color(ON_ACCENT))
+                    .bg(color(ACCENT))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            ratatui::layout::Rect::from(hit.rect),
+        );
     }
-    if sel < h {
-        0
+    hits
+}
+
+fn draw_form(frame: &mut Frame, area: Rect, form: &Form) -> Vec<SpotHit> {
+    let (box_r, list) = modal_frame(frame, area, form.fields.len(), &form.title);
+    let mut spots = Vec::new();
+    if list.width > 0 && list.height > 0 {
+        let (label_w, env_w) = form.widths();
+        let cols = view::form_cols(list.width, label_w, env_w);
+        let start = view::window_start(form.focus, form.fields.len(), list.height as usize);
+        let hits = view::field_rects(list, cols, start, form.fields.len());
+        // Reveal sits inside the input column, so it is tested first.
+        let mut fields = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let Spot::Field(i) = hit.spot else {
+                continue;
+            };
+            let Some(f) = form.fields.get(i) else {
+                continue;
+            };
+            let row = Rect::new(list.x, hit.rect.y, list.width, 1);
+            let focused = i == form.focus;
+            let toggle = if focused && f.secret {
+                view::reveal_rect(row, cols, f.shown)
+            } else {
+                None
+            };
+            draw_form_row(frame, row, cols, f, focused, toggle);
+            if let Some(rect) = toggle {
+                spots.push(SpotHit {
+                    spot: Spot::Reveal(i),
+                    rect,
+                });
+            }
+            fields.push(hit);
+        }
+        spots.extend(fields);
+    }
+    draw_status(
+        frame,
+        box_r,
+        form.error.as_deref(),
+        "Tab field · Ctrl-R reveal · Enter save · Esc cancel",
+    );
+    spots.extend(draw_buttons(frame, box_r, "save"));
+    spots
+}
+
+fn draw_form_row(
+    frame: &mut Frame,
+    row: Rect,
+    cols: FormCols,
+    f: &FormField,
+    focused: bool,
+    toggle: Option<Rect>,
+) {
+    let label_style = if focused {
+        Style::default()
+            .fg(color(HIGHLIGHT))
+            .add_modifier(Modifier::BOLD)
     } else {
-        sel + 1 - h
+        Style::default().fg(color(DIM))
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(fit(&f.key, cols.label as usize), label_style)),
+        ratatui::layout::Rect::from(Rect::new(row.x, row.y, cols.label, 1)),
+    );
+
+    let input_x = row.x.saturating_add(cols.label).saturating_add(1);
+    let room = match toggle {
+        Some(t) => cols.input.saturating_sub(t.width.saturating_add(1)),
+        None => cols.input,
+    };
+    let shown = f.shown || !f.secret;
+    let (text, caret) = f.input.window(room as usize, shown);
+    let span = if f.input.is_empty() && !f.hint.is_empty() {
+        Span::styled(fit(&f.hint, room as usize), Style::default().fg(color(DIM)))
+    } else {
+        Span::raw(text)
+    };
+    frame.render_widget(
+        Paragraph::new(span),
+        ratatui::layout::Rect::from(Rect::new(input_x, row.y, room, 1)),
+    );
+    if focused {
+        frame.set_cursor_position(Position::new(
+            input_x.saturating_add(u16::try_from(caret).unwrap_or(u16::MAX)),
+            row.y,
+        ));
+    }
+    if let Some(rect) = toggle {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                view::toggle_text(f.shown),
+                Style::default().fg(color(ACCENT)),
+            )),
+            ratatui::layout::Rect::from(rect),
+        );
+    }
+
+    let mut x = input_x.saturating_add(cols.input).saturating_add(1);
+    if cols.tag > 0 {
+        let style = match f.tag {
+            FieldTag::Required => Style::default().fg(color(WARN)),
+            _ => Style::default().fg(color(DIM)),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(f.tag.label(), style)),
+            ratatui::layout::Rect::from(Rect::new(x, row.y, cols.tag, 1)),
+        );
+        x = x.saturating_add(cols.tag).saturating_add(1);
+    }
+    if cols.env > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                f.env.as_str(),
+                Style::default().fg(color(DIM)),
+            )),
+            ratatui::layout::Rect::from(Rect::new(x, row.y, cols.env, 1)),
+        );
+    }
+}
+
+fn draw_picker(frame: &mut Frame, area: Rect, schemas: &[Schema], pick: &Picker) -> Vec<SpotHit> {
+    let (box_r, list) = modal_frame(frame, area, schemas.len(), "provider");
+    let mut spots = Vec::new();
+    if list.width > 0 && list.height > 0 {
+        let h = list.height as usize;
+        let start = view::window_start(pick.selected, schemas.len(), h);
+        let name_w = schemas
+            .iter()
+            .map(|s| s.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let items: Vec<ListItem> = schemas
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(h)
+            .map(|(i, s)| {
+                let n = s.fields.len();
+                let tail = if s.builtin {
+                    format!("{n} {}", plural(n))
+                } else {
+                    format!("{n} {} · custom", plural(n))
+                };
+                let style = if i == pick.selected {
+                    Style::default()
+                        .fg(color(HIGHLIGHT))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", fit(&s.name, name_w)), style),
+                    Span::styled(s.title.clone(), style),
+                    Span::raw(" "),
+                    Span::styled(tail, Style::default().fg(color(DIM))),
+                ]))
+            })
+            .collect();
+        frame.render_widget(List::new(items), ratatui::layout::Rect::from(list));
+        spots = view::rows_at(list, start, schemas.len(), Spot::Choice);
+    }
+    draw_status(frame, box_r, None, "Enter choose · Esc cancel");
+    spots.extend(draw_buttons(frame, box_r, "choose"));
+    spots
+}
+
+fn draw_confirm(frame: &mut Frame, area: Rect, name: &str) -> Vec<SpotHit> {
+    let (box_r, list) = modal_frame(frame, area, 1, "delete");
+    if list.width > 0 && list.height > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(name, Style::default().fg(color(DANGER)))),
+            ratatui::layout::Rect::from(list),
+        );
+    }
+    draw_status(frame, box_r, None, "Enter confirm · Esc cancel");
+    draw_buttons(frame, box_r, "confirm")
+}
+
+/// `field` or `fields`.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        "field"
+    } else {
+        "fields"
+    }
+}
+
+/// `s` in exactly `w` chars: padded, or cut.
+fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n >= w {
+        return s.chars().take(w).collect();
+    }
+    let mut out = String::with_capacity(w);
+    out.push_str(s);
+    out.push_str(&" ".repeat(w - n));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    fn key(code: KeyCode) -> Event {
+        map_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(c: char) -> Event {
+        map_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn wheel(kind: MouseEventKind) -> Event {
+        map_term(TermEvent::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[test]
+    fn T_TUI_KEYS() {
+        assert_eq!(key(KeyCode::Left), Event::Left);
+        assert_eq!(key(KeyCode::Right), Event::Right);
+        assert_eq!(key(KeyCode::Home), Event::Home);
+        assert_eq!(key(KeyCode::End), Event::End);
+        assert_eq!(key(KeyCode::Delete), Event::Delete);
+        assert_eq!(key(KeyCode::BackTab), Event::BackTab);
+        assert_eq!(key(KeyCode::PageUp), Event::PageUp);
+        assert_eq!(key(KeyCode::PageDown), Event::PageDown);
+        assert_eq!(key(KeyCode::Tab), Event::Tab);
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+            Event::BackTab,
+            "a terminal that sends Shift-Tab as Tab still cycles back"
+        );
+        assert_eq!(key(KeyCode::Char('a')), Event::Key('a'));
+
+        assert_eq!(ctrl('c'), Event::Quit);
+        assert_eq!(ctrl('r'), Event::Reveal);
+        assert_eq!(ctrl('R'), Event::Reveal);
+        // The regression: a Ctrl combo must never reach the register as the
+        // bare letter, or Ctrl-A opens add and Ctrl-D opens delete.
+        assert_eq!(ctrl('a'), Event::Tick);
+        assert_eq!(ctrl('d'), Event::Tick);
+        assert_eq!(ctrl('q'), Event::Tick);
+
+        assert_eq!(wheel(MouseEventKind::ScrollUp), Event::Up);
+        assert_eq!(wheel(MouseEventKind::ScrollDown), Event::Down);
+        assert_eq!(
+            wheel(MouseEventKind::Down(MouseButton::Left)),
+            Event::Click { column: 0, row: 0 }
+        );
     }
 }

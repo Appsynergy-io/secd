@@ -143,3 +143,206 @@ pub(crate) fn layout_actions(area: Rect, actions: &[Action]) -> Vec<(Action, Rec
 fn button_width(action: Action) -> u16 {
     u16::try_from(button_text(action).chars().count()).unwrap_or(u16::MAX)
 }
+
+/// What a click landed on. Not a key: inside a form every letter types text,
+/// so a modal button cannot be keyed like an action-bar button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spot {
+    /// Row of the names list.
+    Row(usize),
+    /// Input of a form field.
+    Field(usize),
+    /// The show|hide toggle of a form field.
+    Reveal(usize),
+    /// Row of the schema picker.
+    Choice(usize),
+    Save,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpotHit {
+    pub spot: Spot,
+    pub rect: Rect,
+}
+
+pub fn spot_at(hits: &[SpotHit], column: u16, row: u16) -> Option<Spot> {
+    hits.iter()
+        .find(|h| h.rect.contains(column, row))
+        .map(|h| h.spot)
+}
+
+/// The interior of a one-cell border.
+pub fn inset(r: Rect) -> Rect {
+    Rect::new(
+        r.x.saturating_add(1),
+        r.y.saturating_add(1),
+        r.width.saturating_sub(2),
+        r.height.saturating_sub(2),
+    )
+}
+
+/// First row drawn, so a selection below the fold scrolls into view. The draw
+/// and the hit table both window through here, so they cannot disagree.
+pub fn window_start(sel: usize, len: usize, h: usize) -> usize {
+    if h == 0 || len <= h {
+        return 0;
+    }
+    if sel < h {
+        0
+    } else {
+        sel + 1 - h
+    }
+}
+
+/// One rect per visible row of a list drawn into `body`, from `start`.
+pub fn rows_at(body: Rect, start: usize, count: usize, spot: fn(usize) -> Spot) -> Vec<SpotHit> {
+    let h = body.height as usize;
+    let n = count.saturating_sub(start).min(h);
+    (0..n)
+        .map(|i| SpotHit {
+            spot: spot(start + i),
+            rect: Rect::new(
+                body.x,
+                body.y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)),
+                body.width,
+                1,
+            ),
+        })
+        .collect()
+}
+
+/// A modal box centred in `area`, tall enough for `rows` body lines plus its
+/// border. Never larger than the area: rows that do not fit scroll instead.
+pub fn modal_box(area: Rect, rows: u16) -> Rect {
+    let w = area.width.saturating_sub(4).min(76).max(area.width.min(24));
+    let want = rows.saturating_add(2);
+    let h = want.min(area.height).max(area.height.min(5));
+    let x = area.x.saturating_add(area.width.saturating_sub(w) / 2);
+    let y = area.y.saturating_add(area.height.saturating_sub(h) / 2);
+    Rect::new(x, y, w, h)
+}
+
+/// Column plan for a form row: label, input, tag, env, one space between each.
+/// The env column is dropped first when the row is narrow, then the tag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FormCols {
+    pub label: u16,
+    pub input: u16,
+    pub tag: u16,
+    pub env: u16,
+}
+
+/// Width of the widest tag word, `required`.
+pub const TAG_W: u16 = 8;
+/// Below this an input is not worth a column beside it at all.
+const MIN_INPUT: u16 = 8;
+/// An input worth describing: the env column is granted only above it.
+const GOOD_INPUT: u16 = 24;
+
+pub fn form_cols(width: u16, label_w: u16, env_w: u16) -> FormCols {
+    let label = label_w.min(18).min(width);
+    let rest = width.saturating_sub(label).saturating_sub(1);
+    let mut tag = TAG_W;
+    let mut env = env_w.min(24);
+    // The input is what a human types into, so it is fed before the columns
+    // that only describe it.
+    if rest < GOOD_INPUT + 1 + tag + 1 + env {
+        env = 0;
+    }
+    if rest < MIN_INPUT + 1 + tag {
+        tag = 0;
+    }
+    let mut used = 0u16;
+    if tag > 0 {
+        used = used.saturating_add(1).saturating_add(tag);
+    }
+    if env > 0 {
+        used = used.saturating_add(1).saturating_add(env);
+    }
+    FormCols {
+        label,
+        input: rest.saturating_sub(used),
+        tag,
+        env,
+    }
+}
+
+/// One rect per visible form row, from `start`. The rect spans label and
+/// input, so clicking the label focuses the field.
+pub fn field_rects(body: Rect, cols: FormCols, start: usize, count: usize) -> Vec<SpotHit> {
+    let w = cols
+        .label
+        .saturating_add(1)
+        .saturating_add(cols.input)
+        .min(body.width);
+    rows_at(body, start, count, Spot::Field)
+        .into_iter()
+        .map(|h| SpotHit {
+            spot: h.spot,
+            rect: Rect::new(h.rect.x, h.rect.y, w, 1),
+        })
+        .collect()
+}
+
+pub fn toggle_text(shown: bool) -> &'static str {
+    if shown {
+        "[hide]"
+    } else {
+        "[show]"
+    }
+}
+
+/// The show|hide toggle for a secret row, right-aligned inside its input
+/// column. `None` when the row is too narrow: a control that would clip is
+/// omitted, never shortened.
+pub fn reveal_rect(row: Rect, cols: FormCols, shown: bool) -> Option<Rect> {
+    let w = u16::try_from(toggle_text(shown).chars().count()).ok()?;
+    if cols.input < w.saturating_add(MIN_INPUT) {
+        return None;
+    }
+    let x = row
+        .x
+        .saturating_add(cols.label)
+        .saturating_add(1)
+        .saturating_add(cols.input)
+        .saturating_sub(w);
+    Some(Rect::new(x, row.y, w, 1))
+}
+
+pub fn spot_text(label: &str) -> String {
+    format!("[{label}]")
+}
+
+/// `[cancel]` and the commit button on the box's last interior row, right
+/// aligned. Whole buttons only.
+pub fn modal_buttons(box_r: Rect, commit: &str) -> Vec<SpotHit> {
+    let body = inset(box_r);
+    if body.height == 0 || body.width == 0 {
+        return Vec::new();
+    }
+    let y = body.y.saturating_add(body.height.saturating_sub(1));
+    let cw = u16::try_from(spot_text(commit).chars().count()).unwrap_or(u16::MAX);
+    let xw = u16::try_from(spot_text("cancel").chars().count()).unwrap_or(u16::MAX);
+    let total = cw.saturating_add(2).saturating_add(xw);
+    if total > body.width {
+        return Vec::new();
+    }
+    let x = body.x.saturating_add(body.width).saturating_sub(total);
+    vec![
+        SpotHit {
+            spot: Spot::Cancel,
+            rect: Rect::new(x, y, xw, 1),
+        },
+        SpotHit {
+            spot: Spot::Save,
+            rect: Rect::new(x.saturating_add(xw).saturating_add(2), y, cw, 1),
+        },
+    ]
+}
+
+/// The console's mask: 8 to 24 bullets, so its width does not report the
+/// length of what it hides.
+pub fn mask(len: usize) -> String {
+    "\u{2022}".repeat(len.clamp(8, 24))
+}

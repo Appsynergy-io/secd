@@ -552,6 +552,27 @@ pending = false
 [tests.T_TUI_THEME]
 pending = false
 
+[tests.T_TUI_KEYS]
+pending = false
+
+[tests.T_TUI_PAYLOAD]
+pending = false
+
+[tests.T_TUI_PROVIDER_META]
+pending = false
+
+[tests.T_TUI_FORM_EDIT]
+pending = false
+
+[tests.T_TUI_FORM_CLICK]
+pending = false
+
+[tests.T_TUI_MASK]
+pending = false
+
+[tests.T_TUI_MODAL_FITS]
+pending = false
+
 [tests.T_CLI_LS_NO_VALUE]
 pending = false
 

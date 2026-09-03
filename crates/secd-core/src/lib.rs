@@ -11,7 +11,7 @@ mod secret;
 pub use aead::{open, seal};
 pub use group::{group_names, NameGroup};
 pub use name::{check_name, NameError};
-pub use provider::{infer, providers, CustomProvider, Field, Provider};
+pub use provider::{build_payload, infer, providers, CustomProvider, Field, Provider};
 pub use redact::redact;
 pub use secret::Secret;
 pub use wrap::{
