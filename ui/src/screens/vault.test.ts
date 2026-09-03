@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as keyholder from "../lib/keyholder.ts";
 import { NO_DEK_SENTENCE } from "../lib/api.ts";
 import {
   clearDek,
@@ -324,7 +325,9 @@ const origFetch = globalThis.fetch;
 const origClip = globalThis.navigator.clipboard;
 let current: Mount | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
+
+  await keyholder.start();
   current = undefined;
 });
 

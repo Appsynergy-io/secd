@@ -9,8 +9,6 @@
  *  anywhere.
  */
 
-import { dekRemainingMs, getDek, onDekClear } from "./crypto.ts";
-import * as keyops from "./keyops.ts";
 import type { Reply, Request, SealedEntry } from "./keyops.ts";
 
 export type { SealedEntry };
@@ -25,6 +23,10 @@ let started: Promise<void> | undefined;
 
 /** Null until `start`; set only when this browser has a shared worker. */
 let port: MessagePort | undefined;
+/** Loaded only where there is no worker: a browser that has one never
+ *  downloads the key machinery at all. */
+let local: typeof import("./keyops.ts") | undefined;
+let crypto: typeof import("./crypto.ts") | undefined;
 
 let nextId = 1;
 const waiting = new Map<number, (r: Reply) => void>();
@@ -39,7 +41,7 @@ function announce(): void {
  *  only about a change: an operation that decrypts does not repaint the tabs,
  *  and a listener that decrypts does not announce itself back into a loop. */
 function adopt(s: { unlocked: boolean; remainingMs: number }): void {
-  const now = port === undefined ? getDek() !== undefined : s.unlocked;
+  const now = port === undefined ? crypto?.getDek() !== undefined : s.unlocked;
   if (port !== undefined) {
     deadline = s.unlocked ? Date.now() + s.remainingMs : 0;
   }
@@ -54,7 +56,7 @@ function adopt(s: { unlocked: boolean; remainingMs: number }): void {
  *  page's own key, which cannot be stale. */
 export function isUnlocked(): boolean {
   if (port === undefined) {
-    return getDek() !== undefined;
+    return crypto?.getDek() !== undefined;
   }
   if (unlocked && Date.now() >= deadline) {
     unlocked = false;
@@ -66,7 +68,7 @@ export function isUnlocked(): boolean {
 /** Milliseconds until the key expires; 0 when none is held. */
 export function remainingMs(): number {
   if (port === undefined) {
-    return dekRemainingMs();
+    return crypto?.dekRemainingMs() ?? 0;
   }
   return isUnlocked() ? Math.max(0, deadline - Date.now()) : 0;
 }
@@ -124,8 +126,10 @@ export function start(): Promise<void> {
   started = (async () => {
     port = openWorker();
     if (port === undefined) {
+      local = await import("./keyops.ts");
+      crypto = await import("./crypto.ts");
       // No worker: the key is this page's, and its expiry is announced here.
-      onDekClear(() => {
+      crypto.onDekClear(() => {
         adopt({ unlocked: false, remainingMs: 0 });
       });
     }
@@ -146,7 +150,10 @@ function send(req: Request): Promise<Reply> {
       p.postMessage({ id, req });
     });
   }
-  return Promise.resolve(keyops.handle(req));
+  if (local !== undefined) {
+    return Promise.resolve(local.handle(req));
+  }
+  return Promise.resolve({ ok: false, error: "start", unlocked: false, remainingMs: 0 });
 }
 
 async function ask(req: Request): Promise<Reply> {

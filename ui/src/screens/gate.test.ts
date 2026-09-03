@@ -16,6 +16,7 @@ import {
   wrapToJson,
   zeroizeBytes,
 } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import type { AppState, AuthMethod, Host, SessionInfo } from "../lib/host.ts";
 import { loadRemember } from "../lib/remember.ts";
 import { signal } from "../lib/signal.ts";
@@ -306,7 +307,9 @@ describe("gate screen", () => {
   const origFetch = globalThis.fetch;
   const origNav = globalThis.navigator;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+
+    await keyholder.start();
     document.body.replaceChildren();
     localStorage.clear();
     clearDek();

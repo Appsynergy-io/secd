@@ -12,6 +12,7 @@ import {
   sessionRevokePath,
   sessionsUrl,
 } from "../lib/api.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { clearDek, mintDek, setDek, toHex } from "../lib/crypto.ts";
 import type { AppState, AuthMethod, Host, NavCounts, SessionInfo } from "../lib/host.ts";
 import { signal } from "../lib/signal.ts";
@@ -221,7 +222,9 @@ let state: AppState | undefined;
 const ticks: unknown[] = [];
 const cleared: unknown[] = [];
 
-beforeEach(() => {
+beforeEach(async () => {
+
+  await keyholder.start();
   ticks.length = 0;
   cleared.length = 0;
   globalThis.setInterval = ((handler: TimerHandler, timeout?: number) => {
