@@ -15,21 +15,8 @@ import {
   req,
   startUrl,
 } from "../lib/api.ts";
-import {
-  clearDek,
-  emailOk,
-  getDek,
-  mintDek,
-  passwordOk,
-  setDek,
-  toHex,
-  unwrapAny,
-  wrapPasskey,
-  wrapPassword,
-  wrapToJson,
-  wrapsFromJson,
-  zeroizeBytes,
-} from "../lib/crypto.ts";
+import { emailOk, passwordOk, toHex, zeroizeBytes } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { asInput, el } from "../lib/dom.ts";
 import { currentLogoutGen } from "../lib/gen.ts";
 import type { AppState, AuthMethod, Host, SessionInfo } from "../lib/host.ts";
@@ -257,7 +244,7 @@ function viewOf(state: AppState): GateView {
     useDifferentAccount: state.different.get(),
     revealPassword: state.revealPassword.get(),
     userCode: state.userCode.get() || undefined,
-    unlocked: getDek() !== undefined,
+    unlocked: keyholder.isUnlocked(),
   });
 }
 
@@ -276,7 +263,7 @@ export function leaveGate(state: object): void {
 }
 
 export function renderGate(state: AppState, root: HTMLElement, host: Host): void {
-  if (state.session.get() !== undefined && getDek() !== undefined) {
+  if (state.session.get() !== undefined && keyholder.isUnlocked()) {
     host.navigate(afterLoginPath(state.userCode.get()));
     return;
   }
@@ -559,7 +546,7 @@ async function rejectUnlockedSession(state: AppState): Promise<void> {
   } catch {
     /* cookie drop is best-effort; the tab must not stay unlocked */
   }
-  clearDek();
+  void keyholder.lock();
   state.session.set(undefined);
   state.error.set(FAIL_SENTENCE);
 }
@@ -586,7 +573,7 @@ async function resolveMethod(state: AppState, email: string): Promise<AuthMethod
 /** After the DEK is set: confirm the cookie session, remember the account, leave the gate. */
 async function finishUnlock(state: AppState, host: Host, email: string, viaPasskey: boolean): Promise<boolean> {
   await host.loadSession();
-  if (state.session.get() === undefined || getDek() === undefined) {
+  if (state.session.get() === undefined || !keyholder.isUnlocked()) {
     await rejectUnlockedSession(state);
     return false;
   }
@@ -596,27 +583,23 @@ async function finishUnlock(state: AppState, host: Host, email: string, viaPassk
 }
 
 async function passwordRegister(state: AppState, email: string, password: string): Promise<boolean> {
-  const fresh = mintDek();
-  const pwBytes = new TextEncoder().encode(password);
-  try {
-    let body: Record<string, unknown>;
-    try {
-      body = { email, password, wrap: wrapToJson(wrapPassword(fresh, pwBytes)) };
-    } catch {
-      state.error.set(FAIL_SENTENCE);
-      return false;
-    }
-    const res = await req("POST", passwordRegisterUrl(), body);
-    if (res.status !== 200) {
-      state.error.set(sentenceFor(res.status));
-      return false;
-    }
-    setDek(fresh);
-    return true;
-  } finally {
-    zeroizeBytes(fresh);
-    zeroizeBytes(pwBytes);
+  if (!(await keyholder.create())) {
+    state.error.set(FAIL_SENTENCE);
+    return false;
   }
+  const wrap = await keyholder.wrapPassword(password);
+  if (wrap === undefined) {
+    await keyholder.lock();
+    state.error.set(FAIL_SENTENCE);
+    return false;
+  }
+  const res = await req("POST", passwordRegisterUrl(), { email, password, wrap });
+  if (res.status !== 200) {
+    await keyholder.lock();
+    state.error.set(sentenceFor(res.status));
+    return false;
+  }
+  return true;
 }
 
 async function passwordLogin(state: AppState, email: string, password: string): Promise<boolean> {
@@ -625,20 +608,7 @@ async function passwordLogin(state: AppState, email: string, password: string): 
     state.error.set(sentenceFor(res.status));
     return false;
   }
-  const pwBytes = new TextEncoder().encode(password);
-  let opened: Uint8Array | undefined;
-  try {
-    opened = unwrapAny(wrapsFromJson(res.data), pwBytes, undefined);
-    if (opened !== undefined) {
-      setDek(opened);
-    }
-  } finally {
-    zeroizeBytes(pwBytes);
-    if (opened !== undefined) {
-      zeroizeBytes(opened);
-    }
-  }
-  if (getDek() === undefined) {
+  if (!(await keyholder.unlock(res.data, { password }))) {
     await rejectUnlockedSession(state);
     return false;
   }
@@ -663,7 +633,7 @@ export async function onContinue(state: AppState, host: Host): Promise<void> {
   repaint(state);
   const store = stores.get(state);
   try {
-    clearDek();
+    void keyholder.lock();
     const knownPassword =
       view.kind === "remembered-password" ||
       (view.kind === "remembered-passkey" && view.mode === "password");
@@ -739,23 +709,30 @@ async function passkeyRegister(state: AppState, email: string): Promise<boolean>
     typeof (start.data as { handle?: unknown }).handle === "string"
       ? (start.data as { handle: string }).handle
       : "";
-  const fresh = mintDek();
   try {
-    const wrap = wrapPasskey(fresh, prf, toHex(new Uint8Array(cred.rawId)));
+    if (!(await keyholder.create())) {
+      state.error.set(FAIL_SENTENCE);
+      return false;
+    }
+    const wrap = await keyholder.wrapPasskey(toHex(prf), toHex(new Uint8Array(cred.rawId)));
+    if (wrap === undefined) {
+      await keyholder.lock();
+      state.error.set(FAIL_SENTENCE);
+      return false;
+    }
     const finish = await req("POST", passkeyRegisterFinishUrl(), {
       handle,
       credential: serializeCredential(cred),
-      wrap: wrapToJson(wrap),
+      wrap,
       email,
     });
     if (finish.status !== 200) {
+      await keyholder.lock();
       state.error.set(sentenceFor(finish.status));
       return false;
     }
-    setDek(fresh);
     return true;
   } finally {
-    zeroizeBytes(fresh);
     zeroizeBytes(prf);
   }
 }
@@ -787,18 +764,7 @@ async function passkeyLogin(state: AppState, email: string): Promise<boolean> {
       state.error.set(sentenceFor(finish.status));
       return false;
     }
-    let opened: Uint8Array | undefined;
-    try {
-      opened = unwrapAny(wrapsFromJson(finish.data), undefined, prf);
-      if (opened !== undefined) {
-        setDek(opened);
-      }
-    } finally {
-      if (opened !== undefined) {
-        zeroizeBytes(opened);
-      }
-    }
-    if (getDek() === undefined) {
+    if (!(await keyholder.unlock(finish.data, { prf: toHex(prf) }))) {
       await rejectUnlockedSession(state);
       return false;
     }
@@ -829,7 +795,7 @@ export async function onPasskey(state: AppState, host: Host): Promise<void> {
   state.error.set(undefined);
   repaint(state);
   try {
-    clearDek();
+    void keyholder.lock();
     const remembered = viewOf(state).kind === "remembered-passkey";
     const method = remembered ? "passkey" : await resolveMethod(state, email);
     if (gen !== currentLogoutGen() || method === undefined) {

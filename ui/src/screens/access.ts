@@ -16,16 +16,8 @@ import {
   sessionRevokePath,
   sessionsUrl,
 } from "../lib/api.ts";
-import {
-  dekRemainingMs,
-  getDek,
-  passwordOk,
-  toHex,
-  wrapPasskey,
-  wrapPassword,
-  wrapToJson,
-  zeroizeBytes,
-} from "../lib/crypto.ts";
+import { passwordOk, toHex, zeroizeBytes } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { asInput, el } from "../lib/dom.ts";
 import { currentLogoutGen } from "../lib/gen.ts";
 import type { AppState, Host } from "../lib/host.ts";
@@ -238,7 +230,7 @@ function armKeyTimer(m: Mem): void {
   m.keyTimer = setInterval(() => {
     const node = m.root?.querySelector("[data-key-label]");
     if (node) {
-      node.textContent = keyLabel(dekRemainingMs());
+      node.textContent = keyLabel(keyholder.remainingMs());
     }
   }, KEY_TICK_MS);
 }
@@ -427,7 +419,7 @@ async function onAdd(state: AppState): Promise<void> {
   if (m.pending || email === "") {
     return;
   }
-  if (getDek() === undefined) {
+  if (!keyholder.isUnlocked()) {
     m.error = NO_DEK_SENTENCE;
     paint(state);
     return;
@@ -460,16 +452,15 @@ async function onAdd(state: AppState): Promise<void> {
       m.error = FAIL_SENTENCE;
       return;
     }
-    const held = getDek();
-    if (held === undefined) {
+    const wrap = await keyholder.wrapPasskey(toHex(prf), toHex(new Uint8Array(cred.rawId)));
+    if (wrap === undefined) {
       m.error = NO_DEK_SENTENCE;
       return;
     }
-    const wrap = wrapPasskey(held, prf, toHex(new Uint8Array(cred.rawId)));
     const finish = await req("POST", passkeyRegisterFinishUrl(), {
       handle: handleOf(start.data),
       credential: serializeCredential(cred),
-      wrap: wrapToJson(wrap),
+      wrap,
     });
     if (stale()) {
       return;
@@ -511,8 +502,7 @@ async function onSetPassword(state: AppState, password: string): Promise<void> {
     paint(state);
     return;
   }
-  const held = getDek();
-  if (held === undefined) {
+  if (!keyholder.isUnlocked()) {
     m.error = NO_DEK_SENTENCE;
     paint(state);
     return;
@@ -521,14 +511,13 @@ async function onSetPassword(state: AppState, password: string): Promise<void> {
   m.pending = true;
   m.error = undefined;
   paint(state);
-  const pwBytes = new TextEncoder().encode(password);
   try {
-    const wrap = wrapPassword(held, pwBytes);
-    const res = await req("POST", passwordRegisterUrl(), {
-      email,
-      password,
-      wrap: wrapToJson(wrap),
-    });
+    const wrap = await keyholder.wrapPassword(password);
+    if (wrap === undefined) {
+      m.error = NO_DEK_SENTENCE;
+      return;
+    }
+    const res = await req("POST", passwordRegisterUrl(), { email, password, wrap });
     if (stale()) {
       return;
     }
@@ -548,7 +537,6 @@ async function onSetPassword(state: AppState, password: string): Promise<void> {
       m.error = FAIL_SENTENCE;
     }
   } finally {
-    zeroizeBytes(pwBytes);
     if (!stale()) {
       m.pending = false;
       paint(state);
@@ -777,6 +765,6 @@ function keyCard(): HTMLElement {
       el("div", { class: "card-title" }, [KEY_TITLE]),
       el("div", { class: "card-text" }, [KEY_BODY]),
     ]),
-    el("div", { class: "key-label spacer", "data-key-label": "" }, [keyLabel(dekRemainingMs())]),
+    el("div", { class: "key-label spacer", "data-key-label": "" }, [keyLabel(keyholder.remainingMs())]),
   ]);
 }

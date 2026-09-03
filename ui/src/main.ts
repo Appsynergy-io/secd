@@ -15,7 +15,7 @@ import {
   sessionsUrl,
   vaultUrl,
 } from "./lib/api.ts";
-import { dekRemainingMs, getDek } from "./lib/crypto.ts";
+import * as keyholder from "./lib/keyholder.ts";
 import { el } from "./lib/dom.ts";
 import { bumpLogoutGen, currentLogoutGen } from "./lib/gen.ts";
 import type { AppState, Host, NavCounts, Screen, SessionInfo } from "./lib/host.ts";
@@ -223,12 +223,12 @@ function sideEl(state: AppState, screen: ShellScreen, host: Host): HTMLElement {
   unsubCounts?.();
   unsubCounts = state.counts.subscribe(paintCounts);
 
-  const key = el("div", { class: "who-key", "data-key": "" }, [keyLabel(dekRemainingMs())]);
+  const key = el("div", { class: "who-key", "data-key": "" }, [keyLabel(keyholder.remainingMs())]);
   if (keyTimer !== undefined) {
     clearInterval(keyTimer);
   }
   keyTimer = setInterval(() => {
-    key.textContent = keyLabel(dekRemainingMs());
+    key.textContent = keyLabel(keyholder.remainingMs());
   }, KEY_TICK_MS);
 
   const out = el("button", { type: "button", class: "btn btn-block", "data-action": "logout" }, [
@@ -348,7 +348,7 @@ export function render(state: AppState): void {
     leaveAccess(state);
   }
   const session = state.session.get();
-  const unlocked = session !== undefined && getDek() !== undefined;
+  const unlocked = session !== undefined && keyholder.isUnlocked();
   switch (screen) {
     case "gate":
       if (unlocked) {
@@ -420,8 +420,7 @@ function signOutLocal(state: AppState): void {
 
 async function wipeDek(): Promise<void> {
   try {
-    const crypto = await import("./lib/crypto.ts");
-    crypto.clearDek();
+    await keyholder.lock();
   } catch {
     /* session is already cleared */
   }
@@ -597,8 +596,12 @@ function boot(root: HTMLElement): void {
       applyLayout(shell);
     }
   });
+  keyholder.subscribe(() => {
+    render(state);
+  });
   void (async () => {
     try {
+      await keyholder.start();
       await loadSession(state);
     } catch {
       state.error.set(FAIL_SENTENCE);

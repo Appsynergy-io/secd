@@ -546,7 +546,7 @@ describe("vault helpers", () => {
     ]);
   });
 
-  test("openEntry decrypts JSON fields and fails closed", () => {
+  test("openEntry shapes the holder's plaintext and fails closed", () => {
     const dek = mintDek();
     const entry: VaultEntry = {
       name: CF,
@@ -557,9 +557,12 @@ describe("vault helpers", () => {
       version: 1,
       updated: "",
     };
-    expect(openEntry(dek, entry).fields).toEqual({ account_id: ACCOUNT, api_token: TOKEN });
-    expect(openEntry(dek, { ...entry, ciphertext: "zz" }).error).toBe(OPEN_FAIL_SENTENCE);
-    expect(openEntry(mintDek(), entry).error).toBe(OPEN_FAIL_SENTENCE);
+    const plain = JSON.stringify({ account_id: ACCOUNT, api_token: TOKEN });
+    expect(openEntry(plain, entry).fields).toEqual({ account_id: ACCOUNT, api_token: TOKEN });
+    // A blob the holder could not open, and one that opened to something that
+    // is not an object, both fail closed rather than showing a partial entry.
+    expect(openEntry(null, entry).error).toBe(OPEN_FAIL_SENTENCE);
+    expect(openEntry("not json", entry).error).toBe(OPEN_FAIL_SENTENCE);
   });
 });
 

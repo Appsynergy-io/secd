@@ -35,7 +35,10 @@ cd "$ui"
 bun install --frozen-lockfile --ignore-scripts
 rm -rf dist
 mkdir -p dist
-bun build ./index.html \
+# The key holder is its own entry point: the bundler emits a chunk for
+# `new Worker(...)` but not for `new SharedWorker(...)`, and --entry-naming
+# leaves this one unhashed so the page can name it.
+bun build ./index.html ./src/keyholder.worker.ts \
   --outdir dist \
   --target browser \
   --production \
