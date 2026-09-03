@@ -1,8 +1,10 @@
 /** The shared worker that holds the vault key for every tab of this origin.
  *
  *  One instance serves all tabs, so unlocking in one unlocks the rest, and a
- *  reload reconnects to a worker that still holds the key. The key never
- *  leaves this scope: tabs send operations and receive results.
+ *  reload reconnects to a worker that still holds the key. The page asks for
+ *  `extendedLifetime` so a single-tab reload does not destroy this scope in
+ *  the gap where no port is connected. The key never leaves here: tabs send
+ *  operations and receive results.
  */
 
 /// <reference lib="webworker" />

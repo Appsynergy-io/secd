@@ -23,10 +23,19 @@ let started: Promise<void> | undefined;
 
 /** Null until `start`; set only when this browser has a shared worker. */
 let port: MessagePort | undefined;
+/** Held while the port is live so the worker wrapper is not garbage-collected. */
+let worker: SharedWorker | undefined;
 /** Loaded only where there is no worker: a browser that has one never
  *  downloads the key machinery at all. */
 let local: typeof import("./keyops.ts") | undefined;
 let crypto: typeof import("./crypto.ts") | undefined;
+
+/** How long a shared worker gets to answer before the page gives up on it. */
+const HANDSHAKE_MS = 3_000;
+const WORKER_URL = "/keyholder.worker.js";
+const WORKER_NAME = "secd-keyholder";
+/** Chrome 148+; the TypeScript DOM lib we compile against does not list it. */
+type SharedWorkerInit = WorkerOptions & { extendedLifetime?: boolean };
 
 let nextId = 1;
 const waiting = new Map<number, (r: Reply) => void>();
@@ -81,40 +90,71 @@ export function subscribe(fn: Listener): () => void {
   };
 }
 
-function openWorker(): MessagePort | undefined {
-  if (typeof SharedWorker === "undefined") {
+function listen(w: SharedWorker): MessagePort {
+  worker = w;
+  w.port.onmessage = (ev: MessageEvent) => {
+    const data = ev.data as
+      | { evt: "state"; unlocked: boolean; remainingMs: number }
+      | { id: number; reply: Reply }
+      | undefined;
+    if (data === undefined) {
+      return;
+    }
+    if ("evt" in data) {
+      adopt(data);
+      return;
+    }
+    const resolve = waiting.get(data.id);
+    if (resolve !== undefined) {
+      waiting.delete(data.id);
+      resolve(data.reply);
+    }
+  };
+  w.port.start();
+  return w.port;
+}
+
+function tryWorker(
+  Ctor: typeof SharedWorker,
+  opts: SharedWorkerInit,
+): MessagePort | undefined {
+  try {
+    return listen(new Ctor(WORKER_URL, opts as WorkerOptions));
+  } catch {
     return undefined;
   }
-  try {
-    // Built as its own unhashed entry point by scripts/build-ui.sh.
-    const w = new SharedWorker("/keyholder.worker.js", {
-      type: "module",
-      name: "secd-keyholder",
-    });
-    w.port.onmessage = (ev: MessageEvent) => {
-      const data = ev.data as
-        | { evt: "state"; unlocked: boolean; remainingMs: number }
-        | { id: number; reply: Reply }
-        | undefined;
-      if (data === undefined) {
-        return;
-      }
-      if ("evt" in data) {
-        adopt(data);
-        return;
-      }
-      const resolve = waiting.get(data.id);
-      if (resolve !== undefined) {
-        waiting.delete(data.id);
-        resolve(data.reply);
-      }
-    };
-    w.port.start();
-    return w.port;
-  } catch {
-    // A browser that has the constructor but refuses the module worker falls
-    // back rather than leaving the console with no way to unlock.
+}
+
+function openWorker(): MessagePort | undefined {
+  const Ctor = (globalThis as typeof globalThis & { SharedWorker?: typeof SharedWorker })
+    .SharedWorker;
+  if (typeof Ctor !== "function") {
     return undefined;
+  }
+  // Built as its own unhashed entry point by scripts/build-ui.sh.
+  //
+  // extendedLifetime keeps the worker alive across the moment a reload
+  // closes the last port. Without it a single open tab loses the key on
+  // every refresh, because the browser reclaims a worker with no clients.
+  // Chrome 148+ honours it for ~30s; a browser that rejects the unknown
+  // option is tried again without it, still sharing the key across tabs.
+  // Options are pinned on a running worker: a mismatch throws, which is
+  // why the retry exists.
+  const named: SharedWorkerInit = { type: "module", name: WORKER_NAME };
+  return tryWorker(Ctor, { ...named, extendedLifetime: true }) ?? tryWorker(Ctor, named);
+}
+
+function abandonWorker(): void {
+  waiting.clear();
+  const p = port;
+  port = undefined;
+  worker = undefined;
+  if (p !== undefined) {
+    try {
+      p.close();
+    } catch {
+      // Already disentangled.
+    }
   }
 }
 
@@ -125,14 +165,29 @@ export function start(): Promise<void> {
   }
   started = (async () => {
     port = openWorker();
-    if (port === undefined) {
-      local = await import("./keyops.ts");
-      crypto = await import("./crypto.ts");
-      // No worker: the key is this page's, and its expiry is announced here.
-      crypto.onDekClear(() => {
-        adopt({ unlocked: false, remainingMs: 0 });
-      });
+    if (port !== undefined) {
+      // A worker that never answers must not leave the console unable to
+      // unlock, so fall back rather than wait on it for ever.
+      const first = await Promise.race([
+        send({ op: "state" }),
+        new Promise<undefined>((r) => {
+          setTimeout(() => {
+            r(undefined);
+          }, HANDSHAKE_MS);
+        }),
+      ]);
+      if (first?.ok) {
+        adopt(first);
+        return;
+      }
+      abandonWorker();
     }
+    local = await import("./keyops.ts");
+    crypto = await import("./crypto.ts");
+    // No worker: the key is this page's, and its expiry is announced here.
+    crypto.onDekClear(() => {
+      adopt({ unlocked: false, remainingMs: 0 });
+    });
     const r = await send({ op: "state" });
     if (r.ok) {
       adopt(r);
