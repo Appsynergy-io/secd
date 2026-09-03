@@ -144,6 +144,24 @@ describe("shell", () => {
     expect(root.querySelector("[data-key]")?.textContent).toStartWith("vault key · ");
   });
 
+  test("/device without a code goes to the pending list, with one keeps the approval", () => {
+    const root = mount();
+    const bare = freshState("/device");
+    bare.session.set(session);
+    setDek(mintDek());
+    paint(bare);
+    // The redirect is a navigation; boot repaints from the path subscription.
+    expect(bare.path.get()).toBe("/devices");
+    paint(bare);
+    expect(root.querySelector('.content[data-screen="devices"]')).not.toBeNull();
+
+    const withCode = freshState("/device", "ABCD-EFGH");
+    withCode.session.set(session);
+    paint(withCode);
+    expect(withCode.path.get()).toBe("/device");
+    expect(root.querySelector('.shell[data-screen="approve"]')).not.toBeNull();
+  });
+
   test("a signed-out tab lands on the gate for every path", () => {
     const root = mount();
     for (const path of ["/vault", "/providers", "/devices", "/activity", "/access", "/device", "/"]) {
