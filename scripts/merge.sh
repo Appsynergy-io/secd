@@ -51,30 +51,48 @@ if ! out="$(gh pr merge "$number" --auto 2>&1)"; then
   esac
 fi
 
-# Read the queue back rather than trusting the write: a pull request that is
-# neither queued nor merged is the failure this script exists to prevent. The
-# queue entry is GraphQL-only; the REST view reports auto-merge, which a queued
-# pull request does not use.
+# Read it back rather than trusting the write: open, unqueued and not set to
+# merge is the failure this script exists to prevent.
+#
+# There are two ways to be waiting, and both are success. A pull request whose
+# gate is already green enters the queue at once and has a `mergeQueueEntry`. A
+# pull request whose checks are still running has none yet -- it holds an
+# `autoMergeRequest` and enters the queue when the gate passes. Demanding the
+# entry would refuse every pull request queued the moment it was pushed, which
+# is every pull request this script queues.
 slug="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 # $owner and the rest are GraphQL variables, bound by -F below. The shell must
 # leave them alone.
 # shellcheck disable=SC2016
 query='query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { state mergeQueueEntry { state } } } }'
-read -r state entry < <(
+    pullRequest(number: $number) {
+      state
+      autoMergeRequest { enabledAt }
+      mergeQueueEntry { state } } } }'
+read -r state auto entry < <(
   gh api graphql \
     -F owner="${slug%%/*}" -F name="${slug##*/}" -F number="$number" \
     -f query="$query" \
     --jq '[.data.repository.pullRequest.state,
+           (.data.repository.pullRequest.autoMergeRequest.enabledAt // "-"),
            (.data.repository.pullRequest.mergeQueueEntry.state // "-")] | join(" ")'
 )
 
 case "$state" in
-  MERGED) echo "merge: pull request ${number} is merged" ;;
-  OPEN)
-    [[ "$entry" != "-" ]] || secd_die "pull request ${number} is open and not queued"
-    echo "merge: pull request ${number} queued (${entry}); GitHub merges it when the queue's gate is green"
+  MERGED)
+    echo "merge: pull request ${number} is merged"
     ;;
-  *) secd_die "pull request ${number} is ${state}" ;;
+  OPEN)
+    if [[ "$entry" != "-" ]]; then
+      echo "merge: pull request ${number} is in the queue (${entry})"
+    elif [[ "$auto" != "-" ]]; then
+      echo "merge: pull request ${number} merges when the gate is green; the queue takes it from there"
+    else
+      secd_die "pull request ${number} is open, not queued and not set to merge"
+    fi
+    ;;
+  *)
+    secd_die "pull request ${number} is ${state}"
+    ;;
 esac
