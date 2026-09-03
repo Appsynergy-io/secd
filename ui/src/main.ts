@@ -362,6 +362,14 @@ export function render(state: AppState): void {
       if (!unlocked) {
         paintBare(state, root, "gate");
       } else if (screen === "approve") {
+        // /device is the target of the URL the CLI prints, and without that
+        // code there is nothing on it to approve -- a bare shell with no rail
+        // and one button back. Send it to the pending list, which is the same
+        // question answered with the devices actually waiting.
+        if (state.userCode.get() === "") {
+          navigate(state, "/devices");
+          return;
+        }
         paintBare(state, root, "approve");
       } else {
         paintShell(state, root, "vault");
