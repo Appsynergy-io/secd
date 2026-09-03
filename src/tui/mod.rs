@@ -35,9 +35,18 @@ pub fn run() -> anyhow::Result<()> {
         anyhow::bail!("secd: need a terminal");
     }
 
-    let flow = login::start().context("device start")?;
-    login::open_browser(&flow.open_url);
-    let mut signin = SignIn::from_flow(flow);
+    // The session and its DEK outlive the terminal that made them, so a second
+    // `secd` reuses them instead of asking a human to approve a device again.
+    // Probed before raw mode, so a dead token still reaches the sign-in below.
+    let resumed = login::resume();
+    let mut signin = match resumed {
+        Some(_) => None,
+        None => {
+            let flow = login::start().context("device start")?;
+            login::open_browser(&flow.open_url);
+            Some(SignIn::from_flow(flow))
+        }
+    };
 
     enable_raw_mode()?;
     let mut out = stdout();
@@ -45,18 +54,24 @@ pub fn run() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
     let _restore = Restore;
 
-    let unlocked = loop {
-        terminal.draw(|f| signin::draw(f, &signin))?;
-        if event::poll(Duration::from_millis(250))? {
-            signin.handle(map_term(event::read()?));
-        } else {
-            signin.handle(Event::Tick);
-        }
-        if signin.quit {
-            return Ok(());
-        }
-        if let Some(unlocked) = signin.take_unlocked() {
-            break unlocked;
+    let unlocked = match resumed {
+        Some(unlocked) => unlocked,
+        None => {
+            let signin = signin.as_mut().expect("invariant: no resume means a flow");
+            loop {
+                terminal.draw(|f| signin::draw(f, signin))?;
+                if event::poll(Duration::from_millis(250))? {
+                    signin.handle(map_term(event::read()?));
+                } else {
+                    signin.handle(Event::Tick);
+                }
+                if signin.quit {
+                    return Ok(());
+                }
+                if let Some(unlocked) = signin.take_unlocked() {
+                    break unlocked;
+                }
+            }
         }
     };
 

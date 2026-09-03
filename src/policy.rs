@@ -140,6 +140,17 @@ pub fn locked_err() -> anyhow::Error {
     anyhow!(LOCKED)
 }
 
+/// Whether the server still honours this session, without the refusal
+/// message: the caller offers sign-in itself. A server it cannot reach is not
+/// a signed-out session, so that answers `true` and the caller's own load
+/// reports the failure.
+pub fn session_live(token: &str) -> bool {
+    !matches!(
+        request("GET", "/api/v1/vault", None, Some(token)),
+        Ok((401, _))
+    )
+}
+
 pub fn require_unlocked() -> anyhow::Result<Unlocked> {
     let token = login::load_session().ok_or_else(locked_err)?;
     let dek = crate::keyring::load().ok_or_else(locked_err)?;
