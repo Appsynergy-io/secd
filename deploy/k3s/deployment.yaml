@@ -15,8 +15,14 @@ spec:
     metadata:
       labels: {app: secd-web}
       annotations:
-        k8s.v1.cni.cncf.io/networks: '[{"name":"pub-secd-web","default-route":["192.168.101.254"]}]'
+        # .122 keeps one MAC across rollouts, so no device on the LAN has to
+        # wait for a stale neighbour entry to age out before the new pod
+        # answers. Needs capabilities.mac on the pub-secd-web NAD, in nuc-k3s.
+        k8s.v1.cni.cncf.io/networks: '[{"name":"pub-secd-web","default-route":["192.168.101.254"],"mac":"02:5e:cd:00:01:22"}]'
     spec:
+      # Recreate means this grace period is downtime; the server holds no
+      # long-lived request that needs thirty seconds to drain.
+      terminationGracePeriodSeconds: 5
       automountServiceAccountToken: false
       securityContext:
         seccompProfile: {type: RuntimeDefault}
