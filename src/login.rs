@@ -75,6 +75,17 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The stored session and its DEK, when both outlived the terminal that made
+/// them and the server still honours the token. `None` means sign in again.
+pub fn resume() -> Option<Unlocked> {
+    let token = load_session()?;
+    let dek = crate::keyring::load()?;
+    if !crate::policy::session_live(&token) {
+        return None;
+    }
+    Some(Unlocked { token, dek })
+}
+
 pub fn unlock() -> anyhow::Result<Unlocked> {
     let flow = start()?;
     open_browser(&flow.open_url);
