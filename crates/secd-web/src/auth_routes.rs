@@ -133,7 +133,11 @@ async fn pk_reg_start(
     json_value(StatusCode::OK, out)
 }
 
-async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBody>) -> Response {
+async fn pk_reg_finish(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FinishBody>,
+) -> Response {
     let wrap = match parse_client_wrap(&body.wrap, "passkey") {
         Ok(w) => w,
         Err(WrapErr::Missing) | Err(WrapErr::Bad) => {
@@ -202,7 +206,7 @@ async fn pk_reg_finish(State(state): State<AppState>, Json(body): Json<FinishBod
     if state.users.put(user).is_err() {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     }
-    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+    let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     };
     with_cookie(json_value(StatusCode::OK, json!({ "ok": true })), &token)
@@ -273,7 +277,11 @@ fn discoverable_start(wa: &webauthn_rs::prelude::Webauthn) -> Result<(Value, Pen
     ))
 }
 
-async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishBody>) -> Response {
+async fn pk_login_finish(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FinishBody>,
+) -> Response {
     let entry = match state.pending.take(&body.handle) {
         Ok(e) => e,
         Err(_) => return fail_auth(),
@@ -310,7 +318,7 @@ async fn pk_login_finish(State(state): State<AppState>, Json(body): Json<FinishB
         return fail_auth();
     };
     let wraps = wrap_json_list(&user.wraps());
-    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+    let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     };
     with_cookie(
@@ -371,7 +379,7 @@ async fn pw_register(
         if state.users.put(user).is_err() {
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
         }
-        let Ok((_id, token)) = state.sessions.create_console(&email) else {
+        let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
         };
         return with_cookie(
@@ -409,7 +417,11 @@ async fn pw_register(
     fail_auth()
 }
 
-async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBody>) -> Response {
+async fn pw_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut body): Json<PasswordBody>,
+) -> Response {
     let Some(raw) = body.email.as_deref() else {
         body.password.zeroize();
         return json_status(StatusCode::BAD_REQUEST, "email");
@@ -436,7 +448,7 @@ async fn pw_login(State(state): State<AppState>, Json(mut body): Json<PasswordBo
     }
     let user = user.expect("invariant: verified user exists");
     let wraps = wrap_json_list(&user.wraps());
-    let Ok((_id, token)) = state.sessions.create_console(&email) else {
+    let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
     };
     with_cookie(

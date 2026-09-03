@@ -82,6 +82,57 @@ impl SessionStore {
         self.create(email, SessionKind::Console, "This browser")
     }
 
+    /// One live console session per account.
+    ///
+    /// Unlocking after a refresh was inserting a new "This browser" row
+    /// every time and leaving the previous ones listed. A live cookie for
+    /// this email is reused; a new console session replaces the others.
+    pub fn ensure_console(
+        &self,
+        email: &str,
+        headers: &HeaderMap,
+    ) -> anyhow::Result<(String, String)> {
+        if let Some(token) = cookie_token(headers) {
+            if let Some(s) = self.by_token(&token) {
+                if s.kind == SessionKind::Console && s.email == email {
+                    self.refresh_console(&token)?;
+                    self.drop_other_console(email, &s.id)?;
+                    return Ok((s.id, token));
+                }
+            }
+        }
+        let (id, token) = self.create_console(email)?;
+        self.drop_other_console(email, &id)?;
+        Ok((id, token))
+    }
+
+    fn refresh_console(&self, token: &str) -> anyhow::Result<()> {
+        let hash = token_hash(token);
+        let now = unix_now();
+        let expires = now.saturating_add(SessionKind::Console.ttl());
+        self.db.with(|conn| {
+            let stmt = conn
+                .prepare("UPDATE sessions SET last_seen = ?, expires = ? WHERE token_hash = ?")?;
+            stmt.bind_i64(1, now)?;
+            stmt.bind_i64(2, expires)?;
+            stmt.bind_text(3, &hash)?;
+            stmt.run()
+        })?;
+        Ok(())
+    }
+
+    fn drop_other_console(&self, email: &str, keep_id: &str) -> anyhow::Result<()> {
+        self.db.with(|conn| {
+            let del = conn
+                .prepare("DELETE FROM sessions WHERE email = ? AND kind = 'console' AND id != ?")?;
+            del.bind_text(1, email)?;
+            del.bind_text(2, keep_id)?;
+            del.run()
+        })?;
+        self.db.tighten();
+        Ok(())
+    }
+
     pub fn create_device(&self, email: &str, hostname: &str) -> anyhow::Result<(String, String)> {
         let label = if hostname.is_empty() {
             "device"
