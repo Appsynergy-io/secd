@@ -1463,7 +1463,7 @@ select {
   font-weight: 550;
 }
 
-/* Devices */
+/* Pending requests: the banner on /devices, the pick list on /device */
 
 .pending-card {
   border: 1px solid var(--color-accent-tint-border);
@@ -1495,14 +1495,6 @@ select {
   margin-top: 8px;
   font-size: 12px;
   color: var(--color-text-6);
-}
-
-.pending-note {
-  margin-top: 4px;
-  font-size: 11.5px;
-  color: var(--color-text-muted);
-  max-width: 420px;
-  line-height: 1.5;
 }
 
 .pending-actions {

@@ -39,6 +39,10 @@ import {
   MISSING_BODY,
   MISSING_TITLE,
   NO_SESSION_SENTENCE,
+  PICK_EMPTY,
+  PICK_LABEL,
+  PICK_SUB,
+  PICK_TITLE,
   TICK_MS,
   approveFacts,
   deviceDisabledReason,
@@ -49,7 +53,13 @@ import {
   resultCopy,
   splitCode,
 } from "./approve.ts";
-import type { PendingRequest } from "./devices.ts";
+import {
+  LOADING_SENTENCE,
+  PENDING_LABEL,
+  POLL_MS,
+  pendingMeta,
+  type PendingRequest,
+} from "./devices.ts";
 
 const origFetch = globalThis.fetch;
 const origSetInterval = globalThis.setInterval;
@@ -234,7 +244,7 @@ beforeEach(async () => {
   fakes.clear();
   nextFake = 2_000_000;
   globalThis.setInterval = ((handler: TimerHandler, timeout?: number) => {
-    if (timeout === TICK_MS && typeof handler === "function") {
+    if ((timeout === TICK_MS || timeout === POLL_MS) && typeof handler === "function") {
       const id = nextFake++;
       fakes.set(id, { id, timeout, handler: () => (handler as () => void)() });
       return id as unknown as ReturnType<typeof setInterval>;
@@ -518,15 +528,96 @@ describe("approve screen", () => {
     expect(c.signOut).toBe(1);
   });
 
-  test("no code and no eph paints Request not found", async () => {
-    const calls = apis();
+  test("no code lists the requests waiting instead of a dead end", async () => {
+    const eph = deviceEphHex();
+    const rows = [pendingRow(eph), { ...pendingRow(eph), user_code: "ZZ11-YY22" }];
+    const calls = apis({ pending: rows });
+    state = makeState({ code: "", eph: "" });
+    setDek(mintDek());
+    const root = document.createElement("div");
+    renderApprove(state, root, makeHost(cap()));
+    await settled();
+    expect(calls.some((c) => c.method === "GET" && c.url === devicePendingUrl())).toBe(true);
+    expect(root.querySelector(".approve-head")?.textContent).toContain(PICK_TITLE);
+    expect(root.querySelector(".approve-head")?.textContent).toContain(PICK_SUB);
+    const cards = [...root.querySelectorAll(".pending-card")];
+    expect(cards.map((n) => n.getAttribute("data-code"))).toEqual([CODE, "ZZ11-YY22"]);
+    expect(cards[0]?.querySelector(".pending-label")?.textContent).toBe(PENDING_LABEL);
+    expect(cards[0]?.querySelector(".pending-code")?.textContent).toBe(CODE);
+    expect(cards[0]?.querySelector(".pending-meta")?.textContent).toContain(HOSTNAME);
+    expect(asButton(cards[0]?.querySelector('[data-action="pick"]') ?? null)?.textContent).toBe(
+      PICK_LABEL,
+    );
+    expect(root.querySelector('[data-action="approve"]')).toBeNull();
+    expect(root.querySelector('[data-action="console"]')).not.toBeNull();
+  });
+
+  test("picking a request loads it into the approval card on the same page", async () => {
+    const eph = deviceEphHex();
+    apis({ pending: [pendingRow(eph)] });
+    state = makeState({ code: "", eph: "" });
+    setDek(mintDek());
+    const root = document.createElement("div");
+    const c = cap();
+    renderApprove(state, root, makeHost(c));
+    await settled();
+    asButton(root.querySelector('[data-action="pick"]'))?.click();
+    expect(c.navs).toEqual([]);
+    expect(state.userCode.get()).toBe(CODE);
+    expect(state.eph.get()).toBe(eph);
+    expect(root.querySelector(".approve-head")?.textContent).toContain(HEAD_TITLE);
+    expect([...root.querySelectorAll(".code-box")].map((n) => n.textContent)).toEqual([
+      "K",
+      "4",
+      "T",
+      "7",
+      "Q",
+      "M",
+      "9",
+      "2",
+    ]);
+    expect(root.textContent).toContain(keyFingerprint(eph));
+    expect(root.textContent).toContain(HOSTNAME);
+    expect(asButton(root.querySelector('[data-action="approve"]'))?.disabled).toBe(false);
+    expect(root.querySelector(".pending-card")).toBeNull();
+  });
+
+  test("no code and nothing waiting says so and keeps the way back", async () => {
+    apis({ pending: [] });
     state = makeState({ code: "", eph: "" });
     const root = document.createElement("div");
     renderApprove(state, root, makeHost(cap()));
     await settled();
-    expect(root.querySelector(".result-title")?.textContent).toBe(MISSING_TITLE);
-    expect(root.querySelector(".result-body")?.textContent).toBe(MISSING_BODY);
-    expect(calls.some((c) => c.url === devicePendingUrl())).toBe(false);
+    expect(root.querySelector('[data-state="empty"]')?.textContent).toBe(PICK_EMPTY);
+    expect(root.querySelector('[data-action="console"]')).not.toBeNull();
+  });
+
+  test("the pick list shows loading copy while the GET is in flight", async () => {
+    installFetch(() => new Promise<Response>(() => {}));
+    state = makeState({ code: "", eph: "" });
+    const root = document.createElement("div");
+    renderApprove(state, root, makeHost(cap()));
+    expect(root.querySelector('[data-state="loading"]')?.textContent).toBe(LOADING_SENTENCE);
+    await settled();
+  });
+
+  test("the 5s pick poll refetches and is cleared on leave", async () => {
+    const eph = deviceEphHex();
+    const calls = apis({ pending: [pendingRow(eph)] });
+    state = makeState({ code: "", eph: "" });
+    const root = document.createElement("div");
+    renderApprove(state, root, makeHost(cap()));
+    await settled();
+    const poll = [...fakes.values()].find((t) => t.timeout === POLL_MS);
+    expect(poll).toBeDefined();
+    const n = calls.filter((c) => c.url === devicePendingUrl()).length;
+    poll?.handler();
+    await settled();
+    expect(calls.filter((c) => c.url === devicePendingUrl()).length).toBe(n + 1);
+    expect(root.querySelector(".pending-meta")?.textContent).toBe(pendingMeta(pendingRow(eph)));
+    leaveApprove(state);
+    expect([...fakes.values()].some((t) => t.timeout === POLL_MS)).toBe(false);
+    state = undefined;
   });
 
   test("a code that is not pending and has no eph paints Request not found", async () => {

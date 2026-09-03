@@ -17,7 +17,14 @@ import { el } from "../lib/dom.ts";
 import { currentLogoutGen } from "../lib/gen.ts";
 import type { AppState, Host, SessionInfo } from "../lib/host.ts";
 import { ago, countdown, keyFingerprint } from "../lib/time.ts";
-import { parsePending } from "./devices.ts";
+import {
+  LOADING_SENTENCE,
+  PENDING_LABEL,
+  POLL_MS,
+  parsePending,
+  pendingMeta,
+  type PendingRequest,
+} from "./devices.ts";
 
 export const TICK_MS = 1_000;
 export const NO_SESSION_SENTENCE = "Sign in from this browser first.";
@@ -38,6 +45,11 @@ export const DENIED_BODY =
   "Nothing was sent. The pending request was dropped; the CLI will report that the approval was refused.";
 export const MISSING_TITLE = "Request not found";
 export const MISSING_BODY = "The code has expired or was already handled.";
+export const PICK_TITLE = "Which device is waiting?";
+export const PICK_SUB =
+  "Pick the request whose code matches the one secd printed on the machine in front of you.";
+export const PICK_LABEL = "Review this request";
+export const PICK_EMPTY = "No device is waiting for approval.";
 
 export type ApproveResult = "approved" | "denied" | "missing";
 
@@ -53,8 +65,10 @@ type Mem = {
   created: string;
   expiresAt: number | undefined;
   eph: string;
+  choices: PendingRequest[] | undefined;
   nowMs: number;
   tick: ReturnType<typeof setInterval> | undefined;
+  poll: ReturnType<typeof setInterval> | undefined;
   unwatch: (() => void) | undefined;
   loadGen: number;
   root: HTMLElement | undefined;
@@ -76,8 +90,10 @@ function memOf(state: object): Mem {
       created: "",
       expiresAt: undefined,
       eph: "",
+      choices: undefined,
       nowMs: Date.now(),
       tick: undefined,
+      poll: undefined,
       unwatch: undefined,
       loadGen: 0,
       root: undefined,
@@ -168,16 +184,16 @@ export function renderApprove(state: AppState, root: HTMLElement, host: Host): v
   m.root = root;
   m.host = host;
   watchDek(state, m);
-  if (!m.resolved) {
+  if (state.userCode.get() === "") {
+    // The CLI's link carries the code. Reached without one, this page lists
+    // the requests waiting and loads the picked one into the card below.
+    void loadChoices(state);
+    ensurePoll(state, m);
+  } else if (!m.resolved) {
     if (ephOk(state.eph.get())) {
       m.eph = state.eph.get();
     }
-    if (state.userCode.get() === "" && m.eph === "") {
-      m.result = "missing";
-      m.resolved = true;
-    } else {
-      void loadPending(state);
-    }
+    void loadPending(state);
   }
   paint(state);
 }
@@ -186,6 +202,7 @@ export function leaveApprove(state: object): void {
   const m = memOf(state);
   m.loadGen += 1;
   stopTick(m);
+  stopPoll(m);
   m.unwatch?.();
   m.unwatch = undefined;
   m.result = undefined;
@@ -197,6 +214,7 @@ export function leaveApprove(state: object): void {
   m.created = "";
   m.expiresAt = undefined;
   m.eph = "";
+  m.choices = undefined;
   m.root = undefined;
   m.host = undefined;
 }
@@ -229,6 +247,22 @@ function ensureTick(state: AppState, m: Mem): void {
   }, TICK_MS);
 }
 
+function stopPoll(m: Mem): void {
+  if (m.poll !== undefined) {
+    clearInterval(m.poll);
+    m.poll = undefined;
+  }
+}
+
+function ensurePoll(state: AppState, m: Mem): void {
+  if (m.poll !== undefined) {
+    return;
+  }
+  m.poll = setInterval(() => {
+    void loadChoices(state, true);
+  }, POLL_MS);
+}
+
 function guard(m: Mem): () => boolean {
   const gen = currentLogoutGen();
   const loadGen = m.loadGen;
@@ -241,6 +275,40 @@ function isAuthFail(status: number): boolean {
 
 function remainingSecs(expiresAt: number, nowMs: number): number {
   return Math.max(0, Math.floor((expiresAt - nowMs) / 1000));
+}
+
+/** Every request waiting, for the pick list this page shows without a code. */
+async function loadChoices(state: AppState, force = false): Promise<void> {
+  const m = memOf(state);
+  if (m.loading || (!force && m.choices !== undefined)) {
+    return;
+  }
+  m.loading = true;
+  const stale = guard(m);
+  try {
+    const res = await req("GET", devicePendingUrl());
+    if (stale()) {
+      return;
+    }
+    if (isAuthFail(res.status)) {
+      void m.host?.signOut();
+      return;
+    }
+    if (res.status !== 200) {
+      m.error = failSentence(res.status, res.data);
+      return;
+    }
+    m.choices = parsePending(res.data);
+  } catch {
+    if (!stale()) {
+      m.error = FAIL_SENTENCE;
+    }
+  } finally {
+    if (!stale()) {
+      m.loading = false;
+      paint(state);
+    }
+  }
 }
 
 async function loadPending(state: AppState): Promise<void> {
@@ -292,6 +360,22 @@ async function loadPending(state: AppState): Promise<void> {
       paint(state);
     }
   }
+}
+
+/** The pick carries the whole row, so the card below needs no second GET. */
+function onPick(state: AppState, row: PendingRequest): void {
+  const m = memOf(state);
+  stopPoll(m);
+  state.userCode.set(row.user_code);
+  state.eph.set(row.eph_pub);
+  m.eph = row.eph_pub;
+  m.hostname = row.hostname;
+  m.created = row.created;
+  m.expiresAt = Date.now() + row.expires_in * 1000;
+  m.choices = undefined;
+  m.error = undefined;
+  m.resolved = true;
+  paint(state);
 }
 
 async function onApprove(state: AppState): Promise<void> {
@@ -420,19 +504,25 @@ function backToConsole(state: AppState): void {
   m.host?.navigate("/devices");
 }
 
-function focusAction(root: HTMLElement): string | undefined {
+function focusKey(root: HTMLElement): { action: string; row: string } | undefined {
   const active = document.activeElement;
   if (!(active instanceof HTMLElement) || !root.contains(active)) {
     return undefined;
   }
-  return active.getAttribute("data-action") ?? undefined;
+  const action = active.getAttribute("data-action");
+  if (action === null) {
+    return undefined;
+  }
+  const row = active.closest("[data-code]")?.getAttribute("data-code") ?? "";
+  return { action, row };
 }
 
-function restoreFocus(root: HTMLElement, action: string | undefined): void {
-  if (action === undefined) {
+function restoreFocus(root: HTMLElement, key: { action: string; row: string } | undefined): void {
+  if (key === undefined) {
     return;
   }
-  const found = root.querySelector(`[data-action="${action}"]`);
+  const scope = key.row === "" ? root : (root.querySelector(`[data-code="${key.row}"]`) ?? root);
+  const found = scope.querySelector(`[data-action="${key.action}"]`);
   if (found instanceof HTMLElement && !(found instanceof HTMLButtonElement && found.disabled)) {
     found.focus();
   }
@@ -444,8 +534,9 @@ function paint(state: AppState): void {
   if (root === undefined) {
     return;
   }
-  const prev = focusAction(root);
-  if (m.result !== undefined) {
+  const prev = focusKey(root);
+  const picking = m.result === undefined && state.userCode.get() === "";
+  if (m.result !== undefined || picking) {
     stopTick(m);
   } else {
     ensureTick(state, m);
@@ -454,6 +545,8 @@ function paint(state: AppState): void {
   const wrapChildren: HTMLElement[] = [];
   if (m.result !== undefined) {
     wrapChildren.push(resultCard(state, m.result));
+  } else if (picking) {
+    wrapChildren.push(pickCard(state, m));
   } else {
     wrapChildren.push(openCard(state, m));
   }
@@ -473,6 +566,52 @@ function paint(state: AppState): void {
   ]);
   root.replaceChildren(page);
   restoreFocus(root, prev);
+}
+
+function pickCard(state: AppState, m: Mem): HTMLElement {
+  const body: HTMLElement[] = [];
+  if (m.error !== undefined) {
+    body.push(
+      el("div", { class: "alert alert-danger", role: "alert", "data-error": "" }, [m.error]),
+    );
+  }
+  const rows = m.choices;
+  if (rows === undefined) {
+    if (m.error === undefined) {
+      body.push(el("div", { class: "empty", "data-state": "loading" }, [LOADING_SENTENCE]));
+    }
+  } else if (rows.length === 0) {
+    body.push(el("div", { class: "empty", "data-state": "empty" }, [PICK_EMPTY]));
+  } else {
+    const now = Date.now();
+    for (const row of rows) {
+      body.push(choiceCard(state, row, now));
+    }
+  }
+  return el("div", { class: "approve-card" }, [
+    el("div", { class: "approve-head" }, [
+      el("div", { class: "gate-title" }, [PICK_TITLE]),
+      el("p", {}, [PICK_SUB]),
+    ]),
+    el("div", { class: "approve-actions" }, body),
+  ]);
+}
+
+function choiceCard(state: AppState, row: PendingRequest, nowMs: number): HTMLElement {
+  const pick = el("button", { type: "button", class: "btn btn-primary", "data-action": "pick" }, [
+    PICK_LABEL,
+  ]);
+  pick.addEventListener("click", () => {
+    onPick(state, row);
+  });
+  return el("div", { class: "pending-card", "data-code": row.user_code }, [
+    el("div", {}, [
+      el("div", { class: "pending-label" }, [PENDING_LABEL]),
+      el("div", { class: "pending-code" }, [row.user_code]),
+      el("div", { class: "pending-meta" }, [pendingMeta(row, nowMs)]),
+    ]),
+    el("div", { class: "pending-actions" }, [pick]),
+  ]);
 }
 
 function openCard(state: AppState, m: Mem): HTMLElement {
