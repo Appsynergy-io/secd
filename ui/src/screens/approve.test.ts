@@ -19,6 +19,7 @@ import {
   x25519Shared,
   zeroizeBytes,
 } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { asButton } from "../lib/dom.ts";
 import { bumpLogoutGen } from "../lib/gen.ts";
 import type { AppState, AuthMethod, Host, NavCounts, SessionInfo } from "../lib/host.ts";
@@ -227,7 +228,9 @@ async function settled(): Promise<void> {
 
 let state: AppState | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
+
+  await keyholder.start();
   fakes.clear();
   nextFake = 2_000_000;
   globalThis.setInterval = ((handler: TimerHandler, timeout?: number) => {

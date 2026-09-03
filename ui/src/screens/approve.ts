@@ -11,13 +11,8 @@ import {
   errorMessage,
   req,
 } from "../lib/api.ts";
-import {
-  fromHex,
-  getDek,
-  onDekClear,
-  sealDekToEph,
-  zeroizeBytes,
-} from "../lib/crypto.ts";
+import { fromHex, zeroizeBytes } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { el } from "../lib/dom.ts";
 import { currentLogoutGen } from "../lib/gen.ts";
 import type { AppState, Host, SessionInfo } from "../lib/host.ts";
@@ -210,7 +205,7 @@ function watchDek(state: AppState, m: Mem): void {
   if (m.unwatch !== undefined) {
     return;
   }
-  m.unwatch = onDekClear(() => {
+  m.unwatch = keyholder.subscribe(() => {
     if (m.root !== undefined) {
       paint(state);
     }
@@ -308,15 +303,14 @@ async function onApprove(state: AppState): Promise<void> {
     userCode: state.userCode.get(),
     eph: m.eph,
     session: state.session.get(),
-    hasDek: getDek() !== undefined,
+    hasDek: keyholder.isUnlocked(),
   });
   if (reason !== undefined) {
     m.error = reason;
     paint(state);
     return;
   }
-  const dek = getDek();
-  if (dek === undefined) {
+  if (!keyholder.isUnlocked()) {
     m.error = NO_DEK_SENTENCE;
     paint(state);
     return;
@@ -340,17 +334,14 @@ async function onApprove(state: AppState): Promise<void> {
   paint(state);
   const stale = guard(m);
   try {
-    let sealed: { alg: string; eph_pub: string; blob: string };
-    try {
-      sealed = sealDekToEph(dek, ephBytes);
-    } catch {
+    const sealed = await keyholder.sealToEph(m.eph);
+    if (sealed === undefined) {
       if (!stale()) {
         m.error = FAIL_SENTENCE;
       }
       return;
-    } finally {
-      zeroizeBytes(ephBytes);
     }
+    zeroizeBytes(ephBytes);
     const res = await req("POST", deviceApproveUrl(), {
       user_code: state.userCode.get(),
       sealed_dek: sealed,
@@ -502,7 +493,7 @@ function openCard(state: AppState, m: Mem): HTMLElement {
         userCode: code,
         eph: m.eph,
         session: state.session.get(),
-        hasDek: getDek() !== undefined,
+        hasDek: keyholder.isUnlocked(),
       });
   const err = m.error ?? reason;
   const approveOff = m.busy || reason !== undefined;

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as keyholder from "./lib/keyholder.ts";
 import { clearDek, mintDek, setDek } from "./lib/crypto.ts";
 import type { AppState } from "./lib/host.ts";
 import { leaveAccess } from "./screens/access.ts";
@@ -41,7 +42,9 @@ function paint(state: AppState): void {
   render(state);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+
+  await keyholder.start();
   globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
     new Response("{}", {
       status: 200,

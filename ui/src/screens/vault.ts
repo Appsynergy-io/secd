@@ -3,16 +3,8 @@
 
 import { NO_DEK_SENTENCE, providersUrl, req, vaultRollbackUrl, vaultUrl, vaultVersionsUrl, type Http } from "../lib/api.ts";
 import { copyText } from "../lib/clipboard.ts";
-import {
-  checkName,
-  fromHex,
-  getDek,
-  onDekClear,
-  open,
-  seal,
-  toHex,
-  zeroizeBytes,
-} from "../lib/crypto.ts";
+import { checkName, fromHex, toHex, zeroizeBytes } from "../lib/crypto.ts";
+import * as keyholder from "../lib/keyholder.ts";
 import { el } from "../lib/dom.ts";
 import { currentLogoutGen } from "../lib/gen.ts";
 import type { AppState, Host } from "../lib/host.ts";
@@ -358,32 +350,13 @@ export function preimage(data: unknown): PutRow[] | undefined {
   return rows.length === raw.length ? rows : undefined;
 }
 
-export function openEntry(dek: Uint8Array, entry: VaultEntry): Opened {
-  if (typeof entry.ciphertext !== "string") {
+/** Shape one entry from the plaintext the holder returned. `null` is a blob
+ *  that would not open, which fails closed rather than hiding the vault. */
+export function openEntry(plaintext: string | null, entry: VaultEntry): Opened {
+  if (plaintext === null) {
     return { fields: {}, error: OPEN_FAIL_SENTENCE };
   }
-  let blob: Uint8Array;
-  try {
-    blob = fromHex(entry.ciphertext);
-  } catch {
-    return { fields: {}, error: OPEN_FAIL_SENTENCE };
-  }
-  let pt: Uint8Array;
-  try {
-    pt = open(dek, entry.name, blob);
-  } catch {
-    zeroizeBytes(blob);
-    return { fields: {}, error: OPEN_FAIL_SENTENCE };
-  }
-  zeroizeBytes(blob);
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(pt);
-  } catch {
-    zeroizeBytes(pt);
-    return { fields: {}, error: OPEN_FAIL_SENTENCE };
-  }
-  zeroizeBytes(pt);
+  const text = plaintext;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -515,9 +488,16 @@ function watchDek(state: object): void {
   }
   dekWatches.set(
     state,
-    onDekClear(() => {
+    keyholder.subscribe(() => {
       const s = stores.get(state);
       if (!s) {
+        return;
+      }
+      if (keyholder.isUnlocked()) {
+        // Another tab unlocked: fill this one in rather than sitting blank.
+        void openAll(s).then(() => {
+          paint(state);
+        });
         return;
       }
       dropPlaintext(s);
@@ -617,7 +597,7 @@ function paint(state: object): void {
   const { root, host } = ctx;
   const prevSel = focusSelector(root, document.activeElement);
   releaseInert(store);
-  if (getDek() === undefined) {
+  if (!keyholder.isUnlocked()) {
     dropPlaintext(store);
   }
   const page = el("div", { class: "vault", "data-view": store.view }, [
@@ -767,7 +747,7 @@ function detailPane(state: object, store: Store): HTMLElement {
   }
   const schema = schemaFor(store, entry.provider);
   const opened = store.opened.get(entry.name);
-  const noDek = getDek() === undefined;
+  const noDek = !keyholder.isUnlocked();
   const fields = opened?.fields ?? {};
   const keys = entry.fieldKeys;
   const secretKeys = keys.filter((k) => fields[k] !== undefined && schemaField(schema, k)?.secret !== false);
@@ -1171,15 +1151,29 @@ async function copyToClipboard(
   ctx.host.flash(toast);
 }
 
-function applyVault(state: AppState, store: Store, data: unknown): void {
-  store.entries = parseVault(data);
+/** Ask the holder for every entry's plaintext and shape it. */
+async function openAll(store: Store): Promise<void> {
   store.opened.clear();
-  const dek = getDek();
-  if (dek) {
-    for (const e of store.entries) {
-      store.opened.set(e.name, openEntry(dek, e));
-    }
+  if (!keyholder.isUnlocked()) {
+    return;
   }
+  const opened = await keyholder.openEntries(
+    store.entries.map((e) => ({
+      name: e.name,
+      blob: typeof e.ciphertext === "string" ? e.ciphertext : "",
+    })),
+  );
+  if (opened === undefined) {
+    return;
+  }
+  for (const e of store.entries) {
+    store.opened.set(e.name, openEntry(opened[e.name] ?? null, e));
+  }
+}
+
+async function applyVault(state: AppState, store: Store, data: unknown): Promise<void> {
+  store.entries = parseVault(data);
+  await openAll(store);
   store.status = "ready";
   state.counts.set({ ...state.counts.get(), vault: store.entries.length });
   if (selectedEntry(store) === undefined) {
@@ -1234,7 +1228,7 @@ async function loadVault(state: AppState): Promise<void> {
       paint(state);
       return;
     }
-    applyVault(state, store, vault.data);
+    await applyVault(state, store, vault.data);
   } catch {
     if (!live(state, store, gen, lg)) {
       return;
@@ -1349,8 +1343,7 @@ async function saveWizard(state: object): Promise<void> {
     refuse(REQUIRED_SENTENCE);
     return;
   }
-  const dek = getDek();
-  if (dek === undefined) {
+  if (!keyholder.isUnlocked()) {
     refuse(NO_DEK_SENTENCE);
     return;
   }
@@ -1360,12 +1353,10 @@ async function saveWizard(state: object): Promise<void> {
   const gen = store.gen;
   const lg = currentLogoutGen();
   try {
-    const pt = new TextEncoder().encode(JSON.stringify(payload));
-    let sealed: string;
-    try {
-      sealed = toHex(seal(dek, n, pt));
-    } finally {
-      zeroizeBytes(pt);
+    const sealed = await keyholder.sealEntry(n, JSON.stringify(payload));
+    if (sealed === undefined) {
+      store.wizardError = SAVE_FAIL_SENTENCE;
+      return;
     }
     const current = await req("GET", vaultUrl());
     if (!live(state, store, gen, lg)) {
@@ -1420,7 +1411,10 @@ async function saveWizard(state: object): Promise<void> {
     store.versionsStatus = "idle";
     store.focusHint = "actions";
     ctx.host.flash(SAVED_TOAST);
-    applyVault(state as AppState, store, back.data);
+    // Close the wizard before the read-back: the save is done, and the list
+    // behind it refills a moment later.
+    paint(state);
+    await applyVault(state as AppState, store, back.data);
   } catch {
     if (live(state, store, gen, lg)) {
       store.wizardError = SAVE_FAIL_SENTENCE;
