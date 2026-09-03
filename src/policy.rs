@@ -499,6 +499,74 @@ fn load_ciphertexts(token: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// A provider schema as the register offers it: built-in and custom, one type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Schema {
+    pub name: String,
+    pub title: String,
+    pub builtin: bool,
+    pub fields: Vec<secd_core::Field>,
+}
+
+/// The locked built-ins, with no server. What the register starts from.
+pub fn builtin_schemas() -> Vec<Schema> {
+    providers()
+        .iter()
+        .map(|p| Schema {
+            name: p.name.clone(),
+            title: p.title.clone(),
+            builtin: true,
+            fields: p.fields.clone(),
+        })
+        .collect()
+}
+
+/// Every schema the register offers, and how many rows did not parse. The
+/// count rides along so a caller says so rather than showing a short list as
+/// though it were the whole one.
+pub fn fetch_schemas(token: &str) -> anyhow::Result<(Vec<Schema>, usize)> {
+    let (status, v) = request("GET", "/api/v1/providers", None, Some(token))?;
+    if status != 200 {
+        anyhow::bail!("providers {status}");
+    }
+    let Some(arr) = v.get("providers").and_then(Value::as_array) else {
+        anyhow::bail!("providers: no list");
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for p in arr {
+        if let Some(schema) = parse_schema(p) {
+            out.push(schema);
+        }
+    }
+    let dropped = arr.len().saturating_sub(out.len());
+    Ok((out, dropped))
+}
+
+/// A row of `GET /api/v1/providers`. An unreadable flag masks rather than
+/// exposes, and blocks nothing: absent `secret` reads as secret, absent
+/// `optional` as optional.
+fn parse_schema(v: &Value) -> Option<Schema> {
+    let name = v.get("name").and_then(Value::as_str)?;
+    let title = v.get("title").and_then(Value::as_str)?;
+    let builtin = v.get("builtin").and_then(Value::as_bool).unwrap_or(false);
+    let raw = v.get("fields").and_then(Value::as_array)?;
+    let mut fields = Vec::with_capacity(raw.len());
+    for f in raw {
+        fields.push(secd_core::Field {
+            key: f.get("key").and_then(Value::as_str)?.to_string(),
+            secret: f.get("secret").and_then(Value::as_bool).unwrap_or(true),
+            optional: f.get("optional").and_then(Value::as_bool).unwrap_or(true),
+            env: f.get("env").and_then(Value::as_str)?.to_string(),
+        });
+    }
+    Some(Schema {
+        name: name.to_string(),
+        title: title.to_string(),
+        builtin,
+        fields,
+    })
+}
+
 pub fn revoke_session(token: &str) {
     let _ = request("POST", "/api/v1/device/revoke", None, Some(token));
 }
@@ -553,6 +621,44 @@ fn field_get<'a>(bundle: &'a Bundle, key: &str, env: &str) -> Option<&'a str> {
         .get(key)
         .or_else(|| bundle.fields.get(env))
         .map(String::as_str)
+}
+
+/// `{"k":"v",...}` in the order given: the shape the console seals, which
+/// `json_bundle` reads back. Hand-written because `serde_json::Map` sorts,
+/// and the order is what the console and `secd info` print.
+pub fn payload_json(pairs: &[(String, String)]) -> String {
+    let mut out = String::from("{");
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        push_json_str(&mut out, k);
+        out.push(':');
+        push_json_str(&mut out, v);
+    }
+    out.push('}');
+    out
+}
+
+/// The meta the console writes, and `secd info` and `resolve_provider` read.
+pub fn provider_meta(provider: &str, keys: &[&str]) -> Value {
+    json!({ "provider": provider, "fields": keys })
+}
+
+fn push_json_str(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 fn json_bundle(e: &Entry) -> Option<Bundle> {

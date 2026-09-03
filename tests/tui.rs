@@ -2,10 +2,15 @@
 
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use std::collections::BTreeMap;
+
+use secd::policy;
 use secd::tui::{
-    action_bar, draw_action_bar, hit_key, regions, Action, Event, Modal, Mode, Model, Rect, ACCENT,
-    DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN,
+    action_bar, draw, draw_action_bar, hit_key, mask, regions, Action, Event, Modal, Mode, Model,
+    Rect, Spot, SpotHit, ACCENT, DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN,
 };
+use secd::Secret;
+use secd_core::{build_payload, providers};
 
 fn button_text(action: Action) -> String {
     format!("[{}] {}", action.key, action.label)
@@ -235,4 +240,428 @@ fn T_TUI_THEME() {
     assert_eq!(DANGER, "#F87185");
     assert_eq!(DIM, "#7A7A94");
     assert_eq!(ON_ACCENT, "#181825");
+}
+
+/// Cells `x..x+n` of row `y`, by cell index rather than byte offset: a border
+/// glyph is one cell and three bytes.
+fn cell_text(buf: &ratatui::buffer::Buffer, x: u16, y: u16, n: u16) -> String {
+    (0..n).map(|i| buf[(x + i, y)].symbol()).collect()
+}
+
+fn screen_text(buf: &ratatui::buffer::Buffer, w: u16, h: u16) -> String {
+    (0..h)
+        .map(|y| row_text(buf, y, w))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Paint `model` into a `w` by `h` terminal, and hand back what a click can
+/// land on and what was drawn.
+fn render(model: &Model, w: u16, h: u16) -> (Vec<SpotHit>, String) {
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("term");
+    let mut spots = Vec::new();
+    terminal
+        .draw(|f| {
+            spots = draw(f, model);
+        })
+        .expect("draw");
+    let text = screen_text(terminal.backend().buffer(), w, h);
+    (spots, text)
+}
+
+fn provider_form(name: &str) -> Model {
+    let mut m = Model::new();
+    let i = m
+        .schemas()
+        .iter()
+        .position(|s| s.name == name)
+        .unwrap_or_else(|| panic!("{name} schema"));
+    m.handle(Event::Key('p'));
+    for _ in 0..i {
+        m.handle(Event::Down);
+    }
+    m.handle(Event::Enter);
+    assert!(m.form().is_some(), "the schema form is open");
+    m
+}
+
+fn bundle_register() -> Model {
+    let mut m = Model::new();
+    m.apply_loaded(policy::VaultLoad {
+        entries: vec![
+            policy::Entry {
+                name: "kv/plain".into(),
+                value: Secret::new(b"PLAINVALUE".to_vec()),
+                meta: serde_json::json!({}),
+            },
+            policy::Entry {
+                name: "prod/cf".into(),
+                value: Secret::new(
+                    br#"{"account_id":"ACCTVISIBLE","api_token":"TOKENSECRET"}"#.to_vec(),
+                ),
+                meta: serde_json::json!({
+                    "provider": "cloudflare",
+                    "fields": ["account_id", "api_token"],
+                }),
+            },
+        ],
+        raw: 2,
+        body: String::new(),
+        before: BTreeMap::new(),
+    });
+    m
+}
+
+#[test]
+fn T_TUI_PAYLOAD() {
+    let cf = providers()
+        .iter()
+        .find(|p| p.name == "cloudflare")
+        .expect("cloudflare");
+    let vals = vec![
+        ("api_token".to_string(), "  tok  ".to_string()),
+        ("account_id".to_string(), "acct".to_string()),
+        ("zone_id".to_string(), "   ".to_string()),
+        ("not_in_the_schema".to_string(), "x".to_string()),
+    ];
+    let got = build_payload(&cf.fields, &vals).expect("both required fields are filled");
+    assert_eq!(
+        got,
+        vec![
+            ("account_id".to_string(), "acct".to_string()),
+            ("api_token".to_string(), "tok".to_string()),
+        ],
+        "schema order, trimmed, and only what the schema names"
+    );
+    assert!(
+        got.iter().all(|(k, _)| k != "zone_id"),
+        "an empty optional is absent, not empty"
+    );
+
+    assert!(
+        build_payload(&cf.fields, &[("api_token".into(), "tok".into())]).is_none(),
+        "a missing required field refuses"
+    );
+    assert!(
+        build_payload(
+            &cf.fields,
+            &[
+                ("account_id".into(), "   ".into()),
+                ("api_token".into(), "tok".into()),
+            ]
+        )
+        .is_none(),
+        "a whitespace-only required field refuses"
+    );
+
+    // The order is the schema's, not the sorted one. The widest schema is
+    // where the two visibly differ.
+    let wide = providers()
+        .iter()
+        .max_by_key(|p| p.fields.len())
+        .expect("a widest schema");
+    let filled: Vec<(String, String)> = wide
+        .fields
+        .iter()
+        .map(|f| (f.key.clone(), "v".to_string()))
+        .collect();
+    let keys: Vec<String> = build_payload(&wide.fields, &filled)
+        .expect("all filled")
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    let want: Vec<String> = wide.fields.iter().map(|f| f.key.clone()).collect();
+    assert_eq!(keys, want);
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_ne!(keys, sorted, "the schema order is not the sorted order");
+}
+
+#[test]
+fn T_TUI_PROVIDER_META() {
+    let pairs = vec![
+        ("account_id".to_string(), "acct".to_string()),
+        ("api_token".to_string(), "tok".to_string()),
+    ];
+    let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+    let meta = policy::provider_meta("cloudflare", &keys);
+    assert_eq!(meta["provider"], serde_json::json!("cloudflare"));
+    assert_eq!(
+        meta["fields"],
+        serde_json::json!(["account_id", "api_token"]),
+        "the field list is in schema order"
+    );
+    let obj = meta.as_object().expect("an object");
+    assert_eq!(obj.len(), 2);
+    for k in ["value", "plaintext", "dek"] {
+        assert!(!obj.contains_key(k), "the server refuses meta carrying {k}");
+    }
+
+    assert_eq!(
+        policy::payload_json(&pairs),
+        r#"{"account_id":"acct","api_token":"tok"}"#
+    );
+    assert_eq!(
+        policy::payload_json(&[
+            ("b".to_string(), "1".to_string()),
+            ("a".to_string(), "2".to_string()),
+        ]),
+        r#"{"b":"1","a":"2"}"#,
+        "the order given survives, where a serde map would sort"
+    );
+    let odd = vec![("k".to_string(), "a\"b\\c\nd\te\u{1}f".to_string())];
+    let back: serde_json::Value =
+        serde_json::from_str(&policy::payload_json(&odd)).expect("valid JSON");
+    assert_eq!(back["k"], serde_json::json!("a\"b\\c\nd\te\u{1}f"));
+
+    // What the register writes is what the CLI's bundle resolution reads back.
+    let entry = policy::Entry {
+        name: "prod/cloudflare".to_string(),
+        value: Secret::new(policy::payload_json(&pairs).into_bytes()),
+        meta,
+    };
+    let bundles = policy::discover_bundles(std::slice::from_ref(&entry));
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].provider, "cloudflare");
+    assert_eq!(bundles[0].name, "prod/cloudflare");
+    assert_eq!(
+        bundles[0].fields.get("api_token").map(String::as_str),
+        Some("tok")
+    );
+}
+
+#[test]
+fn T_TUI_FORM_EDIT() {
+    let mut m = Model::new();
+    m.handle(Event::Key('a'));
+    let text = |m: &Model| m.form().expect("form").fields[0].input.text();
+    let caret = |m: &Model| m.form().expect("form").fields[0].input.caret();
+
+    for c in "abc".chars() {
+        m.handle(Event::Key(c));
+    }
+    m.handle(Event::Left);
+    m.handle(Event::Left);
+    m.handle(Event::Key('X'));
+    assert_eq!(text(&m), "aXbc");
+    assert_eq!(caret(&m), 2);
+    m.handle(Event::Backspace);
+    assert_eq!(text(&m), "abc");
+    m.handle(Event::Delete);
+    assert_eq!(text(&m), "ac");
+    m.handle(Event::Home);
+    m.handle(Event::Delete);
+    assert_eq!(text(&m), "c");
+    m.handle(Event::End);
+    m.handle(Event::Backspace);
+    assert_eq!(text(&m), "");
+
+    m.handle(Event::Key('é'));
+    m.handle(Event::Key('字'));
+    assert_eq!(text(&m), "é字");
+    m.handle(Event::Backspace);
+    assert_eq!(
+        text(&m),
+        "é",
+        "one Backspace is one character, not one byte"
+    );
+
+    assert_eq!(m.form().expect("form").focus, 0);
+    m.handle(Event::Tab);
+    assert_eq!(m.form().expect("form").focus, 1);
+    m.handle(Event::Tab);
+    assert_eq!(m.form().expect("form").focus, 0, "Tab wraps");
+    m.handle(Event::BackTab);
+    assert_eq!(m.form().expect("form").focus, 1, "BackTab wraps");
+}
+
+#[test]
+fn T_TUI_FORM_CLICK() {
+    let mut m = provider_form("cloudflare");
+    let (spots, _) = render(&m, 80, 24);
+    let field3 = spots
+        .iter()
+        .find(|h| h.spot == Spot::Field(3))
+        .copied()
+        .expect("a fourth row");
+
+    // The label is drawn where the hit table says the field is.
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("term");
+    terminal
+        .draw(|f| {
+            draw(f, &m);
+        })
+        .expect("draw");
+    let key = m.form().expect("form").fields[3].key.clone();
+    let width = u16::try_from(key.chars().count()).expect("a short key");
+    assert_eq!(
+        cell_text(
+            terminal.backend().buffer(),
+            field3.rect.x,
+            field3.rect.y,
+            width
+        ),
+        key,
+        "field 3's label sits at field 3's hit rect"
+    );
+
+    m.set_spots(spots.clone());
+    m.handle(Event::Click {
+        column: field3.rect.x + field3.rect.width / 2,
+        row: field3.rect.y,
+    });
+    assert_eq!(
+        m.form().expect("form").focus,
+        3,
+        "a click focuses the field"
+    );
+
+    // The focused secret field carries a clickable reveal.
+    let secret = m
+        .form()
+        .expect("form")
+        .fields
+        .iter()
+        .position(|f| f.secret)
+        .expect("a secret field");
+    let hit = spots
+        .iter()
+        .find(|h| h.spot == Spot::Field(secret))
+        .copied()
+        .expect("a rect for it");
+    m.handle(Event::Click {
+        column: hit.rect.x,
+        row: hit.rect.y,
+    });
+    assert_eq!(m.form().expect("form").focus, secret);
+    let (spots, _) = render(&m, 80, 24);
+    let toggle = spots
+        .iter()
+        .find(|h| h.spot == Spot::Reveal(secret))
+        .copied()
+        .expect("the focused secret field carries a toggle");
+    m.set_spots(spots);
+    m.handle(Event::Click {
+        column: toggle.rect.x,
+        row: toggle.rect.y,
+    });
+    assert!(
+        m.form().expect("form").fields[secret].shown,
+        "clicking the toggle reveals that field"
+    );
+}
+
+#[test]
+fn T_TUI_MASK() {
+    assert_eq!(
+        mask(3).chars().count(),
+        8,
+        "a short value is not advertised"
+    );
+    assert_eq!(mask(11).chars().count(), 11);
+    assert_eq!(
+        mask(9999).chars().count(),
+        24,
+        "the mask does not report the length"
+    );
+
+    let mut m = bundle_register();
+    let (_, screen) = render(&m, 100, 24);
+    assert!(
+        !screen.contains("PLAINVALUE"),
+        "a plain value is masked until it is asked for"
+    );
+
+    m.handle(Event::Down);
+    let (_, screen) = render(&m, 100, 24);
+    assert!(screen.contains("Cloudflare"), "the schema names the entry");
+    assert!(
+        !screen.contains("TOKENSECRET"),
+        "a field the schema marks secret is masked: {screen}"
+    );
+    assert!(
+        screen.contains("ACCTVISIBLE"),
+        "a field it does not mark secret is shown"
+    );
+    assert!(screen.contains('\u{2022}'), "the mask is drawn");
+
+    m.handle(Event::Reveal);
+    let (_, screen) = render(&m, 100, 24);
+    assert!(screen.contains("TOKENSECRET"), "Ctrl-R reveals");
+    m.handle(Event::Key('r'));
+    let (_, screen) = render(&m, 100, 24);
+    assert!(!screen.contains("TOKENSECRET"), "and hides again");
+
+    m.handle(Event::Reveal);
+    m.handle(Event::Up);
+    m.handle(Event::Down);
+    let (_, screen) = render(&m, 100, 24);
+    assert!(
+        !screen.contains("TOKENSECRET"),
+        "a move does not carry the reveal with it"
+    );
+}
+
+#[test]
+fn T_TUI_MODAL_FITS() {
+    let wide = providers()
+        .iter()
+        .max_by_key(|p| p.fields.len())
+        .expect("a widest schema");
+    let want = wide.fields.len() + 1;
+    let mut m = provider_form(&wide.name);
+    assert_eq!(
+        m.form().expect("form").fields.len(),
+        want,
+        "every schema field, plus the name row"
+    );
+
+    let (spots, _) = render(&m, 80, 24);
+    let fields: Vec<SpotHit> = spots
+        .iter()
+        .filter(|h| matches!(h.spot, Spot::Field(_)))
+        .copied()
+        .collect();
+    assert_eq!(fields.len(), want, "every field is placed at 80x24");
+    for h in &spots {
+        assert!(
+            h.rect.right() <= 80 && h.rect.y < 24,
+            "every target is on screen: {:?}",
+            h.rect
+        );
+    }
+    let mut ys: Vec<u16> = fields.iter().map(|h| h.rect.y).collect();
+    ys.sort_unstable();
+    ys.dedup();
+    assert_eq!(ys.len(), fields.len(), "no two field rows overlap");
+    assert!(
+        spots.iter().any(|h| h.spot == Spot::Save) && spots.iter().any(|h| h.spot == Spot::Cancel),
+        "save and cancel are clickable"
+    );
+
+    // A short terminal clamps the box and scrolls to the focused row.
+    m.handle(Event::PageDown);
+    let last = want - 1;
+    assert_eq!(m.form().expect("form").focus, last);
+    let (spots, _) = render(&m, 80, 12);
+    let fields: Vec<SpotHit> = spots
+        .iter()
+        .filter(|h| matches!(h.spot, Spot::Field(_)))
+        .copied()
+        .collect();
+    assert!(
+        fields.len() < want && !fields.is_empty(),
+        "the box clamps rather than growing past the screen"
+    );
+    for h in &spots {
+        assert!(
+            h.rect.right() <= 80 && h.rect.y < 12,
+            "still on screen: {:?}",
+            h.rect
+        );
+    }
+    assert!(
+        fields.iter().any(|h| h.spot == Spot::Field(last)),
+        "the focused row is inside the window"
+    );
 }

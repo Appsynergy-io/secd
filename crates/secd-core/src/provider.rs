@@ -45,6 +45,34 @@ pub fn infer(keys: &[&str]) -> Option<&'static str> {
     }
 }
 
+/// Schema-ordered pairs of trimmed, non-empty values. `None` when a required
+/// field is empty. The rule the web console spells as `buildPayload`.
+///
+/// Order is load-bearing: the console seals its payload in schema order and
+/// records the same order in the entry meta, so a sorted map would diverge.
+pub fn build_payload(
+    fields: &[Field],
+    values: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(fields.len());
+    for f in fields {
+        let raw = values
+            .iter()
+            .find(|(k, _)| *k == f.key)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+        let v = raw.trim();
+        if v.is_empty() {
+            if f.optional {
+                continue;
+            }
+            return None;
+        }
+        out.push((f.key.clone(), v.to_string()));
+    }
+    Some(out)
+}
+
 fn builtins() -> Vec<Provider> {
     vec![
         Provider {

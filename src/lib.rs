@@ -17,7 +17,7 @@ pub mod skills_install;
 pub mod tui;
 pub mod update;
 
-pub use secd_core::Secret;
+pub use secd_core::{build_payload, Secret};
 
 pub fn cli() -> Command {
     Command::new("secd")
