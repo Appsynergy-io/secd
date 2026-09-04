@@ -300,6 +300,97 @@ pub fn gitea_url(bundle: &Bundle) -> Option<&str> {
     field_get(bundle, "url", "GITEA_URL")
 }
 
+/// A provider that can authenticate git over HTTPS: a token, a username, and a
+/// host that the bundle either states or inherits from the service.
+struct Forge {
+    provider: &'static str,
+    token: (&'static str, &'static str),
+    url: (&'static str, &'static str),
+    user: (&'static str, &'static str),
+    /// The host when the bundle names no url. A self-hosted Gitea has no such
+    /// default, so a Gitea bundle without a url serves no host at all.
+    host: Option<&'static str>,
+}
+
+const FORGES: [Forge; 3] = [
+    Forge {
+        provider: "gitea",
+        token: ("token", "GITEA_TOKEN"),
+        url: ("url", "GITEA_URL"),
+        user: ("user", "GITEA_USER"),
+        host: None,
+    },
+    Forge {
+        provider: "github",
+        token: ("token", "GITHUB_TOKEN"),
+        url: ("url", "GITHUB_URL"),
+        user: ("user", "GITHUB_USER"),
+        host: Some("github.com"),
+    },
+    Forge {
+        provider: "gitlab",
+        token: ("token", "GITLAB_TOKEN"),
+        url: ("url", "GITLAB_URL"),
+        user: ("user", "GITLAB_USER"),
+        host: Some("gitlab.com"),
+    },
+];
+
+fn forge(provider: &str) -> Option<&'static Forge> {
+    FORGES.iter().find(|f| f.provider == provider)
+}
+
+/// The host this bundle can serve credentials for, if any.
+pub fn forge_host(bundle: &Bundle) -> Option<String> {
+    let f = forge(&bundle.provider)?;
+    match field_get(bundle, f.url.0, f.url.1) {
+        Some(url) => host_of_url(url),
+        None => f.host.map(str::to_string),
+    }
+}
+
+/// The remote origin this bundle serves, as git scopes a config key. Built
+/// from the bundle's own url where it has one, so a self-hosted forge on plain
+/// http keeps its scheme.
+pub fn forge_origin(bundle: &Bundle) -> Option<String> {
+    let f = forge(&bundle.provider)?;
+    match field_get(bundle, f.url.0, f.url.1) {
+        Some(url) => Some(origin_url(url)),
+        None => f.host.map(|h| format!("https://{h}")),
+    }
+}
+
+pub fn forge_token(bundle: &Bundle) -> Option<&str> {
+    let f = forge(&bundle.provider)?;
+    field_get(bundle, f.token.0, f.token.1)
+}
+
+/// The username git should be handed. `git` is what every forge accepts when
+/// the token is the password and the bundle named nobody.
+pub fn forge_user(bundle: &Bundle) -> &str {
+    forge(&bundle.provider)
+        .and_then(|f| field_get(bundle, f.user.0, f.user.1))
+        .unwrap_or("git")
+}
+
+/// The bundle that serves `host`, or none. Unlike `pick_gitea`, which answers
+/// "which bundle did the human mean", this is answering a host git already
+/// named, so an ambiguous answer is a refusal rather than a menu: two bundles
+/// for one host cannot be disambiguated by a helper git invokes silently.
+pub fn pick_forge<'a>(bundles: &'a [Bundle], want: Option<&str>, host: &str) -> Option<&'a Bundle> {
+    let host = strip_default_port(host.trim());
+    let mut ready = bundles.iter().filter(|b| {
+        forge_token(b).is_some() && forge_host(b).is_some_and(|h| h.eq_ignore_ascii_case(host))
+    });
+    match want {
+        Some(name) => ready.find(|b| b.name == name),
+        None => {
+            let first = ready.next()?;
+            ready.next().is_none().then_some(first)
+        }
+    }
+}
+
 pub fn origin_url(raw: &str) -> String {
     let raw = raw.trim().trim_end_matches('/');
     let (scheme, rest) = if let Some(r) = raw.strip_prefix("https://") {

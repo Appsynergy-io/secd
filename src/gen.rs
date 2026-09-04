@@ -28,18 +28,20 @@ pub fn run() -> anyhow::Result<()> {
         before,
         ..
     } = loaded;
+    // Generating over a live credential is an outage, and there is no way back:
+    // no versions, no restore, and the replaced entry's meta would still claim
+    // the provider and fields of the value it just lost.
+    if entries.iter().any(|e| e.name == name) {
+        anyhow::bail!("{name} already exists — change it in secd, or pick another name");
+    }
     let hex = random_hex(GEN_BYTES)?;
     let len = hex.len();
     let value = Secret::new(hex.into_bytes());
-    if let Some(existing) = entries.iter_mut().find(|e| e.name == name) {
-        existing.value = value;
-    } else {
-        entries.push(crate::policy::Entry {
-            name: name.clone(),
-            value,
-            meta: json!({}),
-        });
-    }
+    entries.push(crate::policy::Entry {
+        name: name.clone(),
+        value,
+        meta: json!({}),
+    });
     let rows: Vec<crate::policy::Row<'_>> = entries.iter().map(crate::policy::Entry::row).collect();
     crate::policy::save_entries_read_back(&unlocked.token, &unlocked.dek, &rows, &before)?;
     println!("{name} {len}");

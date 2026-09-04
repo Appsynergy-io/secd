@@ -9,11 +9,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::json;
 use zeroize::Zeroize;
 
 use common::{
-    assert_no_value, env_lock, gitea_blob, isolated_secd, remove_var, set_var, sha256, utf8,
-    with_secd_home, Harness, FIXTURE, GITEA_URL, LOCKED,
+    assert_no_value, env_lock, gitea_blob, github_blob, isolated_secd, remove_var, set_var, sha256,
+    utf8, with_secd_home, Harness, FIXTURE, GITEA_URL, LOCKED,
 };
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -101,6 +102,29 @@ fn T_CLI_GEN_LEN() {
     assert!(ok, "gen must print name and length only");
 }
 
+#[test]
+fn T_CLI_GEN_REFUSES_EXISTING() {
+    let h = Harness::new(&[("kv/t7gen", FIXTURE.as_bytes().to_vec())]);
+    let out = h.run(&["gen", "kv/t7gen"]);
+    assert!(!out.status.success(), "gen must refuse a name that exists");
+    let stdout = utf8(&out.stdout);
+    let stderr = utf8(&out.stderr);
+    assert!(
+        stderr.contains("kv/t7gen") && stderr.contains("already exists"),
+        "gen must name the collision: {stderr}"
+    );
+    assert_no_value(&stdout, "gen stdout");
+    assert_no_value(&stderr, "gen stderr");
+    // The refusal is only worth having if the value it protected is still there.
+    let info = h.run(&["info", "kv/t7gen"]);
+    assert!(info.status.success(), "info failed after a refused gen");
+    let n = FIXTURE.len();
+    assert!(
+        utf8(&info.stdout).contains(&format!("bytes {n}")),
+        "the original value must survive a refused gen"
+    );
+}
+
 fn gen_name_len_only(stdout: &str, name: &str) -> bool {
     let t = stdout.trim();
     let Some((n, rest)) = t.split_once(' ') else {
@@ -177,6 +201,43 @@ fn T_CLI_GITEA_ONE() {
         sha256(FIXTURE.as_bytes()),
         "child token hash mismatch"
     );
+}
+
+#[test]
+fn T_CLI_GITEA_INSTALL_BOTH() {
+    // git chooses a helper by host, so a vault holding two forges must end up
+    // with a helper for each. Wiring only gitea leaves github unauthenticated.
+    let gh_meta = serde_json::json!({"provider": "github", "fields": ["token", "user"]});
+    let h = Harness::new_with_meta(&[
+        ("kv/gitea", gitea_blob(GITEA_URL, "t7user"), json!({})),
+        ("kv/github", github_blob("t7user"), gh_meta),
+    ]);
+    let cfg = tmp("gitconfig").join("gitconfig");
+    let out = h
+        .command(&["gitea", "--install-git"])
+        .env("GIT_CONFIG_GLOBAL", &cfg)
+        .env("HOME", cfg.parent().expect("cfg dir"))
+        .output()
+        .expect("install-git");
+    let stdout = utf8(&out.stdout);
+    let stderr = utf8(&out.stderr);
+    assert!(out.status.success(), "install-git failed: {stderr}");
+    assert_no_value(&stdout, "install-git stdout");
+    assert_no_value(&stderr, "install-git stderr");
+    let text = fs::read_to_string(&cfg).unwrap_or_else(|e| panic!("read {}: {e}", cfg.display()));
+    assert!(
+        text.contains(&format!("credential \"{GITEA_URL}\"")),
+        "no helper for the gitea origin: {text}"
+    );
+    assert!(
+        text.contains("credential \"https://github.com\""),
+        "no helper for github: {text}"
+    );
+    assert!(
+        text.contains("--bundle kv/gitea") && text.contains("--bundle kv/github"),
+        "each helper must name its own bundle: {text}"
+    );
+    assert_no_value(&text, "gitconfig");
 }
 
 #[test]

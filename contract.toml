@@ -588,6 +588,9 @@ pending = false
 [tests.T_CLI_GEN_LEN]
 pending = false
 
+[tests.T_CLI_GEN_REFUSES_EXISTING]
+pending = false
+
 [tests.T_CLI_GITEA_ZERO]
 pending = false
 
@@ -595,6 +598,9 @@ pending = false
 pending = false
 
 [tests.T_CLI_GITEA_ONE]
+pending = false
+
+[tests.T_CLI_GITEA_INSTALL_BOTH]
 pending = false
 
 [tests.T_CLI_GITEA_REDACT]
@@ -613,6 +619,18 @@ pending = false
 pending = false
 
 [tests.T_GIT_OK]
+pending = false
+
+[tests.T_GIT_ACTION_GET]
+pending = false
+
+[tests.T_GIT_ACTION_ERASE]
+pending = false
+
+[tests.T_GIT_GITHUB]
+pending = false
+
+[tests.T_GIT_GITHUB_WRONG_HOST]
 pending = false
 
 [tests.T_KEYRING_ROUNDTRIP]
@@ -694,6 +712,9 @@ pending = false
 pending = false
 
 [tests.T_SKILL_INSTALL]
+pending = false
+
+[tests.T_SKILL_RETIRES_SDXD]
 pending = false
 
 [tests.T_IMP_NOTTY]

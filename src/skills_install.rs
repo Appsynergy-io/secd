@@ -6,10 +6,17 @@ use std::path::{Path, PathBuf};
 /// Skill body. Same bytes as `skills/grok/SKILL.md` and `skills/claude/SKILL.md`.
 pub const SKILL: &[u8] = include_bytes!("../skills/grok/SKILL.md");
 
-/// Write `SKILL.md` under `~/.claude/skills/secd` and `~/.grok/skills/secd`.
+/// Write `SKILL.md` under `~/.claude/skills/secd` and `~/.grok/skills/secd`,
+/// then retire the skill it replaces.
 pub fn run() -> anyhow::Result<()> {
     for path in dest_files() {
         write_one(&path)?;
+    }
+    // Only once the new skill is on disk: two resident skills contradict each
+    // other about `get`, rotation and grants, and the wrong one is the one that
+    // still exists.
+    for dir in stale_dirs() {
+        remove_dir(&dir);
     }
     Ok(())
 }
@@ -21,6 +28,21 @@ pub fn dest_files() -> [PathBuf; 2] {
         home.join(".claude/skills/secd/SKILL.md"),
         home.join(".grok/skills/secd/SKILL.md"),
     ]
+}
+
+/// Skill directories this skill supersedes, for the current `$HOME`.
+pub fn stale_dirs() -> [PathBuf; 2] {
+    let home = user_home();
+    [
+        home.join(".claude/skills/sdxd"),
+        home.join(".grok/skills/sdxd"),
+    ]
+}
+
+/// Best effort. A skill that could not be removed is not a failed update, and
+/// an absent one is the state we wanted.
+fn remove_dir(dir: &Path) {
+    let _ = fs::remove_dir_all(dir);
 }
 
 fn user_home() -> PathBuf {
