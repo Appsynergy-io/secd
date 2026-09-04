@@ -104,7 +104,7 @@ files = [
 "deploy/k3s/kustomization.yaml" = "097c3ea7b1d73cba1c1aaec97bcf33a4ff4805c538882e3574bea0989db33016"
 "scripts/audit.sh" = "510675113f2b0d94361024a66040effcf7477e2a47c1d792a34300245cc36a56"
 "scripts/build-ui.sh" = "5b3b55bff82e540731f9bce4822498cccf08ec0ed11a13456c3f1e495bebb891"
-"scripts/check.sh" = "c6a9b4e6ebb4c921bfe73aba301891232e547754dcb6346ad6ce84fb749fccfc"
+"scripts/check.sh" = "cb510efbde7d7c58ab139fc50319cc5d4d5cd6feaad6ea22f6c791919ecb2ec1"
 "scripts/dev/fake-gh" = "eef54b537525d8f043c8c3855f5cca185242397d65a421ccd4805da134b652b0"
 "scripts/dev/fake-registry.py" = "acf1e981e8a20ccaa0137b48c7d0814a862f7d250e1d9dfc8d21e6413aab6d78"
 "scripts/dev/release-dry.sh" = "04b3c8a6f79d363acde3f2368adc781653ee5d746a630b14ee665d764f09d901"
@@ -571,6 +571,42 @@ pending = false
 pending = false
 
 [tests.T_TUI_MODAL_FITS]
+pending = false
+
+[tests.T_TUI_GROUPS]
+pending = false
+
+[tests.T_TUI_FUSED_DETAIL]
+pending = false
+
+[tests.T_TUI_OPEN_ESC]
+pending = false
+
+[tests.T_TUI_ENTER_REVEALS]
+pending = false
+
+[tests.T_TUI_FILTER]
+pending = false
+
+[tests.T_TUI_DETAIL_COLS]
+pending = false
+
+[tests.T_TUI_WINDOW]
+pending = false
+
+[tests.T_TUI_HELP]
+pending = false
+
+[tests.T_TUI_FUSED_EDIT]
+pending = false
+
+[tests.T_TUI_DELETE_WHOLE_BUNDLE]
+pending = false
+
+[tests.T_TUI_COPY_ENV]
+pending = false
+
+[tests.T_TUI_EMPTY_TEACHES]
 pending = false
 
 [tests.T_CLI_LS_NO_VALUE]

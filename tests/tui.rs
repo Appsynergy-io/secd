@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use secd::policy;
 use secd::tui::{
-    action_bar, draw, draw_action_bar, hit_key, mask, regions, Action, Event, Modal, Mode, Model,
-    Rect, Spot, SpotHit, ACCENT, DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN,
+    action_bar, draw, draw_action_bar, hit_key, mask, regions, window_start, Action, Event, Modal,
+    Mode, Model, Rect, Spot, SpotHit, ACCENT, DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN,
 };
 use secd::Secret;
 use secd_core::{build_payload, providers};
@@ -262,7 +262,7 @@ fn render(model: &Model, w: u16, h: u16) -> (Vec<SpotHit>, String) {
     let mut spots = Vec::new();
     terminal
         .draw(|f| {
-            spots = draw(f, model);
+            spots = draw(f, model).spots;
         })
         .expect("draw");
     let text = screen_text(terminal.backend().buffer(), w, h);
@@ -664,4 +664,344 @@ fn T_TUI_MODAL_FITS() {
         fields.iter().any(|h| h.spot == Spot::Field(last)),
         "the focused row is inside the window"
     );
+}
+
+/// A vault holding all three shapes: a plain value, a JSON bundle, and two
+/// credentials stored as siblings under a shared parent.
+fn fused_register() -> Model {
+    let e = |n: &str, v: &str| policy::Entry {
+        name: n.into(),
+        value: Secret::new(v.as_bytes().to_vec()),
+        meta: serde_json::json!({}),
+    };
+    let mut m = Model::new();
+    m.apply_loaded(policy::VaultLoad {
+        entries: vec![
+            e("kv/plain", "PLAINVALUE"),
+            e("prod/github/token", "GHTOKENSECRET"),
+            e("prod/github/user", "imabee"),
+            e("prod/gitea/token", "GITEATOKENSECRET"),
+            e("prod/gitea/url", "https://git.appsynergy.io"),
+            policy::Entry {
+                name: "prod/cf".into(),
+                value: Secret::new(
+                    br#"{"account_id":"ACCTVISIBLE","api_token":"TOKENSECRET","zone_id":"ZONEID"}"#
+                        .to_vec(),
+                ),
+                meta: serde_json::json!({
+                    "provider": "cloudflare",
+                    "fields": ["account_id", "api_token", "zone_id"],
+                }),
+            },
+        ],
+        raw: 6,
+        body: String::new(),
+        before: BTreeMap::new(),
+    });
+    m
+}
+
+fn labels(m: &Model) -> Vec<String> {
+    m.rows().iter().map(|r| r.label.clone()).collect()
+}
+
+fn select(m: &mut Model, label: &str) {
+    let i = labels(m)
+        .iter()
+        .position(|l| l == label)
+        .unwrap_or_else(|| panic!("no row {label}; have {:?}", labels(m)));
+    while m.selected() > i {
+        m.handle(Event::Up);
+    }
+    while m.selected() < i {
+        m.handle(Event::Down);
+    }
+}
+
+#[test]
+fn T_TUI_GROUPS() {
+    let m = fused_register();
+    assert_eq!(
+        labels(&m),
+        ["kv/plain", "prod/cf", "prod/gitea", "prod/github"],
+        "five entries and a bundle are four credentials"
+    );
+    assert_eq!(m.total(), 4);
+
+    let gitea = &m.rows()[2];
+    assert_eq!(gitea.members.len(), 2, "the siblings are one row");
+    assert_eq!(gitea.provider.as_deref(), Some("gitea"));
+    assert!(gitea.descends());
+
+    // `{token, user}` is a credential shape under both github and gitea, so it
+    // names neither -- and is still one credential, not two loose keys.
+    let github = &m.rows()[3];
+    assert_eq!(github.members.len(), 2);
+    assert!(github.descends());
+
+    assert!(!m.rows()[0].descends(), "a plain value has nothing to open");
+    assert!(!m.rows()[1].descends(), "nor does a JSON bundle");
+}
+
+#[test]
+fn T_TUI_FUSED_DETAIL() {
+    let mut m = fused_register();
+    select(&mut m, "prod/gitea");
+    assert_eq!(m.detail_title(), "Gitea · 2 fields");
+    let rows: Vec<(&str, &str, bool)> = m
+        .detail_rows()
+        .iter()
+        .map(|r| (r.key.as_str(), r.env.as_str(), r.secret))
+        .collect();
+    assert_eq!(
+        rows,
+        [("token", "GITEA_TOKEN", true), ("url", "GITEA_URL", false),],
+        "siblings read as the credential they are, in schema order"
+    );
+    // The value is on screen only when asked for.
+    let (_, before) = render(&m, 100, 24);
+    assert!(!before.contains("GITEATOKENSECRET"), "masked by default");
+    assert!(
+        before.contains("git.appsynergy.io"),
+        "a url is not a secret"
+    );
+    m.handle(Event::Reveal);
+    let (_, after) = render(&m, 100, 24);
+    assert!(after.contains("GITEATOKENSECRET"), "[r] reveals it");
+}
+
+#[test]
+fn T_TUI_OPEN_ESC() {
+    let mut m = fused_register();
+    select(&mut m, "prod/gitea");
+    m.handle(Event::Enter);
+    assert_eq!(m.open(), "prod/gitea");
+    let want: Vec<String> = ["token", "url"]
+        .iter()
+        .map(|k| format!("prod/gitea/{k}"))
+        .collect();
+    assert_eq!(labels(&m), want, "Enter opens the bundle onto its fields");
+
+    m.handle(Event::Esc);
+    assert_eq!(m.open(), "", "Esc closes it");
+    assert_eq!(
+        m.rows()[m.selected()].label,
+        "prod/gitea",
+        "and lands back on the bundle, not on row zero"
+    );
+    assert!(!m.quit(), "Esc that closes something does not also quit");
+
+    // Only the bare register has nothing left to close.
+    m.handle(Event::Esc);
+    assert!(m.quit());
+}
+
+#[test]
+fn T_TUI_ENTER_REVEALS() {
+    let mut m = fused_register();
+    select(&mut m, "kv/plain");
+    assert!(!m.revealed());
+    m.handle(Event::Enter);
+    assert_eq!(m.open(), "", "a single value has nothing to open");
+    assert!(m.revealed(), "so Enter does the other kind of closer look");
+}
+
+#[test]
+fn T_TUI_FILTER() {
+    let mut m = fused_register();
+    m.handle(Event::Key('/'));
+    assert!(m.filtering());
+    for c in "gitea".chars() {
+        m.handle(Event::Key(c));
+    }
+    assert_eq!(m.filter(), "gitea");
+    assert_eq!(labels(&m), ["prod/gitea"]);
+    assert_eq!(m.total(), 4, "the total is what the register holds");
+
+    // The provider is searchable even where the path never says it.
+    m.handle(Event::Esc);
+    m.handle(Event::Key('/'));
+    for c in "cloudflare".chars() {
+        m.handle(Event::Key(c));
+    }
+    assert_eq!(labels(&m), ["prod/cf"]);
+
+    m.handle(Event::Backspace);
+    assert_eq!(m.filter(), "cloudflar");
+    m.handle(Event::Esc);
+    assert_eq!(m.filter(), "");
+    assert!(!m.quit(), "Esc clearing a filter must not also quit");
+    assert_eq!(labels(&m).len(), 4);
+
+    // Enter hands the letters back to the commands.
+    m.handle(Event::Key('/'));
+    m.handle(Event::Enter);
+    assert!(!m.filtering());
+    m.handle(Event::Key('q'));
+    assert!(m.quit(), "q is a command again");
+}
+
+#[test]
+fn T_TUI_DETAIL_COLS() {
+    // The value is the column you came to read, so it is fed before the two
+    // that only describe it. Leftover-width layout gave it five cells at 80
+    // columns and none below 73.
+    for w in [72u16, 80, 100, 160] {
+        let mut m = fused_register();
+        select(&mut m, "prod/cf");
+        m.handle(Event::Reveal);
+        let (_, text) = render(&m, w, 24);
+        for want in ["ACCTVISIBLE", "TOKENSECRET", "ZONEID"] {
+            assert!(text.contains(want), "{want} not legible at {w} columns");
+        }
+        assert!(text.contains("account_id"), "the key still names it at {w}");
+    }
+    // The env column is what gives way first, and only when it must.
+    let mut wide = fused_register();
+    select(&mut wide, "prod/cf");
+    let (_, text) = render(&wide, 160, 24);
+    assert!(text.contains("CLOUDFLARE_ACCOUNT_ID"), "wide keeps the env");
+}
+
+#[test]
+fn T_TUI_WINDOW() {
+    // Sticky: the window moves only when the selection would leave it.
+    let h = 10;
+    let len = 60;
+    assert_eq!(window_start(0, 0, len, h), 0);
+    assert_eq!(window_start(0, 5, len, h), 0, "still inside, no scroll");
+    assert_eq!(window_start(0, 8, len, h), 1, "one row past the margin");
+    assert_eq!(window_start(40, 45, len, h), 40, "held where it was");
+    assert_eq!(window_start(40, 39, len, h), 37, "up leaves a margin");
+    assert_eq!(
+        window_start(40, 2, len, h),
+        0,
+        "a big jump lands at the top"
+    );
+    assert_eq!(
+        window_start(0, 59, len, h),
+        len - h,
+        "and never past the end"
+    );
+    assert_eq!(
+        window_start(5, 0, 4, h),
+        0,
+        "a list that fits never scrolls"
+    );
+    assert_eq!(window_start(9, 3, len, 0), 0, "no height, no window");
+}
+
+#[test]
+fn T_TUI_HELP() {
+    let mut m = fused_register();
+    m.handle(Event::Key('?'));
+    assert!(m.helping());
+    let (_, text) = render(&m, 120, 40);
+    for (key, what) in secd::tui::KEYS {
+        assert!(text.contains(key), "help omits the key {key}");
+        assert!(text.contains(what), "help omits what {key} does");
+    }
+    // One table, so a bound key cannot be undocumented.
+    for action in Model::new().actions() {
+        assert!(
+            secd::tui::KEYS
+                .iter()
+                .any(|(k, _)| *k == action.key.to_string()),
+            "the action bar offers [{}] and the help never mentions it",
+            action.key
+        );
+    }
+    m.handle(Event::Esc);
+    assert!(!m.helping());
+    assert!(!m.quit(), "Esc that closes the help must not also quit");
+}
+
+#[test]
+fn T_TUI_FUSED_EDIT() {
+    let mut m = fused_register();
+    select(&mut m, "prod/gitea");
+    m.handle(Event::Key('e'));
+    let form = m.form().expect("edit opens on a fused bundle");
+    assert_eq!(form.provider.as_deref(), Some("gitea"));
+    assert_eq!(
+        form.editing.as_deref(),
+        Some("prod/gitea"),
+        "it edits the credential, not one of its entries"
+    );
+    assert_eq!(form.name_text(), "prod/gitea");
+    let pairs = form.value_pairs();
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(f, _)| f == k)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("")
+    };
+    assert_eq!(
+        get("token"),
+        "GITEATOKENSECRET",
+        "prefilled from the members"
+    );
+    assert_eq!(get("url"), "https://git.appsynergy.io");
+}
+
+#[test]
+fn T_TUI_DELETE_WHOLE_BUNDLE() {
+    let mut m = fused_register();
+    select(&mut m, "prod/gitea");
+    m.handle(Event::Key('d'));
+    let Mode::Modal(Modal::Delete { label, names }) = m.mode() else {
+        panic!("delete opens");
+    };
+    assert_eq!(label, "prod/gitea");
+    let want: Vec<String> = ["token", "url"]
+        .iter()
+        .map(|k| format!("prod/gitea/{k}"))
+        .collect();
+    assert_eq!(names, &want, "a bundle is one row and every entry under it");
+    // And it says so, rather than deleting five of six fields quietly.
+    let (_, text) = render(&m, 100, 24);
+    assert!(
+        text.contains("2 entries"),
+        "the confirm names the blast radius"
+    );
+}
+
+#[test]
+fn T_TUI_COPY_ENV() {
+    let mut m = fused_register();
+    select(&mut m, "prod/gitea");
+    m.handle(Event::Key('c'));
+    assert!(
+        m.activity_lines()
+            .iter()
+            .any(|l| l == "copied env block; clipboard cleared in 30s"),
+        "a bundle copies as the env block you are about to paste, not as JSON"
+    );
+    select(&mut m, "kv/plain");
+    m.handle(Event::Key('c'));
+    assert!(m
+        .activity_lines()
+        .iter()
+        .any(|l| l == "copied value; clipboard cleared in 30s"));
+}
+
+#[test]
+fn T_TUI_EMPTY_TEACHES() {
+    // A dead end that says nothing leaves the human guessing which key fills it.
+    let (_, text) = render(&Model::new(), 100, 24);
+    assert!(
+        text.contains("no secrets yet"),
+        "the empty register says so"
+    );
+    assert!(text.contains("[a]"), "and which key fills it");
+
+    let mut m = fused_register();
+    m.handle(Event::Key('/'));
+    for c in "zzzz".chars() {
+        m.handle(Event::Key(c));
+    }
+    let (_, text) = render(&m, 100, 24);
+    assert!(text.contains("nothing matches"));
+    assert!(text.contains("Esc"), "and which key undoes it");
 }

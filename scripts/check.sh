@@ -240,12 +240,35 @@ lane_ui() {
   )
 }
 
+# The advisory database is a third party with its own uptime. A 503 from it is
+# not a finding and not a pass: the lane retries, and an audit that never ran
+# still fails. Silently succeeding on an unreachable registry would be a guard
+# that can skip itself.
 lane_bun_audit() {
   secd_ensure_bun
   (
     cd "$root/ui"
     bun install --frozen-lockfile --ignore-scripts
-    bun audit
+    local attempt out
+    for attempt in 1 2 3; do
+      if out="$(bun audit 2>&1)"; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+      # Only a transport failure is worth retrying. A real advisory is the same
+      # answer however many times it is asked.
+      case "$out" in
+        *"error: "*://*) ;;
+        *)
+          printf '%s\n' "$out" >&2
+          return 1
+          ;;
+      esac
+      printf 'bun-audit: registry unreachable (attempt %s of 3)\n' "$attempt" >&2
+      [[ "$attempt" == 3 ]] || sleep $((attempt * 5))
+    done
+    printf '%s\n' "$out" >&2
+    secd_die "bun-audit: the advisory database did not answer; the audit did not run"
   )
 }
 

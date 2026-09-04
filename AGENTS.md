@@ -70,6 +70,9 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 
 ## Invariants
 
+- The register shows one row per credential, not one per key: `policy::shapes_of` fuses siblings under a shared parent, `Enter` opens a bundle onto its fields and `Esc` closes it. Naming a provider and recognising a credential are different questions, so `bundles_of` refuses what it cannot name -- `secd run` has to map env vars -- while `shapes_of` groups on `secd_core::candidates`, which `{token, user}` answers with two.
+- `src/tui/model.rs` `KEYS` is the only keymap. The action bar draws what fits and `?` draws all of it, so a key cannot be bound and undocumented.
+- Esc closes one thing at a time -- help, then filter, then the open bundle -- and quits only from the bare register. A refused save keeps its modal and its text: `Input` zeroes on drop, so closing the form destroys what was typed.
 - `secd gen` refuses a name that exists. There is no rollback and no CLI that reaches the server's version rows, so generating over a live credential is an outage with no way back.
 - The git credential helper is selected by host, not by provider: `gitea`, `github` and `gitlab` each name a token field and a host, the bundle's url where it has one and the service's own otherwise. It answers `get` only; `store` and `erase` are git reporting, not asking. `secd gitea --install-git` writes one helper per forge origin the vault can serve, so git finds one for every remote.
 - `secd update` writes the skill and removes the one it supersedes. Two resident skills contradict each other, and the wrong one is the one that still exists.
