@@ -215,32 +215,40 @@ pub fn apply_with(
 }
 
 pub fn discover_bundles(entries: &[Entry]) -> Vec<Bundle> {
+    let rows: Vec<Row<'_>> = entries.iter().map(Entry::row).collect();
+    bundles_of(&rows)
+}
+
+/// `discover_bundles` over borrowed pieces. The register keeps names, values
+/// and meta in three maps, and a `Secret` does not clone, so grouping what it
+/// holds has to go through the borrow rather than through an `Entry`.
+pub fn bundles_of(rows: &[Row<'_>]) -> Vec<Bundle> {
     let mut out = Vec::new();
     let mut used = HashSet::new();
-    for e in entries {
-        if let Some(b) = json_bundle(e) {
-            used.insert(e.name.clone());
+    for (name, value, meta) in rows {
+        if let Some(b) = json_bundle(name, value, meta) {
+            used.insert((*name).to_string());
             out.push(b);
         }
     }
-    let mut by_parent: BTreeMap<String, Vec<(&str, &Entry)>> = BTreeMap::new();
-    for e in entries {
-        if used.contains(&e.name) {
+    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret)>> = BTreeMap::new();
+    for (name, value, _) in rows {
+        if used.contains(*name) {
             continue;
         }
-        let Some((parent, field)) = e.name.rsplit_once('/') else {
+        let Some((parent, field)) = name.rsplit_once('/') else {
             continue;
         };
         by_parent
             .entry(parent.to_string())
             .or_default()
-            .push((field, e));
+            .push((field, value));
     }
     for (parent, fields) in by_parent {
         let mut map = BTreeMap::new();
         let mut keys = Vec::new();
-        for (k, e) in fields {
-            if let Ok(s) = std::str::from_utf8(e.value.as_bytes()) {
+        for (k, v) in fields {
+            if let Ok(s) = std::str::from_utf8(v.as_bytes()) {
                 map.insert(k.to_string(), s.to_string());
                 keys.push(k);
             }
@@ -252,6 +260,82 @@ pub fn discover_bundles(entries: &[Entry]) -> Vec<Bundle> {
                 fields: map,
             });
         }
+    }
+    out
+}
+
+/// What `discover_bundles` found, without the values: which entries stand for
+/// one credential, and under what name. A JSON bundle is its own single
+/// member; siblings under a shared parent are the parent's members.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleShape {
+    pub name: String,
+    /// `None` when the keys are a credential shape that names no single
+    /// provider -- `{token, user}` is both `github` and `gitea`.
+    pub provider: Option<String>,
+    pub members: Vec<String>,
+}
+
+/// The grouping `secd run` already uses, in the shape a list can draw. A
+/// register that shows `prod/github/token` and `prod/github/user` as two
+/// unrelated rows is showing storage where the human sees one credential.
+pub fn bundle_shapes(entries: &[Entry]) -> Vec<BundleShape> {
+    let rows: Vec<Row<'_>> = entries.iter().map(Entry::row).collect();
+    shapes_of(&rows)
+}
+
+/// The same walk as `bundles_of`, with one difference: siblings group when
+/// their keys are *a* credential shape, not only when they name one provider.
+/// `secd run` has to name a provider to map env vars, so `bundles_of` refuses
+/// what it cannot name; a list only has to know that six keys are one thing.
+pub fn shapes_of(rows: &[Row<'_>]) -> Vec<BundleShape> {
+    let mut out = Vec::new();
+    let mut used = HashSet::new();
+    for (name, value, meta) in rows {
+        if let Some(b) = json_bundle(name, value, meta) {
+            used.insert((*name).to_string());
+            out.push(BundleShape {
+                name: (*name).to_string(),
+                provider: Some(b.provider.clone()),
+                members: vec![(*name).to_string()],
+            });
+        }
+    }
+    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret)>> = BTreeMap::new();
+    for (name, value, _) in rows {
+        if used.contains(*name) {
+            continue;
+        }
+        let Some((parent, field)) = name.rsplit_once('/') else {
+            continue;
+        };
+        by_parent
+            .entry(parent.to_string())
+            .or_default()
+            .push((field, value));
+    }
+    for (parent, fields) in by_parent {
+        let mut map = BTreeMap::new();
+        let mut keys = Vec::new();
+        for (k, v) in fields {
+            if let Ok(s) = std::str::from_utf8(v.as_bytes()) {
+                map.insert(k.to_string(), s.to_string());
+                keys.push(k);
+            }
+        }
+        // One key is its own row already, and a group of one is not a group.
+        if keys.len() < 2 {
+            continue;
+        }
+        let provider = resolve_provider(&keys, None, &map);
+        if provider.is_none() && secd_core::candidates(&keys).is_empty() {
+            continue;
+        }
+        out.push(BundleShape {
+            members: keys.iter().map(|k| format!("{parent}/{k}")).collect(),
+            name: parent,
+            provider,
+        });
     }
     out
 }
@@ -752,8 +836,8 @@ fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
-fn json_bundle(e: &Entry) -> Option<Bundle> {
-    let v: Value = serde_json::from_slice(e.value.as_bytes()).ok()?;
+fn json_bundle(name: &str, value: &Secret, meta: &Value) -> Option<Bundle> {
+    let v: Value = serde_json::from_slice(value.as_bytes()).ok()?;
     let obj = v.as_object()?;
     if obj.is_empty() {
         return None;
@@ -770,10 +854,10 @@ fn json_bundle(e: &Entry) -> Option<Bundle> {
     if fields.is_empty() {
         return None;
     }
-    let meta_p = e.meta.get("provider").and_then(Value::as_str);
+    let meta_p = meta.get("provider").and_then(Value::as_str);
     let provider = resolve_provider(&keys, meta_p, &fields)?;
     Some(Bundle {
-        name: e.name.clone(),
+        name: name.to_string(),
         provider,
         fields,
     })

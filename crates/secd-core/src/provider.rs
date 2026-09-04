@@ -30,17 +30,27 @@ pub fn providers() -> &'static [Provider] {
     CELL.get_or_init(builtins).as_slice()
 }
 
-/// Infer a provider from field keys. Distinctive keys win; shared keys (e.g. only `token`) yield nothing.
-pub fn infer(keys: &[&str]) -> Option<&'static str> {
+/// Every provider whose schema contains all of `keys`.
+///
+/// Naming the provider and recognising a credential are different questions.
+/// `{token, user}` is under both `github` and `gitea`, so it names neither --
+/// but it is still unmistakably a credential, which is enough for a list that
+/// only has to group.
+pub fn candidates(keys: &[&str]) -> Vec<&'static str> {
     if keys.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let hits: Vec<&Provider> = providers()
+    providers()
         .iter()
         .filter(|p| keys.iter().all(|k| p.fields.iter().any(|f| f.key == *k)))
-        .collect();
-    match hits.as_slice() {
-        [only] => Some(only.name.as_str()),
+        .map(|p| p.name.as_str())
+        .collect()
+}
+
+/// Infer a provider from field keys. Distinctive keys win; shared keys (e.g. only `token`) yield nothing.
+pub fn infer(keys: &[&str]) -> Option<&'static str> {
+    match candidates(keys).as_slice() {
+        [only] => Some(only),
         _ => None,
     }
 }

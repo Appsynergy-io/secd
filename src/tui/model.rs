@@ -2,11 +2,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use secd_core::{build_payload, check_name, Secret};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 use crate::login::{self, Unlocked};
 use crate::policy::{self, Schema};
 
 use super::form::Form;
+use super::tree::{Index, Row};
 use super::view::{hit_key, spot_at, Action, ActionHit, Spot, SpotHit};
 
 /// Seven buttons, 75 of 80 cells. `[q] quit` is last so a narrow terminal
@@ -42,8 +44,33 @@ const IDLE_ACTIONS: &[Action] = &[
     },
 ];
 
+/// Every key, in one place. The action bar draws the subset that fits and the
+/// help overlay draws all of it, so a key cannot be bound and undocumented, or
+/// documented and unbound.
+pub const KEYS: &[(&str, &str)] = &[
+    ("a", "add a single value"),
+    ("p", "add a provider bundle"),
+    ("e", "edit what is selected"),
+    ("r", "reveal the selected value"),
+    ("c", "copy: a value, or a bundle as an env block"),
+    ("d", "delete what is selected"),
+    ("/", "filter by path or provider"),
+    ("Enter", "open a bundle, or reveal a value"),
+    ("Esc", "close the filter, the bundle, then secd"),
+    ("j k ↑ ↓", "move"),
+    ("PgUp PgDn", "move ten"),
+    ("Ctrl-R", "reveal, inside a form"),
+    ("?", "this list"),
+    ("q", "quit"),
+];
+
 /// How far a page key moves a list.
 const PAGE: usize = 10;
+
+/// How long a copied value stays on the clipboard. The same 30 seconds the web
+/// console holds it: a value that outlives the reason it was copied is a value
+/// on the clipboard of whatever runs next.
+const CLIP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `[p] provider` step 1. The schema list lives on the `Model`, so cloning a
 /// `Mode` stays cheap.
@@ -55,20 +82,14 @@ pub struct Picker {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Modal {
     /// `[a] add`, and `[e] edit` on an entry that is not a bundle.
-    Add {
-        form: Form,
-    },
+    Add { form: Form },
     /// `[p] provider` step 1: which schema.
-    Pick {
-        pick: Picker,
-    },
+    Pick { pick: Picker },
     /// `[p] provider` step 2, and `[e] edit` on a bundle.
-    Provider {
-        form: Form,
-    },
-    Delete {
-        name: String,
-    },
+    Provider { form: Form },
+    /// `label` is the row as drawn; `names` is every entry it stands for, so
+    /// deleting a fused bundle does not leave five of its six fields behind.
+    Delete { label: String, names: Vec<String> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +139,23 @@ pub struct Model {
     mode: Mode,
     quit: bool,
     names: Vec<String>,
+    /// The credentials the names make, one row each. Rebuilt from `names`
+    /// whenever they, the open bundle or the filter change.
+    rows: Vec<Row>,
+    index: Index,
+    /// The bundle being looked into, empty for the register itself.
+    open: String,
+    filter: String,
+    /// `/` is live: a letter is filter text rather than a command.
+    filtering: bool,
+    /// `?` overlay.
+    helping: bool,
+    /// Where the last paint put each scrolling pane, so the next one continues
+    /// from it instead of snapping the selection to an edge.
+    list_window: usize,
+    modal_window: usize,
+    /// When the clipboard was last written, so it can be cleared on time.
+    copied_at: Option<std::time::Instant>,
     selected: usize,
     values: HashMap<String, Secret>,
     meta: HashMap<String, Value>,
@@ -130,6 +168,8 @@ pub struct Model {
     hits: Vec<ActionHit>,
     spots: Vec<SpotHit>,
     schemas: Vec<Schema>,
+    /// Which entries stand for one credential, as the runner groups them.
+    shapes: Vec<policy::BundleShape>,
     token: Option<String>,
     dek: Option<Secret>,
     /// The vault as this register last saw it, name -> ciphertext.
@@ -150,6 +190,15 @@ impl Model {
             mode: Mode::Idle,
             quit: false,
             names: Vec::new(),
+            rows: Vec::new(),
+            index: Index::build(&[], &[]),
+            open: String::new(),
+            filter: String::new(),
+            filtering: false,
+            helping: false,
+            list_window: 0,
+            modal_window: 0,
+            copied_at: None,
             selected: 0,
             values: HashMap::new(),
             meta: HashMap::new(),
@@ -160,6 +209,7 @@ impl Model {
             hits: Vec::new(),
             spots: Vec::new(),
             schemas: policy::builtin_schemas(),
+            shapes: Vec::new(),
             token: None,
             dek: None,
             before: BTreeMap::new(),
@@ -167,23 +217,33 @@ impl Model {
         }
     }
 
+    /// The register before it has loaded anything. No I/O: the caller paints
+    /// this frame first, then calls `load`.
     pub fn from_unlocked(unlocked: Unlocked) -> Self {
         let Unlocked { token, dek } = unlocked;
         let mut model = Self::new();
         model.token = Some(token);
         model.dek = Some(dek);
-        // A save replaces the whole vault, so a register built from a load that
-        // dropped entries -- or from no load at all -- would delete them.
-        model.load_register();
-        model.note(format!("loaded {}", model.names.len()));
-        if let Some(why) = model.save_blocked.clone() {
-            model.note(format!("saves refused: {why}"));
-        }
-        // One round trip at start, where the register already blocks. Doing it
-        // on the keypress would freeze a 250ms poll loop mid-interaction.
-        model.load_schemas();
-        model.sync_detail();
+        model.note("loading…");
         model
+    }
+
+    /// Two round trips, each with a 30 second timeout. They happen after the
+    /// first paint, because a blank uninterruptible screen and a hung one look
+    /// exactly the same from the outside.
+    ///
+    /// A save replaces the whole vault, so a register built from a load that
+    /// dropped entries -- or from no load at all -- would delete them.
+    pub fn load(&mut self) {
+        self.load_register();
+        self.note(format!("loaded {}", self.names.len()));
+        if let Some(why) = self.save_blocked.clone() {
+            self.note(format!("saves refused: {why}"));
+        }
+        // Fetched here, where the register already blocks. Doing it on the
+        // keypress would freeze a 250ms poll loop mid-interaction.
+        self.load_schemas();
+        self.sync_detail();
     }
 
     pub fn quit(&self) -> bool {
@@ -200,6 +260,73 @@ impl Model {
 
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    /// One row per credential.
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// The bundle being looked into, empty for the register itself.
+    pub fn open(&self) -> &str {
+        &self.open
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    pub fn filtering(&self) -> bool {
+        self.filtering
+    }
+
+    pub fn helping(&self) -> bool {
+        self.helping
+    }
+
+    pub fn list_window(&self) -> usize {
+        self.list_window
+    }
+
+    pub fn modal_window(&self) -> usize {
+        self.modal_window
+    }
+
+    /// What the last paint decided. The draw knows the pane height; the model
+    /// is where it has to survive until the next one.
+    pub fn set_painted(&mut self, painted: &super::view::Painted) {
+        self.list_window = painted.list;
+        self.modal_window = painted.modal;
+        self.spots.clone_from(&painted.spots);
+    }
+
+    /// Credentials in the register, before the filter.
+    pub fn total(&self) -> usize {
+        self.index.total()
+    }
+
+    fn selected_row(&self) -> Option<&Row> {
+        self.rows.get(self.selected)
+    }
+
+    /// Recompute the rows. `keep` is the entry the selection should land on,
+    /// so a save, a filter or an open does not silently move it elsewhere.
+    fn rebuild(&mut self, keep: Option<&str>) {
+        let want = keep
+            .and_then(|n| self.index.owner_of(n))
+            .map(ToString::to_string)
+            .or_else(|| self.selected_row().map(|r| r.label.clone()));
+        self.index = Index::build(&self.names, &self.shapes);
+        // An open bundle that the vault no longer holds would show an empty
+        // list with no way back but Esc.
+        if !self.open.is_empty() && !self.index.is_bundle(&self.open) {
+            self.open.clear();
+        }
+        self.rows = self.index.rows(&self.open, &self.filter);
+        self.selected = want
+            .and_then(|w| self.rows.iter().position(|r| r.label == w))
+            .unwrap_or(0)
+            .min(self.rows.len().saturating_sub(1));
     }
 
     pub fn selected(&self) -> usize {
@@ -227,8 +354,8 @@ impl Model {
     }
 
     pub fn title(&self) -> String {
-        self.selected_name()
-            .map(ToString::to_string)
+        self.selected_row()
+            .map(|r| r.label.clone())
             .unwrap_or_else(|| "register".to_string())
     }
 
@@ -259,7 +386,7 @@ impl Model {
             Event::Right => self.on_form(Form::caret_right),
             Event::Home => self.on_home(),
             Event::End => self.on_end(),
-            Event::Backspace => self.on_form(Form::backspace),
+            Event::Backspace => self.on_backspace(),
             Event::Delete => self.on_form(Form::delete),
             Event::Tab => self.on_form(Form::focus_next),
             Event::BackTab => self.on_form(Form::focus_prev),
@@ -267,7 +394,7 @@ impl Model {
             Event::PageDown => self.on_page(true),
             Event::Reveal => self.on_reveal(),
             Event::Key(c) => self.on_char(c),
-            Event::Tick | Event::Resize => {}
+            Event::Tick | Event::Resize => self.expire_clipboard(),
         }
     }
 
@@ -290,6 +417,22 @@ impl Model {
             Mode::Modal(Modal::Pick { pick }) => Some(pick),
             _ => None,
         }
+    }
+
+    fn begin_filter(&mut self) {
+        self.filtering = true;
+        self.helping = false;
+    }
+
+    fn on_backspace(&mut self) {
+        if self.is_idle() && self.filtering {
+            self.filter.pop();
+            let keep = self.selected_name().map(ToString::to_string);
+            self.rebuild(keep.as_deref());
+            self.sync_detail();
+            return;
+        }
+        self.on_form(Form::backspace);
     }
 
     fn on_form(&mut self, f: fn(&mut Form)) {
@@ -315,7 +458,7 @@ impl Model {
     fn on_spot(&mut self, spot: Spot) {
         match spot {
             Spot::Row(i) => {
-                if self.is_idle() && i < self.names.len() {
+                if self.is_idle() && i < self.rows.len() {
                     self.selected = i;
                     self.sync_detail();
                 }
@@ -342,11 +485,58 @@ impl Model {
         }
     }
 
+    /// One layer at a time. Esc that quits from under a filter, an open
+    /// bundle or the help overlay is Esc throwing away context the human is
+    /// still using; only the bare register has nothing left to close.
     fn on_esc(&mut self) {
-        match self.mode {
-            Mode::Idle => self.quit = true,
-            Mode::Modal(_) => self.mode = Mode::Idle,
+        if let Mode::Modal(_) = self.mode {
+            self.mode = Mode::Idle;
+            return;
         }
+        if self.helping {
+            self.helping = false;
+        } else if self.filtering || !self.filter.is_empty() {
+            self.clear_filter();
+        } else if !self.open.is_empty() {
+            self.close_bundle();
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn clear_filter(&mut self) {
+        let keep = self.selected_name().map(ToString::to_string);
+        self.filtering = false;
+        self.filter.clear();
+        self.rebuild(keep.as_deref());
+        self.sync_detail();
+    }
+
+    /// Back out to the register, landing on the bundle that was open.
+    fn close_bundle(&mut self) {
+        let was = std::mem::take(&mut self.open);
+        self.rebuild(None);
+        if let Some(i) = self.rows.iter().position(|r| r.label == was) {
+            self.selected = i;
+        }
+        self.sync_detail();
+    }
+
+    /// Enter on a bundle opens it onto its fields. Enter on a single value
+    /// has nothing to open, so it does the other thing a closer look means.
+    fn open_selected(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if !row.descends() {
+            self.reveal_all = !self.reveal_all;
+            return;
+        }
+        self.open = row.label.clone();
+        self.filtering = false;
+        self.filter.clear();
+        self.rebuild(None);
+        self.sync_detail();
     }
 
     fn on_up(&mut self) {
@@ -393,7 +583,7 @@ impl Model {
 
     fn on_end(&mut self) {
         if self.is_idle() {
-            self.selected = self.names.len().saturating_sub(1);
+            self.selected = self.rows.len().saturating_sub(1);
             self.sync_detail();
             return;
         }
@@ -407,7 +597,7 @@ impl Model {
 
     fn on_page(&mut self, down: bool) {
         if self.is_idle() {
-            let last = self.names.len().saturating_sub(1);
+            let last = self.rows.len().saturating_sub(1);
             self.selected = if down {
                 self.selected.saturating_add(PAGE).min(last)
             } else {
@@ -447,6 +637,13 @@ impl Model {
     }
 
     fn on_char(&mut self, c: char) {
+        if self.is_idle() && self.filtering {
+            self.filter.push(c);
+            let keep = self.selected_name().map(ToString::to_string);
+            self.rebuild(keep.as_deref());
+            self.sync_detail();
+            return;
+        }
         match &mut self.mode {
             Mode::Idle => match c {
                 'a' | 'A' => self.begin_add(),
@@ -458,6 +655,8 @@ impl Model {
                 'q' | 'Q' => self.quit = true,
                 'j' => self.select_next(),
                 'k' => self.select_prev(),
+                '/' => self.begin_filter(),
+                '?' => self.helping = !self.helping,
                 _ => {}
             },
             Mode::Modal(Modal::Pick { .. }) => self.pick_type_ahead(c),
@@ -485,13 +684,19 @@ impl Model {
     fn on_enter(&mut self) {
         // Take the form rather than clone it: a commit must not leave a second
         // copy of a value behind.
+        if self.filtering {
+            // Enter commits the filter and hands the letters back to the
+            // commands, which is the only way to act on what you found.
+            self.filtering = false;
+            return;
+        }
         let mode = std::mem::replace(&mut self.mode, Mode::Idle);
         match mode {
-            Mode::Idle => {}
+            Mode::Idle => self.open_selected(),
             Mode::Modal(Modal::Add { form }) => self.commit_single(form),
             Mode::Modal(Modal::Provider { form }) => self.commit_provider(form),
             Mode::Modal(Modal::Pick { pick }) => self.open_schema_form(pick.selected),
-            Mode::Modal(Modal::Delete { name }) => self.commit_delete(&name),
+            Mode::Modal(Modal::Delete { names, .. }) => self.commit_delete(&names),
         }
     }
 
@@ -521,6 +726,13 @@ impl Model {
         if self.refuse_if_blocked() {
             return;
         }
+        let Some(row) = self.selected_row().cloned() else {
+            self.note("nothing selected");
+            return;
+        };
+        if row.descends() {
+            return self.edit_fused(&row);
+        }
         let Some(name) = self.selected_name().map(str::to_string) else {
             return;
         };
@@ -541,14 +753,45 @@ impl Model {
         });
     }
 
+    /// Edit a bundle stored as siblings: one form over the credential, saved
+    /// back as the entries it came from.
+    fn edit_fused(&mut self, row: &Row) {
+        let found = row
+            .provider
+            .as_deref()
+            .and_then(|p| self.schemas.iter().find(|s| s.name == p))
+            .cloned();
+        let Some(schema) = found else {
+            self.note("no schema for this bundle: edit a field on its own");
+            return;
+        };
+        let mut pairs = Vec::with_capacity(row.members.len());
+        for m in &row.members {
+            let key = m.rsplit_once('/').map_or(m.as_str(), |(_, k)| k);
+            let Some(text) = self.plaintext(m) else {
+                self.note("binary value: edit is unavailable");
+                return;
+            };
+            pairs.push((key.to_string(), text));
+        }
+        let mut form = Form::schema(&schema, &row.label, &pairs);
+        form.title = "edit".to_string();
+        form.editing = Some(row.label.clone());
+        self.mode = Mode::Modal(Modal::Provider { form });
+    }
+
     fn begin_delete(&mut self) {
         if self.refuse_if_blocked() {
             return;
         }
-        let Some(name) = self.selected_name().map(str::to_string) else {
+        let Some(row) = self.selected_row() else {
+            self.note("nothing selected");
             return;
         };
-        self.mode = Mode::Modal(Modal::Delete { name });
+        self.mode = Mode::Modal(Modal::Delete {
+            label: row.label.clone(),
+            names: row.members.clone(),
+        });
     }
 
     fn open_schema_form(&mut self, i: usize) {
@@ -576,7 +819,15 @@ impl Model {
             .unwrap_or_default();
         let drop_old = form.editing.clone().filter(|o| *o != name);
         let value = Secret::new(text.into_bytes());
-        self.commit_entry(name, value, Value::Object(Default::default()), drop_old);
+        if let Err(why) = self.commit(
+            vec![(name, value, Value::Object(Default::default()))],
+            drop_old.into_iter().collect(),
+        ) {
+            // Keep the modal, keep the text. `Input` zeroes itself on drop, so
+            // closing the form on a failed save destroys what was typed and
+            // leaves one grey line to explain it.
+            self.form_refuse(Modal::Add { form }, why);
+        }
     }
 
     fn commit_provider(&mut self, form: Form) {
@@ -601,19 +852,70 @@ impl Model {
         if let Some(why) = self.rename_collision(&form, &name) {
             return self.form_refuse(Modal::Provider { form }, why);
         }
-        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
-        let meta = policy::provider_meta(&schema.name, &keys);
-        let drop_old = form.editing.clone().filter(|o| *o != name);
-        let value = Secret::new(policy::payload_json(&pairs).into_bytes());
-        self.commit_entry(name, value, meta, drop_old);
+        let old = form.editing.clone();
+        // A bundle stored as siblings is written back as siblings. Folding it
+        // into one JSON entry would silently change how it is stored, and
+        // `secd run` reads the two shapes by different paths.
+        let fused = old
+            .as_deref()
+            .is_some_and(|o| !self.names.iter().any(|n| n == o) && self.index.is_bundle(o));
+        let gone: Vec<String> = match &old {
+            Some(o) if fused => self
+                .members_of(o)
+                .into_iter()
+                .filter(|m| !pairs.iter().any(|(k, _)| *m == format!("{name}/{k}")))
+                .collect(),
+            Some(o) if *o != name => vec![o.clone()],
+            _ => Vec::new(),
+        };
+        let writes = if fused {
+            pairs
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        format!("{name}/{k}"),
+                        Secret::new(v.clone().into_bytes()),
+                        Value::Object(Default::default()),
+                    )
+                })
+                .collect()
+        } else {
+            let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+            let meta = policy::provider_meta(&schema.name, &keys);
+            vec![(
+                name,
+                Secret::new(policy::payload_json(&pairs).into_bytes()),
+                meta,
+            )]
+        };
+        if let Err(why) = self.commit(writes, gone) {
+            self.form_refuse(Modal::Provider { form }, why);
+        }
+    }
+
+    /// The entries a credential stands for, by its row label.
+    fn members_of(&self, prefix: &str) -> Vec<String> {
+        self.names
+            .iter()
+            .filter(|n| self.index.owner_of(n) == Some(prefix))
+            .cloned()
+            .collect()
     }
 
     /// An edit may rename, but not onto a name that is already taken: that
     /// would silently replace a second entry.
     fn rename_collision(&self, form: &Form, name: &str) -> Option<String> {
         let old = form.editing.as_deref()?;
-        (old != name && self.names.iter().any(|n| n == name))
-            .then(|| format!("{name} already exists"))
+        if old == name {
+            return None;
+        }
+        // A fused bundle's own members are not a collision with itself.
+        let mine = self.members_of(old);
+        let taken = self
+            .names
+            .iter()
+            .any(|n| n == name || (n.starts_with(&format!("{name}/")) && !mine.contains(n)));
+        taken.then(|| format!("{name} already exists"))
     }
 
     /// Say why next to the field, and leave the modal open.
@@ -626,34 +928,43 @@ impl Model {
         self.mode = Mode::Modal(modal);
     }
 
-    /// Save one entry over the whole register. `drop_old` is set only by an
-    /// edit that renamed: the move and the write are one PUT, so the entry is
-    /// never duplicated and never briefly absent.
-    fn commit_entry(&mut self, name: String, value: Secret, meta: Value, drop_old: Option<String>) {
-        if self.refuse_if_blocked() {
-            return;
+    /// Save over the whole register. `writes` is one entry for a single value
+    /// or a JSON bundle, and several for a bundle stored as siblings; `gone` is
+    /// what a rename left behind. Both halves are one PUT, so an entry is never
+    /// duplicated and never briefly absent.
+    fn commit(
+        &mut self,
+        writes: Vec<(String, Secret, Value)>,
+        gone: Vec<String>,
+    ) -> Result<(), String> {
+        if let Some(why) = self.save_blocked.clone() {
+            return Err(format!("save refused: {why}"));
+        }
+        if writes.is_empty() {
+            return Err("nothing to save".to_string());
         }
         let empty = Value::Object(Default::default());
         let mut names: Vec<String> = self
             .names
             .iter()
-            .filter(|n| drop_old.as_deref() != Some(n.as_str()))
+            .filter(|n| !gone.iter().any(|g| g == *n))
             .cloned()
             .collect();
-        if !names.iter().any(|n| n == &name) {
-            names.push(name.clone());
-            names.sort();
+        for (name, _, _) in &writes {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.clone());
+            }
         }
+        names.sort();
         let saved = {
             let rows: Vec<policy::Row<'_>> = names
                 .iter()
                 .filter_map(|n| {
-                    if n == &name {
-                        Some((n.as_str(), &value, &meta))
-                    } else {
-                        let v = self.values.get(n)?;
-                        Some((n.as_str(), v, self.meta.get(n).unwrap_or(&empty)))
+                    if let Some((name, v, m)) = writes.iter().find(|(w, _, _)| w == n) {
+                        return Some((name.as_str(), v, m));
                     }
+                    let v = self.values.get(n)?;
+                    Some((n.as_str(), v, self.meta.get(n).unwrap_or(&empty)))
                 })
                 .collect();
             self.save_rows(&rows)
@@ -662,35 +973,45 @@ impl Model {
             Some(Ok(written)) => {
                 self.before = written;
                 self.names = names;
-                if let Some(old) = &drop_old {
+                for old in &gone {
                     self.values.remove(old);
                     self.meta.remove(old);
                 }
-                if let Some(i) = self.names.iter().position(|n| n == &name) {
-                    self.selected = i;
+                let first = writes[0].0.clone();
+                let n = writes.len();
+                for (name, value, meta) in writes {
+                    self.values.insert(name.clone(), value);
+                    // The caller's meta, always: an overwrite that kept the old
+                    // one would leave `secd info` describing an entry that is
+                    // gone.
+                    self.meta.insert(name, meta);
                 }
-                self.values.insert(name.clone(), value);
-                // The caller's meta, always: an overwrite that kept the old one
-                // would leave `secd info` describing an entry that is gone.
-                self.meta.insert(name, meta);
+                self.reshape();
+                self.rebuild(Some(&first));
                 self.sync_detail();
-                self.note("saved");
+                self.note(format!("saved {n} {}", entry_word(n)));
+                Ok(())
             }
             Some(Err(e)) => {
-                self.note(format!("save failed: {e}"));
                 self.reload_from_vault();
+                Err(format!("save failed: {e}"))
             }
-            None => {}
+            None => Err("not signed in".to_string()),
         }
     }
 
-    fn commit_delete(&mut self, name: &str) {
+    fn commit_delete(&mut self, gone: &[String]) {
         self.mode = Mode::Idle;
-        if self.refuse_if_blocked() {
+        if self.refuse_if_blocked() || gone.is_empty() {
             return;
         }
         let empty = Value::Object(Default::default());
-        let names: Vec<String> = self.names.iter().filter(|n| *n != name).cloned().collect();
+        let names: Vec<String> = self
+            .names
+            .iter()
+            .filter(|n| !gone.iter().any(|g| g == *n))
+            .cloned()
+            .collect();
         let saved = {
             let rows: Vec<policy::Row<'_>> = names
                 .iter()
@@ -705,13 +1026,15 @@ impl Model {
             Some(Ok(written)) => {
                 self.before = written;
                 self.names = names;
-                self.values.remove(name);
-                self.meta.remove(name);
-                if self.selected >= self.names.len() {
-                    self.selected = self.names.len().saturating_sub(1);
+                for n in gone {
+                    self.values.remove(n);
+                    self.meta.remove(n);
                 }
+                self.reshape();
+                self.rebuild(None);
                 self.sync_detail();
-                self.note("deleted");
+                let n = gone.len();
+                self.note(format!("deleted {n} {}", entry_word(n)));
             }
             Some(Err(e)) => {
                 self.note(format!("save failed: {e}"));
@@ -721,22 +1044,59 @@ impl Model {
         }
     }
 
+    /// A single value copies as itself. A bundle copies as the `.env` block
+    /// the console writes, because a raw JSON object is not what anyone is
+    /// about to paste. Both are cleared on exit.
     fn copy_selected(&mut self) {
-        let Some(name) = self.selected_name().map(str::to_string) else {
+        if self.detail.is_empty() {
+            self.note("nothing to copy");
+            return;
+        }
+        let one_value = self.detail.len() == 1 && self.detail[0].key.is_empty();
+        let mut text = if one_value {
+            self.detail[0].value.clone()
+        } else {
+            let mut out = String::new();
+            for r in &self.detail {
+                let key = if r.env.is_empty() {
+                    r.key.to_ascii_uppercase()
+                } else {
+                    r.env.clone()
+                };
+                out.push_str(&key);
+                out.push('=');
+                out.push_str(&r.value);
+                out.push('\n');
+            }
+            out
+        };
+        login::clipboard_set(text.as_bytes());
+        text.zeroize();
+        self.copied_at = Some(std::time::Instant::now());
+        let what = if one_value { "value" } else { "env block" };
+        let secs = CLIP_TTL.as_secs();
+        self.note(format!("copied {what}; clipboard cleared in {secs}s"));
+    }
+
+    /// Called on every idle tick. The register polls at 250ms, so the clear
+    /// lands within a quarter second of the deadline without a thread.
+    fn expire_clipboard(&mut self) {
+        let Some(at) = self.copied_at else {
             return;
         };
-        let Some(secret) = self.values.get(&name) else {
+        if at.elapsed() < CLIP_TTL {
             return;
-        };
-        login::clipboard_set(secret.as_bytes());
-        self.note("copied");
+        }
+        self.copied_at = None;
+        login::clipboard_clear();
+        self.note("clipboard cleared");
     }
 
     fn select_next(&mut self) {
-        if self.names.is_empty() {
+        if self.rows.is_empty() {
             return;
         }
-        self.selected = (self.selected + 1).min(self.names.len() - 1);
+        self.selected = (self.selected + 1).min(self.rows.len() - 1);
         self.sync_detail();
     }
 
@@ -745,8 +1105,11 @@ impl Model {
         self.sync_detail();
     }
 
+    /// The selected row's entry, when the row is exactly one. A fused bundle
+    /// has no single name, so anything that needs one asks for it and gets
+    /// `None` rather than the first member by accident.
     fn selected_name(&self) -> Option<&str> {
-        self.names.get(self.selected).map(String::as_str)
+        self.selected_row()?.only()
     }
 
     /// The selected entry's plaintext, when it is text.
@@ -780,13 +1143,21 @@ impl Model {
         self.detail_title.clear();
         // A move must not carry the last entry's reveal onto this one.
         self.reveal_all = false;
-        let Some(name) = self.selected_name().map(str::to_string) else {
+        let Some(row) = self.selected_row().cloned() else {
             return;
         };
-        if !self.values.contains_key(&name) {
+        match row.only() {
+            Some(name) => self.detail_of_entry(name),
+            None => self.detail_of_fused(&row),
+        }
+    }
+
+    /// One entry: a JSON bundle if it reads as one, else a single value.
+    fn detail_of_entry(&mut self, name: &str) {
+        if !self.values.contains_key(name) {
             return;
         }
-        let Some(text) = self.plaintext(&name) else {
+        let Some(text) = self.plaintext(name) else {
             self.detail.push(DetailRow {
                 key: String::new(),
                 env: String::new(),
@@ -795,32 +1166,8 @@ impl Model {
             });
             return;
         };
-        if let Some((schema, pairs)) = self.bundle_of(&name, &text) {
-            let n = pairs.len();
-            let unit = if n == 1 { "field" } else { "fields" };
-            self.detail_title = format!("{} · {n} {unit}", schema.title);
-            for f in &schema.fields {
-                if let Some((_, v)) = pairs.iter().find(|(k, _)| *k == f.key) {
-                    self.detail.push(DetailRow {
-                        key: f.key.clone(),
-                        env: f.env.clone(),
-                        secret: f.secret,
-                        value: v.clone(),
-                    });
-                }
-            }
-            for (k, v) in &pairs {
-                if schema.fields.iter().any(|f| f.key == *k) {
-                    continue;
-                }
-                // A key the schema does not know is masked, as the console does.
-                self.detail.push(DetailRow {
-                    key: k.clone(),
-                    env: String::new(),
-                    secret: true,
-                    value: v.clone(),
-                });
-            }
+        if let Some((schema, pairs)) = self.bundle_of(name, &text) {
+            self.push_bundle(&schema, &pairs);
             return;
         }
         self.detail.push(DetailRow {
@@ -829,6 +1176,89 @@ impl Model {
             secret: true,
             value: text,
         });
+    }
+
+    /// Siblings under a shared parent, read as the one credential they are.
+    /// The key is the leaf segment, which is what the fusion matched on.
+    fn detail_of_fused(&mut self, row: &Row) {
+        let pairs: Vec<(String, String)> = row
+            .members
+            .iter()
+            .map(|m| {
+                let key = m.rsplit_once('/').map_or(m.as_str(), |(_, k)| k);
+                let text = self.plaintext(m).unwrap_or_else(|| "(binary)".to_string());
+                (key.to_string(), text)
+            })
+            .collect();
+        let schema = row
+            .provider
+            .as_deref()
+            .and_then(|p| self.schemas.iter().find(|s| s.name == p))
+            .cloned();
+        match schema {
+            Some(schema) => self.push_bundle(&schema, &pairs),
+            None => {
+                for (k, v) in pairs {
+                    self.detail.push(DetailRow {
+                        key: k,
+                        env: String::new(),
+                        secret: true,
+                        value: v,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Schema order first, then whatever the schema does not name. A key the
+    /// schema does not know is masked, as the console does.
+    fn push_bundle(&mut self, schema: &Schema, pairs: &[(String, String)]) {
+        let n = pairs.len();
+        let unit = if n == 1 { "field" } else { "fields" };
+        self.detail_title = format!("{} \u{b7} {n} {unit}", schema.title);
+        for f in &schema.fields {
+            if let Some((_, v)) = pairs.iter().find(|(k, _)| *k == f.key) {
+                self.detail.push(DetailRow {
+                    key: f.key.clone(),
+                    env: f.env.clone(),
+                    secret: f.secret,
+                    value: v.clone(),
+                });
+            }
+        }
+        for (k, v) in pairs {
+            if schema.fields.iter().any(|f| f.key == *k) {
+                continue;
+            }
+            self.detail.push(DetailRow {
+                key: k.clone(),
+                env: String::new(),
+                secret: true,
+                value: v.clone(),
+            });
+        }
+    }
+
+    /// Regroup from what the register holds now. A save changes which entries
+    /// are siblings, so the rows have to be recomputed from the values rather
+    /// than from the load that first produced them.
+    fn reshape(&mut self) {
+        let empty = Value::Object(Default::default());
+        let shapes = {
+            let rows: Vec<policy::Row<'_>> = self
+                .names
+                .iter()
+                .filter_map(|n| {
+                    Some((
+                        n.as_str(),
+                        self.values.get(n)?,
+                        self.meta.get(n).unwrap_or(&empty),
+                    ))
+                })
+                .collect();
+            policy::shapes_of(&rows)
+        };
+        self.shapes = shapes;
     }
 
     fn refuse_if_blocked(&mut self) -> bool {
@@ -855,6 +1285,8 @@ impl Model {
     pub fn apply_loaded(&mut self, loaded: policy::VaultLoad) {
         self.save_blocked = loaded.drop_refusal();
         self.before = loaded.before;
+        // Before the entries are taken apart: the fusion needs the values.
+        self.shapes = policy::bundle_shapes(&loaded.entries);
         self.names.clear();
         self.values.clear();
         self.meta.clear();
@@ -865,9 +1297,7 @@ impl Model {
             self.meta.insert(name, meta);
         }
         self.names.sort();
-        if self.selected >= self.names.len() {
-            self.selected = self.names.len().saturating_sub(1);
-        }
+        self.rebuild(None);
         self.sync_detail();
     }
 
@@ -914,6 +1344,14 @@ impl Model {
         while self.activity.len() > 32 {
             self.activity.pop_front();
         }
+    }
+}
+
+fn entry_word(n: usize) -> &'static str {
+    if n == 1 {
+        "entry"
+    } else {
+        "entries"
     }
 }
 
@@ -980,11 +1418,18 @@ mod tests {
         m.mode = add_modal("kv/new", "x");
         m.handle(Event::Enter);
         assert!(!claimed_save(&m.activity_lines()));
-        assert!(m.is_idle());
+        let form = m.form().expect("a refused save keeps the modal");
+        assert_eq!(form.value_pairs()[0].1, "x", "and keeps what was typed");
+        assert!(
+            form.error.as_deref().is_some_and(|e| e.contains("refused")),
+            "and says why"
+        );
+        m.handle(Event::Esc);
         assert_eq!(m.names(), ["kv/alpha"]);
 
         m.mode = Mode::Modal(Modal::Delete {
-            name: "kv/alpha".into(),
+            label: "kv/alpha".into(),
+            names: vec!["kv/alpha".into()],
         });
         m.handle(Event::Enter);
         assert!(!claimed_save(&m.activity_lines()));
@@ -996,18 +1441,23 @@ mod tests {
         let mut m = Model::new();
         m.mode = add_modal("kv/new", "x");
         m.handle(Event::Enter);
-        assert!(m.is_idle());
         assert!(
             m.names().is_empty(),
             "no session: add must not keep the row"
         );
         assert!(!claimed_save(&m.activity_lines()));
+        // A 64-character token pasted into a form is not something to lose to
+        // a failed round trip.
+        let form = m.form().expect("a failed save keeps the modal");
+        assert_eq!(form.value_pairs()[0].1, "x", "and keeps what was typed");
+        m.handle(Event::Esc);
 
         m.names.push("kv/alpha".into());
         m.values
             .insert("kv/alpha".into(), Secret::new(b"x".to_vec()));
         m.mode = Mode::Modal(Modal::Delete {
-            name: "kv/alpha".into(),
+            label: "kv/alpha".into(),
+            names: vec!["kv/alpha".into()],
         });
         m.handle(Event::Enter);
         assert_eq!(
@@ -1030,12 +1480,13 @@ mod tests {
         let form = Form::schema(&schema, "kv/gh", &[("token".to_string(), "t".to_string())]);
         m.mode = Mode::Modal(Modal::Provider { form });
         m.handle(Event::Enter);
-        assert!(m.is_idle(), "no session: the modal still closes");
         assert!(
             m.names().is_empty(),
             "no session: the provider row must not survive"
         );
         assert!(!claimed_save(&m.activity_lines()));
+        let form = m.form().expect("a failed save keeps the modal");
+        assert_eq!(form.value_pairs()[0].1, "t", "and keeps what was typed");
     }
 
     #[test]

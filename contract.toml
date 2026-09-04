@@ -573,6 +573,42 @@ pending = false
 [tests.T_TUI_MODAL_FITS]
 pending = false
 
+[tests.T_TUI_GROUPS]
+pending = false
+
+[tests.T_TUI_FUSED_DETAIL]
+pending = false
+
+[tests.T_TUI_OPEN_ESC]
+pending = false
+
+[tests.T_TUI_ENTER_REVEALS]
+pending = false
+
+[tests.T_TUI_FILTER]
+pending = false
+
+[tests.T_TUI_DETAIL_COLS]
+pending = false
+
+[tests.T_TUI_WINDOW]
+pending = false
+
+[tests.T_TUI_HELP]
+pending = false
+
+[tests.T_TUI_FUSED_EDIT]
+pending = false
+
+[tests.T_TUI_DELETE_WHOLE_BUNDLE]
+pending = false
+
+[tests.T_TUI_COPY_ENV]
+pending = false
+
+[tests.T_TUI_EMPTY_TEACHES]
+pending = false
+
 [tests.T_CLI_LS_NO_VALUE]
 pending = false
 

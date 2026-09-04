@@ -25,16 +25,18 @@ mod form;
 mod model;
 mod signin;
 mod theme;
+mod tree;
 mod view;
 
 pub use form::{FieldTag, Form, FormField, Input};
-pub use model::{DetailRow, Event, Modal, Mode, Model, Picker};
+pub use model::{DetailRow, Event, Modal, Mode, Model, Picker, KEYS};
 pub use signin::SignIn;
 pub use theme::{color, ACCENT, DANGER, DIM, HIGHLIGHT, OK, ON_ACCENT, WARN};
+pub use tree::Row;
 pub use view::{
-    action_bar, field_rects, form_cols, hit_key, inset, mask, modal_box, modal_buttons, regions,
-    reveal_rect, rows_at, spot_at, spot_text, toggle_text, window_start, Action, ActionHit,
-    FormCols, Rect, Regions, Spot, SpotHit,
+    action_bar, detail_cols, field_rects, form_cols, hit_key, inset, mask, modal_box,
+    modal_buttons, regions, reveal_rect, rows_at, spot_at, spot_text, toggle_text, window_start,
+    Action, ActionHit, DetailCols, FormCols, Painted, Rect, Regions, Spot, SpotHit,
 };
 
 /// `secd` with no args: sign-in wait, then the register.
@@ -84,14 +86,19 @@ pub fn run() -> anyhow::Result<()> {
     };
 
     let mut model = Model::from_unlocked(unlocked);
+    // Paint before the first round trip, not after it.
+    terminal.draw(|f| {
+        draw(f, &model);
+    })?;
+    model.load();
     loop {
         terminal.draw(|f| {
             let area = Rect::from(f.area());
             let r = regions(area);
             let bar = view::action_bar_row(area, &r);
             model.set_hits(action_bar(bar, model.actions()));
-            let spots = draw(f, &model);
-            model.set_spots(spots);
+            let painted = draw(f, &model);
+            model.set_painted(&painted);
         })?;
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -167,21 +174,70 @@ impl Drop for Restore {
 
 /// Paint the register and return everything a click can land on. The hit table
 /// is built by the same code that draws, so the two cannot disagree.
-pub fn draw(frame: &mut Frame, model: &Model) -> Vec<SpotHit> {
+pub fn draw(frame: &mut Frame, model: &Model) -> Painted {
     let area = Rect::from(frame.area());
     let r = regions(area);
     draw_header(frame, r.header, model);
-    let rows = draw_list(frame, r.list, model);
+    let (rows, list) = draw_list(frame, r.list, model);
     draw_detail(frame, r.detail, model);
     draw_activity(frame, r.activity, model);
     let bar = view::action_bar_row(area, &r);
     draw_action_bar(frame, bar, model.actions());
-    match model.mode() {
-        Mode::Idle => rows,
-        Mode::Modal(Modal::Add { form } | Modal::Provider { form }) => draw_form(frame, area, form),
-        Mode::Modal(Modal::Pick { pick }) => draw_picker(frame, area, model.schemas(), pick),
-        Mode::Modal(Modal::Delete { name }) => draw_confirm(frame, area, name),
+    let mut painted = Painted {
+        spots: rows,
+        list,
+        modal: 0,
+    };
+    if model.helping() {
+        // The overlay covers the register, so nothing under it can be clicked.
+        painted.spots = draw_help(frame, area);
+        return painted;
     }
+    match model.mode() {
+        Mode::Idle => {}
+        Mode::Modal(Modal::Add { form } | Modal::Provider { form }) => {
+            let (spots, start) = draw_form(frame, area, form, model.modal_window());
+            painted.spots = spots;
+            painted.modal = start;
+        }
+        Mode::Modal(Modal::Pick { pick }) => {
+            let (spots, start) =
+                draw_picker(frame, area, model.schemas(), pick, model.modal_window());
+            painted.spots = spots;
+            painted.modal = start;
+        }
+        Mode::Modal(Modal::Delete { label, names }) => {
+            painted.spots = draw_confirm(frame, area, label, names.len());
+        }
+    }
+    painted
+}
+
+/// Every key, from the one table the action bar is built from. Three sources
+/// that can disagree is three chances to tell the human something untrue.
+fn draw_help(frame: &mut Frame, area: Rect) -> Vec<SpotHit> {
+    let keys = model::KEYS;
+    let (box_r, list) = modal_frame(frame, area, keys.len(), "keys");
+    let w = keys.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    if list.width > 0 && list.height > 0 {
+        let lines: Vec<Line> = keys
+            .iter()
+            .map(|(k, what)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", fit(k, w)),
+                        Style::default()
+                            .fg(color(ACCENT))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(*what),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), ratatui::layout::Rect::from(list));
+    }
+    draw_status(frame, box_r, None, "? or Esc closes");
+    Vec::new()
 }
 
 pub fn draw_action_bar(frame: &mut Frame, area: Rect, actions: &[Action]) {
@@ -221,46 +277,102 @@ fn draw_header(frame: &mut Frame, area: Rect, model: &Model) {
             ),
             Span::raw(" "),
             Span::styled(model.title(), Style::default().fg(color(DIM))),
+            // The one key that names every other key. The action bar has no
+            // room for it, and a key nobody can find is a key nobody has.
+            Span::styled("  ? keys", Style::default().fg(color(DIM))),
         ])),
         ratatui::layout::Rect::from(area),
     );
 }
 
-fn draw_list(frame: &mut Frame, area: Rect, model: &Model) -> Vec<SpotHit> {
+fn draw_list(frame: &mut Frame, area: Rect, model: &Model) -> (Vec<SpotHit>, usize) {
     if area.height == 0 || area.width == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("names")
+        .title(list_title(model))
         .border_style(Style::default().fg(color(DIM)));
     frame.render_widget(block, ratatui::layout::Rect::from(area));
     let inner = view::inset(area);
     if inner.height == 0 || inner.width == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
-    let names = model.names();
+    let rows = model.rows();
+    if rows.is_empty() {
+        // An empty list that says nothing leaves the human guessing which key
+        // fills it.
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                empty_hint(model),
+                Style::default().fg(color(DIM)),
+            ))),
+            ratatui::layout::Rect::from(inner),
+        );
+        return (Vec::new(), 0);
+    }
     let h = inner.height as usize;
     let sel = model.selected();
-    let start = view::window_start(sel, names.len(), h);
-    let items: Vec<ListItem> = names
+    let start = view::window_start(model.list_window(), sel, rows.len(), h);
+    let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
         .skip(start)
         .take(h)
-        .map(|(i, name)| {
-            let style = if i == sel {
-                Style::default()
-                    .fg(color(HIGHLIGHT))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(name.as_str()).style(style)
+        .map(|(i, row)| {
+            let shared = row.shared(i.checked_sub(1).and_then(|j| rows.get(j)));
+            ListItem::new(Line::from(row_spans(row, shared, i == sel)))
         })
         .collect();
     frame.render_widget(List::new(items), ratatui::layout::Rect::from(inner));
-    view::rows_at(inner, start, names.len(), Spot::Row)
+    (view::rows_at(inner, start, rows.len(), Spot::Row), start)
+}
+
+/// The path, with the part shared with the row above dimmed. A group reads as
+/// a group without costing the keystroke a directory level would.
+fn row_spans(row: &tree::Row, shared: usize, selected: bool) -> Vec<Span<'static>> {
+    let leaf = if selected {
+        Style::default()
+            .fg(color(HIGHLIGHT))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut spans = Vec::new();
+    if shared > 0 {
+        spans.push(Span::styled(
+            row.label[..shared].to_string(),
+            Style::default().fg(color(DIM)),
+        ));
+    }
+    spans.push(Span::styled(row.label[shared..].to_string(), leaf));
+    if row.descends() {
+        spans.push(Span::styled(
+            format!("  {} {}", row.members.len(), plural(row.members.len())),
+            Style::default().fg(color(DIM)),
+        ));
+    }
+    spans
+}
+
+fn list_title(model: &Model) -> String {
+    if !model.open().is_empty() {
+        return format!("{} · Esc back", model.open());
+    }
+    let shown = model.rows().len();
+    let total = model.total();
+    if model.filtering() || !model.filter().is_empty() {
+        return format!("/{}  {shown}/{total}", model.filter());
+    }
+    format!("names  {total}")
+}
+
+fn empty_hint(model: &Model) -> &'static str {
+    if model.filtering() || !model.filter().is_empty() {
+        "nothing matches — Esc clears the filter"
+    } else {
+        "no secrets yet — [a] adds one, [p] adds a provider bundle"
+    }
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, model: &Model) {
@@ -277,21 +389,18 @@ fn draw_detail(frame: &mut Frame, area: Rect, model: &Model) {
         return;
     }
     let rows = model.detail_rows();
-    let key_w = rows
-        .iter()
-        .map(|r| r.key.chars().count())
-        .max()
-        .unwrap_or(0);
-    let env_w = rows
-        .iter()
-        .map(|r| r.env.chars().count())
-        .max()
-        .unwrap_or(0);
-    // Key left, env right, the value taking what is between: the columns line
-    // up whatever the values happen to be.
-    let value_w = (inner.width as usize)
-        .saturating_sub(key_w + 1)
-        .saturating_sub(if env_w > 0 { env_w + 1 } else { 0 });
+    let widest = |f: fn(&DetailRow) -> &String| {
+        rows.iter()
+            .map(|r| u16::try_from(f(r).chars().count()).unwrap_or(u16::MAX))
+            .max()
+            .unwrap_or(0)
+    };
+    // Key left, env right, and the value fed before either: it is what you
+    // came to read.
+    let cols = view::detail_cols(inner.width, widest(|r| &r.key), widest(|r| &r.env));
+    let key_w = cols.key as usize;
+    let env_w = cols.env as usize;
+    let value_w = cols.value as usize;
     let mut lines: Vec<Line> = Vec::new();
     if !model.detail_title().is_empty() {
         lines.push(Line::from(Span::styled(
@@ -423,13 +532,15 @@ fn draw_buttons(frame: &mut Frame, box_r: Rect, commit: &str) -> Vec<SpotHit> {
     hits
 }
 
-fn draw_form(frame: &mut Frame, area: Rect, form: &Form) -> Vec<SpotHit> {
+fn draw_form(frame: &mut Frame, area: Rect, form: &Form, prev: usize) -> (Vec<SpotHit>, usize) {
     let (box_r, list) = modal_frame(frame, area, form.fields.len(), &form.title);
     let mut spots = Vec::new();
+    let mut window = 0;
     if list.width > 0 && list.height > 0 {
         let (label_w, env_w) = form.widths();
         let cols = view::form_cols(list.width, label_w, env_w);
-        let start = view::window_start(form.focus, form.fields.len(), list.height as usize);
+        let start = view::window_start(prev, form.focus, form.fields.len(), list.height as usize);
+        window = start;
         let hits = view::field_rects(list, cols, start, form.fields.len());
         // Reveal sits inside the input column, so it is tested first.
         let mut fields = Vec::with_capacity(hits.len());
@@ -465,7 +576,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form) -> Vec<SpotHit> {
         "Tab field · Ctrl-R reveal · Enter save · Esc cancel",
     );
     spots.extend(draw_buttons(frame, box_r, "save"));
-    spots
+    (spots, window)
 }
 
 fn draw_form_row(
@@ -543,12 +654,20 @@ fn draw_form_row(
     }
 }
 
-fn draw_picker(frame: &mut Frame, area: Rect, schemas: &[Schema], pick: &Picker) -> Vec<SpotHit> {
+fn draw_picker(
+    frame: &mut Frame,
+    area: Rect,
+    schemas: &[Schema],
+    pick: &Picker,
+    prev: usize,
+) -> (Vec<SpotHit>, usize) {
     let (box_r, list) = modal_frame(frame, area, schemas.len(), "provider");
     let mut spots = Vec::new();
+    let mut window = 0;
     if list.width > 0 && list.height > 0 {
         let h = list.height as usize;
-        let start = view::window_start(pick.selected, schemas.len(), h);
+        let start = view::window_start(prev, pick.selected, schemas.len(), h);
+        window = start;
         let name_w = schemas
             .iter()
             .map(|s| s.name.chars().count())
@@ -586,16 +705,28 @@ fn draw_picker(frame: &mut Frame, area: Rect, schemas: &[Schema], pick: &Picker)
     }
     draw_status(frame, box_r, None, "Enter choose · Esc cancel");
     spots.extend(draw_buttons(frame, box_r, "choose"));
-    spots
+    (spots, window)
 }
 
-fn draw_confirm(frame: &mut Frame, area: Rect, name: &str) -> Vec<SpotHit> {
-    let (box_r, list) = modal_frame(frame, area, 1, "delete");
+fn draw_confirm(frame: &mut Frame, area: Rect, label: &str, count: usize) -> Vec<SpotHit> {
+    let (box_r, list) = modal_frame(frame, area, 2, "delete");
     if list.width > 0 && list.height > 0 {
-        frame.render_widget(
-            Paragraph::new(Span::styled(name, Style::default().fg(color(DANGER)))),
-            ratatui::layout::Rect::from(list),
-        );
+        // A bundle is one row and several entries. Deleting it takes them all,
+        // and saying how many is the difference between a confirmed action and
+        // a surprised one.
+        let mut lines = vec![Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(color(DANGER))
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if count > 1 {
+            lines.push(Line::from(Span::styled(
+                format!("{count} entries, all of them"),
+                Style::default().fg(color(DANGER)),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), ratatui::layout::Rect::from(list));
     }
     draw_status(frame, box_r, None, "Enter confirm · Esc cancel");
     draw_buttons(frame, box_r, "confirm")

@@ -182,17 +182,41 @@ pub fn inset(r: Rect) -> Rect {
     )
 }
 
+/// What one paint decided, so the next one continues from it rather than
+/// recomputing a window from the selection alone.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Painted {
+    pub spots: Vec<SpotHit>,
+    /// First row of the register list.
+    pub list: usize,
+    /// First row of the modal on screen.
+    pub modal: usize,
+}
+
+/// Rows kept off the top and bottom edge, so the next row is always visible.
+const SCROLLOFF: usize = 2;
+
 /// First row drawn, so a selection below the fold scrolls into view. The draw
 /// and the hit table both window through here, so they cannot disagree.
-pub fn window_start(sel: usize, len: usize, h: usize) -> usize {
+///
+/// `prev` is where the pane was, and the window only moves when the selection
+/// would leave it. Recomputing from the selection alone pins it to the bottom
+/// edge, so moving from row 50 to row 2 scrolls 38 times before the cursor
+/// appears to move at all, then changes behaviour halfway.
+pub fn window_start(prev: usize, sel: usize, len: usize, h: usize) -> usize {
     if h == 0 || len <= h {
         return 0;
     }
-    if sel < h {
-        0
-    } else {
-        sel + 1 - h
+    let last = len - h;
+    let pad = SCROLLOFF.min(h.saturating_sub(1) / 2);
+    let mut start = prev.min(last);
+    if sel < start + pad {
+        start = sel.saturating_sub(pad);
     }
+    if sel + pad >= start + h {
+        start = (sel + pad + 1).saturating_sub(h);
+    }
+    start.min(last)
 }
 
 /// One rect per visible row of a list drawn into `body`, from `start`.
@@ -222,6 +246,53 @@ pub fn modal_box(area: Rect, rows: u16) -> Rect {
     let y = area.y.saturating_add(area.height.saturating_sub(h) / 2);
     Rect::new(x, y, w, h)
 }
+
+/// Column plan for a detail row: key, value, env, one space between each.
+///
+/// The value is fed first. Letting the key and env columns take their full
+/// natural width and giving the value what is left starves the one column that
+/// carries the thing you came to read: a full Cloudflare bundle at 80 columns
+/// leaves it five cells, and under 73 columns, none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DetailCols {
+    pub key: u16,
+    pub value: u16,
+    pub env: u16,
+}
+
+pub fn detail_cols(width: u16, key_w: u16, env_w: u16) -> DetailCols {
+    if key_w == 0 {
+        return DetailCols {
+            key: 0,
+            value: width,
+            env: 0,
+        };
+    }
+    let mut key = key_w;
+    let mut env = env_w;
+    // A gap before each column that is present.
+    let need = |k: u16, e: u16| {
+        k.saturating_add(1)
+            .saturating_add(if e > 0 { e + 1 } else { 0 })
+    };
+    while width.saturating_sub(need(key, env)) < GOOD_VALUE {
+        if env > 0 {
+            env = 0;
+        } else if key > MIN_KEY {
+            key = key.saturating_sub(1);
+        } else {
+            break;
+        }
+    }
+    let value = width.saturating_sub(need(key, env));
+    DetailCols { key, value, env }
+}
+
+/// A value narrower than this is not worth the columns that describe it.
+const GOOD_VALUE: u16 = 16;
+
+/// A key cut below this stops naming its field.
+const MIN_KEY: u16 = 6;
 
 /// Column plan for a form row: label, input, tag, env, one space between each.
 /// The env column is dropped first when the row is narrow, then the tag.
