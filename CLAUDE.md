@@ -43,7 +43,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 |---|---|
 | `src/` | CLI binary, TUI, agent commands |
 | `crates/secd-core` | `Secret`, AEAD, wrap, providers |
-| `crates/secd-web` | TLS 1.3 API (later) |
+| `crates/secd-web` | TLS 1.3 API: 27 routes, serves the console and the vault |
 | `contract.toml` | commands, routes, providers, test IDs, file allow-list |
 | `scripts/check.sh` | the gate. Lanes: `contract shell workflow secrets fmt ui bun-audit crypto-parity clippy test test-release compile-fail release-dry`. No argument runs all, cheapest first; `fast` runs the four that need no cargo build |
 | `scripts/tools.sh` | shared helpers: pinned tool fetch, `Cargo.lock` version lookup |
@@ -65,10 +65,14 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 | `deploy/agent/` | pull-based CD for the cluster host: systemd timer, no inbound access |
 | `.github/workflows/ci.yml` | the pipeline. PR/merge-queue: `gate`. `push` to `main`: cache + tag. tag `v*`: publish. |
 | `keys/cosign.pub` | verify key for `secd update` |
-| `skills/` | grok ≡ claude (later) |
+| `skills/` | the agent skill. `grok` and `claude` are the same bytes, compiled into the binary and written on `secd update`, which also removes the skill it supersedes |
+| `tools/import-legacy` | one-shot sdxd import. Not in any release: `cargo run -p secd-import-legacy -- --snapshot FILE`, needs a TTY, and skips a name `check_name` refuses |
 
 ## Invariants
 
+- `secd gen` refuses a name that exists. There is no rollback and no CLI that reaches the server's version rows, so generating over a live credential is an outage with no way back.
+- The git credential helper is selected by host, not by provider: `gitea`, `github` and `gitlab` each name a token field and a host, the bundle's url where it has one and the service's own otherwise. It answers `get` only; `store` and `erase` are git reporting, not asking. `secd gitea --install-git` writes one helper per forge origin the vault can serve, so git finds one for every remote.
+- `secd update` writes the skill and removes the one it supersedes. Two resident skills contradict each other, and the wrong one is the one that still exists.
 - Server stores ciphertext. Disk stores no vault key and no plaintext. DEK lives in the kernel keyring until `secd logout` or reboot.
 - `PUT /api/v1/vault` replaces the whole vault, so every save goes through `policy::save_entries_read_back`: it refuses when the load dropped an entry, checks the vault against the pre-image it loaded, and reads back what it wrote. `VaultLoad.body` is that pre-image, shaped as the route takes it back.
 - `Secret`: no `Display`/`Serialize`/`Deref`; `Debug` redacts bytes; `mlock` + `Zeroize`.

@@ -21,11 +21,15 @@ pub fn run() -> anyhow::Result<()> {
     let unlocked = policy::require_unlocked()?;
     let entries = policy::load_entries(&unlocked.token, &unlocked.dek)?;
     let bundles = policy::discover_bundles(&entries);
+    // Installing the helper is not a gitea question. git picks a helper by
+    // host, so every forge bundle that names one gets wired up, or a GitHub
+    // credential the helper can serve is one git never asks for.
+    if install {
+        return install_git(&bundles, bundle);
+    }
+
     match policy::pick_gitea(&bundles, bundle) {
         GiteaPick::One(picked) => {
-            if install {
-                return install_git(picked);
-            }
             let extra = policy::gitea_env(picked);
             let mut redact = policy::redact_values(&entries);
             redact.extend(policy::env_values(&extra));
@@ -49,11 +53,40 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
-fn install_git(bundle: &policy::Bundle) -> anyhow::Result<()> {
-    let url =
-        policy::gitea_url(bundle).ok_or_else(|| anyhow::anyhow!("gitea bundle has no url"))?;
-    let origin = policy::origin_url(url);
-    let helper = format!("!secd git-credential --bundle {}", bundle.name);
+fn install_git(bundles: &[policy::Bundle], want: Option<&str>) -> anyhow::Result<()> {
+    let mut done: Vec<String> = Vec::new();
+    for b in bundles {
+        if want.is_some_and(|n| n != b.name) {
+            continue;
+        }
+        if policy::forge_token(b).is_none() {
+            continue;
+        }
+        let Some(origin) = policy::forge_origin(b) else {
+            continue;
+        };
+        // One helper per origin. A second bundle for the same host would
+        // silently replace the first, so it is named and skipped instead.
+        if done.contains(&origin) {
+            eprintln!(
+                "{origin} already served by another bundle; skipped {}",
+                b.name
+            );
+            continue;
+        }
+        write_helper(&origin, &b.name)?;
+        println!("{origin} {}", b.name);
+        done.push(origin);
+    }
+    if done.is_empty() {
+        eprintln!("no forge credential — add one in secd");
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn write_helper(origin: &str, bundle: &str) -> anyhow::Result<()> {
+    let helper = format!("!secd git-credential --bundle {bundle}");
     let key = format!("credential.{origin}.helper");
     let git = "git";
     let status = std::process::Command::new(git)

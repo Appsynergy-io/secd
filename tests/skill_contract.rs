@@ -113,6 +113,34 @@ fn T_SKILL_INSTALL() {
     let _ = fs::remove_dir_all(&home);
 }
 
+#[test]
+fn T_SKILL_RETIRES_SDXD() {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let home = std::env::temp_dir().join(format!("secd-t8-old-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let stale = [
+        home.join(".claude/skills/sdxd"),
+        home.join(".grok/skills/sdxd"),
+    ];
+    for dir in &stale {
+        fs::create_dir_all(dir).expect("stale skill dir");
+        fs::write(dir.join("SKILL.md"), b"old skill").expect("stale SKILL.md");
+    }
+    let _env = common_env();
+    let _reset = HomeReset::swap(&home);
+    secd::skills_install::run().expect("skills_install::run");
+    assert_eq!(secd::skills_install::stale_dirs(), stale);
+    for dir in &stale {
+        assert!(!dir.exists(), "{} survived the install", dir.display());
+    }
+    for path in secd::skills_install::dest_files() {
+        assert!(path.exists(), "{} was not written", path.display());
+    }
+    // Idempotent: the second run has nothing to remove and must not complain.
+    secd::skills_install::run().expect("second skills_install::run");
+    let _ = fs::remove_dir_all(&home);
+}
+
 struct HomeReset {
     prev: Option<std::ffi::OsString>,
 }

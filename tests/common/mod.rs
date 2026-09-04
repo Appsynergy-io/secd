@@ -101,6 +101,12 @@ pub fn assets() -> &'static Assets {
     ASSETS.get_or_init(build_assets)
 }
 
+pub fn github_blob(user: &str) -> Vec<u8> {
+    json!({"token": FIXTURE, "user": user})
+        .to_string()
+        .into_bytes()
+}
+
 pub fn gitea_blob(url: &str, user: &str) -> Vec<u8> {
     json!({"token": FIXTURE, "url": url, "user": user})
         .to_string()
@@ -237,11 +243,17 @@ impl Harness {
     }
 
     pub fn git_credential(&self, request: &str) -> Output {
+        self.git_credential_action(request, "")
+    }
+
+    /// As git invokes it, naming the operation in argv.
+    pub fn git_credential_action(&self, request: &str, action: &str) -> Output {
         let req = self.home.join("git-req");
         fs::write(&req, request.as_bytes()).expect("req");
         Command::new(&assets().git)
             .env("SECD_BIN", &assets().secd)
             .env("SECD_GIT_REQFILE", &req)
+            .env("SECD_GIT_ACTION", action)
             .env("SECD_HOME", &self.home)
             .env("XDG_RUNTIME_DIR", &self.runtime)
             .env("LD_PRELOAD", &assets().redir)
@@ -549,7 +561,10 @@ int main(void) {
                 close(fd);
             }
         }
-        char *args[] = {"secd", "git-credential", 0};
+        const char *action = getenv("SECD_GIT_ACTION");
+        char *args[] = {"secd", "git-credential", 0, 0};
+        if (action && *action)
+            args[2] = (char *)action;
         execv(bin, args);
         _exit(127);
     }

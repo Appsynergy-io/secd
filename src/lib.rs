@@ -49,7 +49,25 @@ pub fn cli() -> Command {
                         .allow_hyphen_values(true),
                 ),
         )
-        .subcommand(Command::new("git-credential").about("git credential helper"))
+        .subcommand(
+            // git invokes this as `secd git-credential [--bundle N] ACTION`.
+            // Both must parse: clap rejecting either is the helper failing
+            // before it can read a thing.
+            Command::new("git-credential")
+                .about("git credential helper")
+                .arg(
+                    Arg::new("bundle")
+                        .long("bundle")
+                        .value_name("N")
+                        .num_args(1),
+                )
+                .arg(
+                    Arg::new("action")
+                        .value_name("ACTION")
+                        .num_args(0..=1)
+                        .help("get, store or erase; only get is answered"),
+                ),
+        )
         .subcommand(
             Command::new("run")
                 .about("Run a command with provider env")

@@ -2,11 +2,17 @@
 
 use std::io::{self, Read, Write};
 
-use crate::policy::{self, GiteaPick};
+use crate::policy;
 use zeroize::Zeroize;
 
 pub fn run() -> anyhow::Result<()> {
     if !parent_is_git() {
+        return Ok(());
+    }
+    // git names the operation in argv. `store` and `erase` are git telling us
+    // what it did with a credential; only `get` is a question, and only a
+    // question deserves a password line.
+    if !matches!(git_action().as_deref(), None | Some("get")) {
         return Ok(());
     }
     let mut req = String::new();
@@ -47,25 +53,15 @@ pub fn fill(request: &str) -> anyhow::Result<Option<String>> {
     let entries = policy::load_entries(&unlocked.token, &unlocked.dek)?;
     let bundles = policy::discover_bundles(&entries);
     let want = requested_bundle();
-    let bundle = match policy::pick_gitea(&bundles, want.as_deref()) {
-        GiteaPick::One(b) => b,
-        _ => return Ok(None),
-    };
-    let Some(url) = policy::gitea_url(bundle) else {
+    // The host git asked for is the whole selector: a bundle that serves a
+    // different one is not a fallback, it is the wrong credential.
+    let Some(bundle) = policy::pick_forge(&bundles, want.as_deref(), &host) else {
         return Ok(None);
     };
-    if !policy::hosts_match(url, &host) {
-        return Ok(None);
-    }
-    let Some(token) = policy::gitea_token(bundle) else {
+    let Some(token) = policy::forge_token(bundle) else {
         return Ok(None);
     };
-    let user = bundle
-        .fields
-        .get("user")
-        .or_else(|| bundle.fields.get("GITEA_USER"))
-        .cloned()
-        .unwrap_or_else(|| "git".into());
+    let user = policy::forge_user(bundle);
     let mut out = String::new();
     out.push_str("protocol=");
     out.push_str(&protocol);
@@ -74,7 +70,7 @@ pub fn fill(request: &str) -> anyhow::Result<Option<String>> {
     out.push_str(&host);
     out.push('\n');
     out.push_str("username=");
-    out.push_str(&user);
+    out.push_str(user);
     out.push('\n');
     out.push_str("password=");
     out.push_str(token);
@@ -83,17 +79,35 @@ pub fn fill(request: &str) -> anyhow::Result<Option<String>> {
 }
 
 fn requested_bundle() -> Option<String> {
-    let mut args = std::env::args().skip_while(|a| a != "git-credential");
-    let _ = args.next();
+    parse_args(helper_args()).0
+}
+
+/// The operation git named: `get`, `store` or `erase`.
+fn git_action() -> Option<String> {
+    parse_args(helper_args()).1
+}
+
+/// `(--bundle, action)`. `--bundle` takes a value, so the action is the first
+/// bare word that is not one.
+fn parse_args(mut args: impl Iterator<Item = String>) -> (Option<String>, Option<String>) {
     let mut want = None;
+    let mut action = None;
     while let Some(a) = args.next() {
         if a == "--bundle" {
             want = args.next();
         } else if let Some(v) = a.strip_prefix("--bundle=") {
             want = Some(v.to_string());
+        } else if !a.starts_with('-') && action.is_none() {
+            action = Some(a);
         }
     }
-    want
+    (want, action)
+}
+
+fn helper_args() -> impl Iterator<Item = String> {
+    std::env::args()
+        .skip_while(|a| a != "git-credential")
+        .skip(1)
 }
 
 fn protocol_field(req: &str, key: &str) -> Option<String> {
