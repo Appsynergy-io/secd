@@ -375,6 +375,9 @@ pending = false
 [tests.T_SESS_BEARER]
 pending = false
 
+[tests.T_SESS_CONSOLE_ONE]
+pending = false
+
 [tests.T_SESS_LIST]
 pending = false
 
