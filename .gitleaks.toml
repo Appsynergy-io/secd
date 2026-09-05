@@ -15,5 +15,6 @@ paths = [
   '''^target/''',
   '''^ui/dist/''',
   '''^ui/node_modules/''',
+  '''^\.claude/worktrees/''',
   '''^\.tmp/''',
 ]
