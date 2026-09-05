@@ -70,7 +70,7 @@ Locked: `secd: locked — run secd`. Gitea header: `Authorization: token …` (n
 
 ## Invariants
 
-- The register shows one row per credential, not one per key: `policy::shapes_of` fuses siblings under a shared parent, `Enter` opens a bundle onto its fields and `Esc` closes it. Naming a provider and recognising a credential are different questions, so `bundles_of` refuses what it cannot name -- `secd run` has to map env vars -- while `shapes_of` groups on `secd_core::candidates`, which `{token, user}` answers with two.
+- The register shows one row per credential, not one per key: `policy::shapes_of` fuses siblings under a shared parent, `Enter` opens a bundle onto its fields and `Esc` closes it. Sibling groups with agreeing `meta.provider` are named; without that, `bundles_of` still refuses what `infer` cannot name -- `secd run` has to map env vars -- and `shapes_of` still groups on `secd_core::candidates`, which `{token, user}` answers with two.
 - `src/tui/model.rs` `KEYS` is the only keymap. The action bar draws what fits and `?` draws all of it, so a key cannot be bound and undocumented.
 - Esc closes one thing at a time -- help, then filter, then the open bundle -- and quits only from the bare register. A refused save keeps its modal and its text: `Input` zeroes on drop, so closing the form destroys what was typed.
 - `secd gen` refuses a name that exists. There is no rollback and no CLI that reaches the server's version rows, so generating over a live credential is an outage with no way back.

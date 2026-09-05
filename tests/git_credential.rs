@@ -170,3 +170,29 @@ fn T_GIT_GITHUB_WRONG_HOST() {
     assert_no_value(&text, "git-github-wrong-host stdout");
     assert_no_value(&utf8(&out.stderr), "git-github-wrong-host stderr");
 }
+
+#[test]
+fn T_GIT_GITHUB_SIBLINGS() {
+    let h = Harness::new_with_meta(&[
+        (
+            "kv/github/token",
+            FIXTURE.as_bytes().to_vec(),
+            github_meta(),
+        ),
+        ("kv/github/user", b"t7user".to_vec(), github_meta()),
+    ]);
+    let out = h.git_credential_action(&request("github.com"), "get");
+    let mut body = out.stdout;
+    let user = username_field(&body).map(<[u8]>::to_vec);
+    let got = match password_field(&body) {
+        Some(p) => sha256(p),
+        None => {
+            body.zeroize();
+            panic!("a github sibling pair with provider meta must serve github.com");
+        }
+    };
+    body.zeroize();
+    assert_eq!(got, sha256(FIXTURE.as_bytes()), "password hash mismatch");
+    assert_eq!(user.as_deref(), Some(&b"t7user"[..]), "username mismatch");
+    assert_no_value(&utf8(&out.stderr), "git-github-siblings stderr");
+}

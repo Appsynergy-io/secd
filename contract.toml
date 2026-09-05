@@ -669,6 +669,9 @@ pending = false
 [tests.T_GIT_GITHUB_WRONG_HOST]
 pending = false
 
+[tests.T_GIT_GITHUB_SIBLINGS]
+pending = false
+
 [tests.T_KEYRING_ROUNDTRIP]
 pending = false
 
