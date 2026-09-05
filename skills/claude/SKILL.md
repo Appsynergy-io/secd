@@ -1,9 +1,7 @@
 ---
 name: secd
 description: >
-  Use a secret without ever seeing its value. Read this file first. Use whenever a task needs a token, password, API key, DSN, certificate or credential — "the command needs an API key", "set up the env for this script", "why is auth failing", "store this secret", or "/secd".
-  Also use on any forge or git auth symptom, before debugging git itself: `git push`/`pull`/`clone` or `git ls-remote` failing, "could not read Username", a 401 or 403 from the forge, or `tea` reporting no login.
-  Also read before writing any script, service file or CI config that references a credential.
+  Use a secret without ever seeing its value. Read this file first. Use whenever a task needs a token, password, API key, DSN, certificate or credential ("the command needs an API key", "set up the env for this script", "store this secret", "/secd"); when `git` or `gh` auth fails (401/403, "could not read Username"); and before writing any script, service file or CI config that references a credential.
 ---
 
 # secd
@@ -32,7 +30,7 @@ re-encodes before printing (`${VAR:0:10}`, base64) passes through unmasked.
 
 ## GitHub
 
-Forge is GitHub. Never put a token in a URL. Never `tea login`.
+Forge is GitHub. Never put a token in a URL.
 
 `git push`/`pull`/`clone` to github.com: a logged-in `gh` is enough. git already
 uses `gh auth git-credential`. Do not add a secd helper on top of it.
@@ -43,9 +41,8 @@ A command that needs `GITHUB_TOKEN`:
 secd run --with github=kv/github -- CMD
 ```
 
-`secd git-credential` answers `get` only, when git is the parent. `secd gitea
---install-git` wires a helper per named forge origin; skip it when `gh` already
-serves github.com.
+`secd git-credential` answers `get` only, when git is the parent, for a forge
+origin the vault serves; `gh` already serves github.com, so it is not wired here.
 
 ## Anything else
 
@@ -57,7 +54,7 @@ serves github.com.
 |---|---|---|
 | `secd` | no — human only | TUI: unlock, read, add, edit |
 | `secd logout` | no | Drop DEK and HTTP session |
-| `secd gitea` | yes | Provider env; `--install-git` wires helpers |
+| `secd gitea` | no | Gitea provider env and helper install; no Gitea remote here |
 | `secd git-credential` | no — git runs it | git credential helper |
 | `secd run` | yes | Run a command with provider env |
 | `secd ls` | yes | List secret names |
