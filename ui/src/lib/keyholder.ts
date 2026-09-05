@@ -131,14 +131,7 @@ function openWorker(): MessagePort | undefined {
     return undefined;
   }
   // Built as its own unhashed entry point by scripts/build-ui.sh.
-  //
-  // extendedLifetime keeps the worker alive across the moment a reload
-  // closes the last port. Without it a single open tab loses the key on
-  // every refresh, because the browser reclaims a worker with no clients.
-  // Chrome 148+ honours it for ~30s; a browser that rejects the unknown
-  // option is tried again without it, still sharing the key across tabs.
-  // Options are pinned on a running worker: a mismatch throws, which is
-  // why the retry exists.
+  // A running worker pins options; retry without extendedLifetime if that throws.
   const named: SharedWorkerInit = { type: "module", name: WORKER_NAME };
   return tryWorker(Ctor, { ...named, extendedLifetime: true }) ?? tryWorker(Ctor, named);
 }
@@ -175,8 +168,10 @@ export function start(): Promise<void> {
           }, HANDSHAKE_MS);
         }),
       ]);
-      if (first?.ok) {
-        adopt(first);
+      if (first?.ok || unlocked) {
+        if (first?.ok) {
+          adopt(first);
+        }
         return;
       }
       abandonWorker();

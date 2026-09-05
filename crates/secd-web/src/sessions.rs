@@ -82,55 +82,78 @@ impl SessionStore {
         self.create(email, SessionKind::Console, "This browser")
     }
 
-    /// One live console session per account.
-    ///
-    /// Unlocking after a refresh was inserting a new "This browser" row
-    /// every time and leaving the previous ones listed. A live cookie for
-    /// this email is reused; a new console session replaces the others.
+    /// One live console session per account: reuse a live cookie for this
+    /// email, otherwise replace the other console rows. Device sessions stay.
     pub fn ensure_console(
         &self,
         email: &str,
         headers: &HeaderMap,
     ) -> anyhow::Result<(String, String)> {
-        if let Some(token) = cookie_token(headers) {
-            if let Some(s) = self.by_token(&token) {
-                if s.kind == SessionKind::Console && s.email == email {
-                    self.refresh_console(&token)?;
-                    self.drop_other_console(email, &s.id)?;
-                    return Ok((s.id, token));
+        let cookie = cookie_token(headers);
+        let out = self.db.with(|conn| {
+            conn.immediate(|| {
+                let now = unix_now();
+                let expires = now.saturating_add(SessionKind::Console.ttl());
+                if let Some(token) = cookie.as_deref() {
+                    let hash = token_hash(token);
+                    let found = {
+                        let sel = conn
+                            .prepare("SELECT id, email, kind FROM sessions WHERE token_hash = ?")?;
+                        sel.bind_text(1, &hash)?;
+                        match sel.step()? {
+                            Step::Done => None,
+                            Step::Row => Some((
+                                sel.text(0).unwrap_or_default(),
+                                sel.text(1).unwrap_or_default(),
+                                sel.text(2).unwrap_or_default(),
+                            )),
+                        }
+                    };
+                    if let Some((id, owner, kind)) = found {
+                        if owner == email && SessionKind::parse(&kind) == Some(SessionKind::Console)
+                        {
+                            {
+                                let upd = conn.prepare(
+                                    "UPDATE sessions SET last_seen = ?, expires = ? \
+                                     WHERE token_hash = ?",
+                                )?;
+                                upd.bind_i64(1, now)?;
+                                upd.bind_i64(2, expires)?;
+                                upd.bind_text(3, &hash)?;
+                                upd.run()?;
+                            }
+                            if conn.changes() > 0 {
+                                drop_other_console_on(conn, email, &id)?;
+                                return Ok((id, token.to_string()));
+                            }
+                        }
+                    }
                 }
-            }
-        }
-        let (id, token) = self.create_console(email)?;
-        self.drop_other_console(email, &id)?;
-        Ok((id, token))
-    }
-
-    fn refresh_console(&self, token: &str) -> anyhow::Result<()> {
-        let hash = token_hash(token);
-        let now = unix_now();
-        let expires = now.saturating_add(SessionKind::Console.ttl());
-        self.db.with(|conn| {
-            let stmt = conn
-                .prepare("UPDATE sessions SET last_seen = ?, expires = ? WHERE token_hash = ?")?;
-            stmt.bind_i64(1, now)?;
-            stmt.bind_i64(2, expires)?;
-            stmt.bind_text(3, &hash)?;
-            stmt.run()
-        })?;
-        Ok(())
-    }
-
-    fn drop_other_console(&self, email: &str, keep_id: &str) -> anyhow::Result<()> {
-        self.db.with(|conn| {
-            let del = conn
-                .prepare("DELETE FROM sessions WHERE email = ? AND kind = 'console' AND id != ?")?;
-            del.bind_text(1, email)?;
-            del.bind_text(2, keep_id)?;
-            del.run()
+                let id = Uuid::new_v4().to_string();
+                let token = random_token();
+                let hash = token_hash(&token);
+                {
+                    let ins = conn.prepare(
+                        "INSERT INTO sessions \
+                         (token_hash, id, email, kind, label, created, last_seen, expires) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    )?;
+                    ins.bind_text(1, &hash)?;
+                    ins.bind_text(2, &id)?;
+                    ins.bind_text(3, email)?;
+                    ins.bind_text(4, SessionKind::Console.as_str())?;
+                    ins.bind_text(5, "This browser")?;
+                    ins.bind_i64(6, now)?;
+                    ins.bind_i64(7, now)?;
+                    ins.bind_i64(8, expires)?;
+                    ins.run()?;
+                }
+                drop_other_console_on(conn, email, &id)?;
+                Ok((id, token))
+            })
         })?;
         self.db.tighten();
-        Ok(())
+        Ok(out)
     }
 
     pub fn create_device(&self, email: &str, hostname: &str) -> anyhow::Result<(String, String)> {
@@ -457,6 +480,14 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
+}
+
+fn drop_other_console_on(conn: &RawConn, email: &str, keep_id: &str) -> anyhow::Result<()> {
+    let del =
+        conn.prepare("DELETE FROM sessions WHERE email = ? AND kind = 'console' AND id != ?")?;
+    del.bind_text(1, email)?;
+    del.bind_text(2, keep_id)?;
+    del.run()
 }
 
 fn unix_now() -> i64 {
