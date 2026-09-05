@@ -231,8 +231,8 @@ pub fn bundles_of(rows: &[Row<'_>]) -> Vec<Bundle> {
             out.push(b);
         }
     }
-    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret)>> = BTreeMap::new();
-    for (name, value, _) in rows {
+    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret, &Value)>> = BTreeMap::new();
+    for (name, value, meta) in rows {
         if used.contains(*name) {
             continue;
         }
@@ -242,18 +242,19 @@ pub fn bundles_of(rows: &[Row<'_>]) -> Vec<Bundle> {
         by_parent
             .entry(parent.to_string())
             .or_default()
-            .push((field, value));
+            .push((field, value, meta));
     }
     for (parent, fields) in by_parent {
+        let meta_p = agreed_provider(&fields);
         let mut map = BTreeMap::new();
         let mut keys = Vec::new();
-        for (k, v) in fields {
+        for (k, v, _) in fields {
             if let Ok(s) = std::str::from_utf8(v.as_bytes()) {
                 map.insert(k.to_string(), s.to_string());
                 keys.push(k);
             }
         }
-        if let Some(provider) = resolve_provider(&keys, None, &map) {
+        if let Some(provider) = resolve_provider(&keys, meta_p, &map) {
             out.push(Bundle {
                 name: parent,
                 provider,
@@ -286,8 +287,9 @@ pub fn bundle_shapes(entries: &[Entry]) -> Vec<BundleShape> {
 
 /// The same walk as `bundles_of`, with one difference: siblings group when
 /// their keys are *a* credential shape, not only when they name one provider.
-/// `secd run` has to name a provider to map env vars, so `bundles_of` refuses
-/// what it cannot name; a list only has to know that six keys are one thing.
+/// Agreeing `meta.provider` names the group for both; without it `bundles_of`
+/// still refuses what `infer` cannot name, and a list only has to know that
+/// six keys are one thing.
 pub fn shapes_of(rows: &[Row<'_>]) -> Vec<BundleShape> {
     let mut out = Vec::new();
     let mut used = HashSet::new();
@@ -301,8 +303,8 @@ pub fn shapes_of(rows: &[Row<'_>]) -> Vec<BundleShape> {
             });
         }
     }
-    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret)>> = BTreeMap::new();
-    for (name, value, _) in rows {
+    let mut by_parent: BTreeMap<String, Vec<(&str, &Secret, &Value)>> = BTreeMap::new();
+    for (name, value, meta) in rows {
         if used.contains(*name) {
             continue;
         }
@@ -312,12 +314,13 @@ pub fn shapes_of(rows: &[Row<'_>]) -> Vec<BundleShape> {
         by_parent
             .entry(parent.to_string())
             .or_default()
-            .push((field, value));
+            .push((field, value, meta));
     }
     for (parent, fields) in by_parent {
+        let meta_p = agreed_provider(&fields);
         let mut map = BTreeMap::new();
         let mut keys = Vec::new();
-        for (k, v) in fields {
+        for (k, v, _) in fields {
             if let Ok(s) = std::str::from_utf8(v.as_bytes()) {
                 map.insert(k.to_string(), s.to_string());
                 keys.push(k);
@@ -327,7 +330,7 @@ pub fn shapes_of(rows: &[Row<'_>]) -> Vec<BundleShape> {
         if keys.len() < 2 {
             continue;
         }
-        let provider = resolve_provider(&keys, None, &map);
+        let provider = resolve_provider(&keys, meta_p, &map);
         if provider.is_none() && secd_core::candidates(&keys).is_empty() {
             continue;
         }
@@ -861,6 +864,23 @@ fn json_bundle(name: &str, value: &Secret, meta: &Value) -> Option<Bundle> {
         provider,
         fields,
     })
+}
+
+/// The `meta.provider` every sibling that has one agrees on. Missing is not a
+/// conflict; two different strings are, and then the infer path runs as today.
+fn agreed_provider<'a>(siblings: &[(&str, &Secret, &'a Value)]) -> Option<&'a str> {
+    let mut agreed: Option<&str> = None;
+    for (_, _, meta) in siblings {
+        let Some(p) = meta.get("provider").and_then(Value::as_str) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(p),
+            Some(a) if a == p => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
 
 fn resolve_provider(
