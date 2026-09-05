@@ -381,8 +381,9 @@ jobs:
       # cannot change the released bytes never reaches the build matrix.
       # Errs wide on purpose: a false positive costs one build, a false
       # negative ships nothing and says so nowhere. .github/ is in because a
-      # build flag lives there. Out: *.md, tests/, contract.toml, skills/ --
-      # none of them reach a released byte.
+      # build flag lives there. skills/ is in because SKILL.md is
+      # include_bytes!'d into the CLI. Out: tests/, contract.toml, and
+      # prose that is not the skill.
       - name: does this merge change what ships
         id: ships
         run: |
@@ -393,7 +394,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "$base" HEAD \
-            | grep -qE '^(src/|crates/|tools/|scripts/|deploy/|packaging/|keys/|ui/|\.github/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'; then
+            | grep -qE '^(src/|crates/|tools/|scripts/|deploy/|packaging/|keys/|ui/|skills/|\.github/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)'; then
             echo "ships=true" >>"$GITHUB_OUTPUT"
           else
             echo "ships=false" >>"$GITHUB_OUTPUT"
