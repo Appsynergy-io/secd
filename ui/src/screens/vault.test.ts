@@ -562,10 +562,20 @@ describe("vault helpers", () => {
     };
     const plain = JSON.stringify({ account_id: ACCOUNT, api_token: TOKEN });
     expect(openEntry(plain, entry).fields).toEqual({ account_id: ACCOUNT, api_token: TOKEN });
-    // A blob the holder could not open, and one that opened to something that
-    // is not an object, both fail closed rather than showing a partial entry.
+    // A blob the holder could not open, and a multi-field blob that is not an
+    // object, both fail closed rather than showing a partial entry.
     expect(openEntry(null, entry).error).toBe(OPEN_FAIL_SENTENCE);
     expect(openEntry("not json", entry).error).toBe(OPEN_FAIL_SENTENCE);
+    const sibling: VaultEntry = {
+      name: "kv/github/token",
+      ciphertext: "",
+      meta: {},
+      provider: "github",
+      fieldKeys: ["token"],
+      version: 1,
+      updated: "",
+    };
+    expect(openEntry("ghp_fixture", sibling)).toEqual({ fields: { token: "ghp_fixture" } });
   });
 });
 

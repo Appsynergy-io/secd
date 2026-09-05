@@ -215,6 +215,60 @@ fn T_SESS_BEARER() {
 }
 
 #[test]
+fn T_SESS_CONSOLE_ONE() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h, "op@secd.test").await;
+        let _ = approve_device(&h, &cookie).await;
+        let (s, hdrs, _) = post_json(
+            &h.app,
+            "/api/auth/password/login",
+            &json!({"email": "op@secd.test", "password": PW}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let reused = cookie_token(&hdrs).expect("cookie");
+        assert_eq!(
+            reused, cookie,
+            "a live cookie must not mint a second console"
+        );
+        let (_, v) = get_json(&h.app, "/api/v1/sessions", Some(&cookie), None).await;
+        let consoles: Vec<_> = v["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .filter(|r| r["kind"] == "console")
+            .collect();
+        assert_eq!(consoles.len(), 1, "unlock piled another This browser row");
+
+        let (s, hdrs, _) = post_json(
+            &h.app,
+            "/api/auth/password/login",
+            &json!({"email": "op@secd.test", "password": PW}),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let fresh_cookie = cookie_token(&hdrs).expect("new cookie");
+        let (s, _) = get_json(&h.app, "/api/session", Some(&cookie), None).await;
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "the replaced console cookie stayed live"
+        );
+        let (_, v) = get_json(&h.app, "/api/v1/sessions", Some(&fresh_cookie), None).await;
+        let rows = v["sessions"].as_array().expect("sessions");
+        let consoles: Vec<_> = rows.iter().filter(|r| r["kind"] == "console").collect();
+        let devices: Vec<_> = rows.iter().filter(|r| r["kind"] == "device").collect();
+        assert_eq!(consoles.len(), 1, "old console rows must go");
+        assert_eq!(devices.len(), 1, "device sessions must survive");
+    });
+}
+
+#[test]
 fn T_SESS_LIST() {
     block_on(async {
         let h = fresh();
