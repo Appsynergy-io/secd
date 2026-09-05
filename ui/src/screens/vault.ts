@@ -351,7 +351,7 @@ export function preimage(data: unknown): PutRow[] | undefined {
 }
 
 /** Shape one entry from the plaintext the holder returned. `null` is a blob
- *  that would not open, which fails closed rather than hiding the vault. */
+ *  that would not open. A sibling stores a raw string: one field, not JSON. */
 export function openEntry(plaintext: string | null, entry: VaultEntry): Opened {
   if (plaintext === null) {
     return { fields: {}, error: OPEN_FAIL_SENTENCE };
@@ -361,19 +361,24 @@ export function openEntry(plaintext: string | null, entry: VaultEntry): Opened {
   try {
     parsed = JSON.parse(text) as unknown;
   } catch {
-    return { fields: {}, error: OPEN_FAIL_SENTENCE };
+    parsed = undefined;
   }
-  const fields: Record<string, string> = {};
-  const rec = record(parsed);
+  const rec = parsed === undefined ? undefined : record(parsed);
   if (rec) {
+    const fields: Record<string, string> = {};
     for (const key of entry.fieldKeys) {
       const v = rec[key];
       if (typeof v === "string") {
         fields[key] = v;
       }
     }
+    return { fields };
   }
-  return { fields };
+  const key = entry.fieldKeys[0];
+  if (key !== undefined && entry.fieldKeys.length === 1) {
+    return { fields: { [key]: text } };
+  }
+  return { fields: {}, error: OPEN_FAIL_SENTENCE };
 }
 
 /* Store */

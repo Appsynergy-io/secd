@@ -1,4 +1,4 @@
-/** Access: passkeys, browser sessions, the password factor, and the key this tab holds. */
+/** Access: passkeys, browser sessions, the password factor, and the key this browser holds. */
 
 import {
   FAIL_SENTENCE,
@@ -40,10 +40,10 @@ export const PASSKEY_NOTE_LAST =
 export const PASSWORD_SUB =
   "A second factor for the vault key. Set or change it here.";
 export const PASSWORD_LENGTH_SENTENCE = "Use 12 to 256 characters.";
-export const KEY_TITLE = "Vault key in this tab";
+export const KEY_TITLE = "Vault key in this browser";
 export const KEY_BODY =
-  "Held in memory only, dropped after 12 hours or on sign-out. Nothing on disk in this browser holds it, and the server has never seen it.";
-export const NO_KEY_LABEL = "no vault key in this tab";
+  "Held in memory only, dropped after 12 hours or on sign-out. Shared across this origin's tabs. Nothing on disk holds it, and the server has never seen it.";
+export const NO_KEY_LABEL = "no vault key in this browser";
 export const PASSKEY_ADDED_TOAST = "Passkey added";
 export const PASSWORD_SET_TOAST = "Password set";
 export const SIGNED_OUT_TOAST = "This browser signed out";
