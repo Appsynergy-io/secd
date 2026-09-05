@@ -17,8 +17,8 @@ session. Locked: tell the human to run `secd`. Message: `secd: locked — run se
 
 ## Rules
 
-1. **Run a command that needs a secret through `secd run` or `secd gitea`.** The
-   child gets plaintext; you get redacted output.
+1. **Run a command that needs a secret through `secd run`.** The child gets
+   plaintext; you get redacted output.
 2. **Write references, never values.** A provider name and a bundle name in a
    script, a unit file or CI config are safe to write and to commit.
 3. **Never `cat`, `grep`, `head` or otherwise open a file that holds
@@ -30,23 +30,22 @@ session. Locked: tell the human to run `secd`. Message: `secd: locked — run se
 Redaction is a net, not a wall: it masks whole values, and a value a command
 re-encodes before printing (`${VAR:0:10}`, base64) passes through unmasked.
 
-## Git and the forges
+## GitHub
 
-Use `secd gitea -- CMD`. Never `tea login`. Never put a token in a URL.
+Forge is GitHub. Never put a token in a URL. Never `tea login`.
+
+`git push`/`pull`/`clone` to github.com: a logged-in `gh` is enough. git already
+uses `gh auth git-credential`. Do not add a secd helper on top of it.
+
+A command that needs `GITHUB_TOKEN`:
 
 ```
-secd gitea -- git push origin HEAD
-secd gitea -- git pull
-secd gitea -- curl -sS -H "Authorization: token $GITEA_TOKEN" "$GITEA_URL/api/v1/user"
-secd gitea --install-git
+secd run --with github=kv/github -- CMD
 ```
 
-Header is `Authorization: token …`, never Bearer.
-0 bundles: exit 2, `no gitea credential — add one in secd`.
-2+ bundles: exit 2, names only, `secd gitea --bundle <name> -- …`.
-`secd git-credential` answers `get` only, when the parent is `git` and a bundle
-serves the host git asked for. `secd gitea --install-git` wires every forge the
-vault holds — gitea, github, gitlab — so a plain `git push` authenticates.
+`secd git-credential` answers `get` only, when git is the parent. `secd gitea
+--install-git` wires a helper per named forge origin; skip it when `gh` already
+serves github.com.
 
 ## Anything else
 
@@ -58,7 +57,7 @@ vault holds — gitea, github, gitlab — so a plain `git push` authenticates.
 |---|---|---|
 | `secd` | no — human only | TUI: unlock, read, add, edit |
 | `secd logout` | no | Drop DEK and HTTP session |
-| `secd gitea` | yes | Run a command with the gitea bundle |
+| `secd gitea` | yes | Provider env; `--install-git` wires helpers |
 | `secd git-credential` | no — git runs it | git credential helper |
 | `secd run` | yes | Run a command with provider env |
 | `secd ls` | yes | List secret names |
