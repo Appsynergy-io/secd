@@ -794,10 +794,16 @@ pub fn write_0600(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn field_get<'a>(bundle: &'a Bundle, key: &str, env: &str) -> Option<&'a str> {
+    // A provider names its fields with underscores (`role_id`), but a store may hold them under
+    // the spelling the upstream itself uses: Vault's AppRole API is `role-id`/`secret-id`. Match
+    // the exact key, then the env name, then the key with the two separators swapped, so a bundle
+    // grouped from `local/vault/role-id` still feeds `VAULT_ROLE_ID`.
     bundle
         .fields
         .get(key)
         .or_else(|| bundle.fields.get(env))
+        .or_else(|| bundle.fields.get(&key.replace('_', "-")))
+        .or_else(|| bundle.fields.get(&key.replace('-', "_")))
         .map(String::as_str)
 }
 
