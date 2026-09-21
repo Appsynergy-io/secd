@@ -24,7 +24,7 @@ hex = "=0.4.3"
 libsqlite3-sys = { version = "=0.38.2", features = ["bundled"] }
 openssl = { version = "=0.10.81", features = ["vendored"] }
 rand = "=0.8.6"
-rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws-lc-rs"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws-lc-rs"] }
 rustls-pemfile = "=2.2.0"
 secd-core = { path = "../secd-core" }
 serde = { version = "=1.0.229", features = ["derive"] }
