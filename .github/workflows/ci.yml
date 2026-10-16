@@ -542,7 +542,7 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             image: "yes"
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
             image: "no"
     runs-on: ${{ matrix.os }}

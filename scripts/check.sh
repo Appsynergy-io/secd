@@ -29,7 +29,7 @@ export SECD_ROOT SECD_TOOL_TAG
 # shellcheck source=scripts/tools.sh
 . "$root/scripts/tools.sh"
 
-ACTIONLINT_PINNED="1.7.7"
+ACTIONLINT_PINNED="1.7.12"
 ZIZMOR_PINNED="1.29.0"
 GITLEAKS_PINNED="8.30.1"
 
@@ -64,18 +64,20 @@ lane_shell() {
 }
 
 ensure_actionlint() {
-  if command -v actionlint >/dev/null 2>&1; then
+  # By version, not presence: a cached older actionlint does not know the
+  # newer runner labels and refuses a workflow the pinned one accepts.
+  if [ "$(actionlint -version 2>/dev/null | head -n1)" = "$ACTIONLINT_PINNED" ]; then
     return 0
   fi
   local asset sha
   case "$(uname -s):$(uname -m)" in
     Linux:x86_64)
       asset="actionlint_${ACTIONLINT_PINNED}_linux_amd64"
-      sha="023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+      sha="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
       ;;
     Darwin:arm64 | Darwin:aarch64)
       asset="actionlint_${ACTIONLINT_PINNED}_darwin_arm64"
-      sha="2693315b9093aeacb4ebd91a993fea54fc215057bf0da2659056b4bc033873db"
+      sha="aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f"
       ;;
     *) return 1 ;;
   esac
