@@ -73,6 +73,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,6 +88,44 @@ accept = (
     "application/vnd.docker.distribution.manifest.v2+json"
 )
 digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+pat = os.environ.get("GHCR_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+# GHCR's front ends drop connections from this LAN in bursts. urlopen without a
+# timeout waits out the kernel's SYN retries -- two minutes per request -- and a
+# dropped connection is not an answer about the image. Retry those; an HTTP
+# status is an answer, and is reported as the one it is.
+TIMEOUT = 20
+ATTEMPTS = 5
+
+
+def fetch(req):
+    last = ""
+    for attempt in range(ATTEMPTS):
+        try:
+            return urllib.request.urlopen(req, timeout=TIMEOUT)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500:
+                raise
+            last = f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            last = str(getattr(e, "reason", e))
+        if attempt + 1 < ATTEMPTS:
+            time.sleep(2 * (attempt + 1))
+    raise SystemExit(f"k3s-apply: {host} unreachable after {ATTEMPTS} attempts: {last}")
+
+
+def refused(code, what):
+    # A 401/403 is a credential problem, never a missing tag. Saying "no tag"
+    # here once hid two expired tokens for weeks.
+    if pat:
+        return SystemExit(
+            f"k3s-apply: {host} refused {what} (HTTP {code}) with the token in GHCR_TOKEN: "
+            "it is expired, revoked or lacks read:packages. secd-web is public; "
+            "remove the token rather than renewing it"
+        )
+    return SystemExit(
+        f"k3s-apply: {host} refused anonymous {what} (HTTP {code}): {name} is not public"
+    )
 
 
 def parse_challenge(www):
@@ -112,7 +151,6 @@ def fetch_bearer(www):
     q = urllib.parse.urlencode({"service": service, "scope": scope})
     tok_url = realm + ("&" if "?" in realm else "?") + q
     req = urllib.request.Request(tok_url, method="GET")
-    pat = os.environ.get("GHCR_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if pat:
         user = os.environ.get("GITHUB_USER") or os.environ.get("GITHUB_ACTOR") or "x-access-token"
         req.add_header(
@@ -120,11 +158,11 @@ def fetch_bearer(www):
             "Basic " + base64.b64encode(f"{user}:{pat}".encode()).decode(),
         )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with fetch(req) as resp:
             body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        if e.code in (403, 404):
-            raise SystemExit(f"k3s-apply: GHCR has no tag {tag}") from None
+        if e.code in (401, 403):
+            raise refused(e.code, "a pull token") from None
         raise SystemExit(f"k3s-apply: registry token -> HTTP {e.code}") from None
     got = body.get("token") or body.get("access_token")
     if not got:
@@ -142,13 +180,15 @@ def do(method, dest, retry_auth=True):
         headers["Authorization"] = "Bearer " + bearer
     req = urllib.request.Request(dest, method=method, headers=headers)
     try:
-        return urllib.request.urlopen(req)
+        return fetch(req)
     except urllib.error.HTTPError as e:
         if e.code == 401 and retry_auth and not bearer:
             bearer = fetch_bearer(e.headers.get("WWW-Authenticate", ""))
             return do(method, dest, retry_auth=False)
-        if e.code in (403, 404):
-            raise SystemExit(f"k3s-apply: GHCR has no tag {tag}") from None
+        if e.code in (401, 403):
+            raise refused(e.code, f"{name}:{tag}") from None
+        if e.code == 404:
+            raise SystemExit(f"k3s-apply: {host} has no tag {tag}") from None
         raise SystemExit(
             f"k3s-apply: registry {method} {urllib.parse.urlparse(dest).path} -> HTTP {e.code}"
         ) from None
@@ -159,8 +199,8 @@ try:
         digest = (resp.headers.get("Docker-Content-Digest") or "").strip()
 except SystemExit:
     raise
-except Exception:
-    raise SystemExit("k3s-apply: registry lookup failed") from None
+except Exception as e:
+    raise SystemExit(f"k3s-apply: registry lookup failed: {type(e).__name__}: {e}") from None
 
 if not digest_re.fullmatch(digest):
     raise SystemExit("k3s-apply: missing or invalid Docker-Content-Digest")
@@ -220,8 +260,19 @@ fi
 # cosign that cannot parse the signature both read as "is not signed", which
 # is the most alarming thing this script can say and was wrong both times.
 cosign_err="$(mktemp)"
-if ! cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
-  "${img_host}/${img_name}@${digest}" >/dev/null 2>"$cosign_err"; then
+# cosign reads the signature from the same registry the lookup above retries
+# against. A refusal is the same refusal three times; a dropped connection is
+# not one, so give it the same chances.
+verified=0
+for attempt in 1 2 3; do
+  if cosign verify --key "$root/keys/cosign.pub" --insecure-ignore-tlog \
+    "${img_host}/${img_name}@${digest}" >/dev/null 2>"$cosign_err"; then
+    verified=1
+    break
+  fi
+  [[ "$attempt" -lt 3 ]] && sleep $((attempt * 5))
+done
+if [[ "$verified" -ne 1 ]]; then
   echo "k3s-apply: cosign verify refused ${digest}:" >&2
   grep -v '^WARNING' "$cosign_err" | head -5 >&2
   rm -f "$cosign_err"
@@ -278,11 +329,36 @@ if kn != 1:
 kus.write_text(knew, encoding="utf-8")
 PY
 
+# What runs now is the rollback target; it stays pinned beside the new image.
+previous="$("${kc[@]}" -n secd get deploy/secd-web \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+
 "${kc[@]}" apply -k "$tmp"
 # Without a timeout a bad image blocks here forever.
 if ! "${kc[@]}" -n secd rollout status deploy/secd-web --timeout=180s; then
   echo "k3s-apply: rollout failed; rolling back" >&2
   "${kc[@]}" -n secd rollout undo deploy/secd-web || true
   exit 1
+fi
+
+# Pin the image in containerd so image GC never evicts it. Unpinned, a pod
+# restart after GC has to pull from GHCR again -- and a restart while GHCR was
+# unreachable kept secd down with nothing wrong on the host. kubelet honours
+# io.cri-containerd.pinned; an empty value removes the label. Only a host
+# running k3s has the containerd this pod uses: a remote kubectl cannot pin.
+if command -v k3s >/dev/null 2>&1 && [[ -z "${KUBECTL:-}" ]]; then
+  ctr=(k3s ctr -n k8s.io)
+  ref="${img_host}/${img_name}@${digest}"
+  if ! "${ctr[@]}" images label "$ref" io.cri-containerd.pinned=pinned >/dev/null; then
+    echo "k3s-apply: rolled out ${digest} but could not pin ${ref} in containerd" >&2
+    exit 1
+  fi
+  while IFS= read -r other; do
+    [[ "$other" == "$ref" || "$other" == "$previous" ]] && continue
+    "${ctr[@]}" images label "$other" io.cri-containerd.pinned= >/dev/null || true
+  done < <("${ctr[@]}" images ls -q | grep -F "${img_host}/${img_name}@" || true)
+  echo "k3s-apply: pinned ${ref}" >&2
+else
+  echo "k3s-apply: not on the k3s host; ${digest} is not pinned against image GC" >&2
 fi
 echo "$digest"
