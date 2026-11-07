@@ -182,6 +182,22 @@ fn T_DEPLOY_DIGEST_BINDING() {
         apply.contains("rollout undo"),
         "k3s-apply.sh no longer rolls back a failed rollout"
     );
+    // A restart after image GC pulls from GHCR again; when GHCR was unreachable
+    // that kept secd down with nothing wrong on the host.
+    assert!(
+        apply.contains("io.cri-containerd.pinned=pinned"),
+        "k3s-apply.sh no longer pins the applied image against image GC"
+    );
+    // "no tag" once reported two expired tokens for weeks. 401/403 is a
+    // credential answer; only a 404 means the tag is missing.
+    assert!(
+        !apply.contains("if e.code in (403, 404)"),
+        "k3s-apply.sh reports a refused credential as a missing tag again"
+    );
+    assert!(
+        apply.contains("timeout=TIMEOUT"),
+        "k3s-apply.sh registry requests have no timeout; a dropped SYN waits minutes"
+    );
 
     let ci = fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("ci.yml");
     assert!(

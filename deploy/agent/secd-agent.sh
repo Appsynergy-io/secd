@@ -38,6 +38,9 @@ NAMESPACE="${SECD_NAMESPACE:-secd}"
 DEPLOYMENT="${SECD_DEPLOYMENT:-secd-web}"
 
 command -v curl >/dev/null 2>&1 || secd_die "curl is required"
+# github.com drops connections from this LAN in bursts; one lost SYN used to
+# cost a whole timer tick. A bounded retry, never an unbounded wait.
+curl_retry=(--connect-timeout 15 --max-time 60 --retry 4 --retry-all-errors --retry-delay 3)
 
 if [[ -n "${KUBECTL:-}" ]]; then
   kc=("$KUBECTL")
@@ -51,7 +54,7 @@ fi
 
 # What the release says should be running. Same unauthenticated
 # releases/latest/download path packaging/install.sh already depends on.
-want="$(curl -fsSL --proto '=https' "$DIGEST_URL" 2>/dev/null | tr -d '[:space:]')" \
+want="$(curl "${curl_retry[@]}" -fsSL --proto '=https' "$DIGEST_URL" 2>/dev/null | tr -d '[:space:]')" \
   || secd_die "could not fetch ${DIGEST_URL}"
 [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] \
   || secd_die "released digest is not a sha256 reference: ${want:-<empty>}"
@@ -78,7 +81,7 @@ fi
 # from the tag history rather than from a committed file, so this checkout's
 # Cargo.toml is a floor and names an older image -- k3s-apply.sh must be told
 # the released tag, not left to read one that no longer matches.
-loc="$(curl -fsSIL --proto '=https' "https://github.com/${REPO}/releases/latest" \
+loc="$(curl "${curl_retry[@]}" -fsSIL --proto '=https' "https://github.com/${REPO}/releases/latest" \
   | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | tail -n 1)"
 ver="${loc##*/v}"
 [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
