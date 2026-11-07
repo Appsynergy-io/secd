@@ -35,6 +35,12 @@ const ROUTES: &[&str] = &[
     "PUT /api/v1/providers",
     "DELETE /api/v1/providers/:name",
     "GET /api/v1/audit",
+    "GET /api/oidc/authorize",
+    "GET /.well-known/openid-configuration",
+    "GET /.well-known/jwks.json",
+    "GET /api/auth/oidc",
+    "GET /api/auth/oidc/start",
+    "GET /api/auth/oidc/callback",
 ];
 
 const PROVIDERS: &[&str] = &[

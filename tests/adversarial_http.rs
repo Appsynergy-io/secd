@@ -306,7 +306,7 @@ fn T_ADV_HOST_HEADER() {
         let (s, _, start) = post_json(
             &h.app,
             "/api/v1/device/start",
-            &json!({"eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
+            &json!({"client_id":"secd-cli", "scope":"openid email", "eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
             &extra,
         )
         .await;
@@ -380,6 +380,7 @@ fn T_ADV_SSRF_URI() {
             &h.app,
             "/api/v1/device/start",
             &json!({
+                "client_id":"secd-cli", "scope":"openid email",
                 "eph_pub": EPH,
                 "device_id": "dev-1",
                 "hostname": "testhost",
@@ -397,6 +398,7 @@ fn T_ADV_SSRF_URI() {
             &h.app,
             "/api/v1/device/start",
             &json!({
+                "client_id":"secd-cli", "scope":"openid email",
                 "eph_pub": EPH,
                 "device_id": "dev-2",
                 "hostname": "https://evil.test/",

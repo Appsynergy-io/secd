@@ -32,6 +32,41 @@ pub struct VersionRow {
     pub meta: Value,
 }
 
+/// Why a whole-vault replace did not happen.
+#[derive(Debug)]
+pub enum ReplaceError {
+    /// The vault no longer hashes to the base the writer loaded.
+    Conflict,
+    Store(anyhow::Error),
+}
+
+/// The vault's revision: sha256 over every row's stored name, ciphertext and
+/// meta, in name order, each length-prefixed. Any write that changes a byte
+/// changes it, so a writer that names the revision it loaded names the exact
+/// vault its body was built from.
+pub(crate) struct Revision(Vec<u8>);
+
+impl Revision {
+    pub(crate) fn new() -> Self {
+        Self(b"secd-vault-revision-v1".to_vec())
+    }
+
+    pub(crate) fn row(&mut self, name: &str, ciphertext: &str, meta: &str) {
+        for part in [name, ciphertext, meta] {
+            self.0.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            self.0.extend_from_slice(part.as_bytes());
+        }
+    }
+
+    pub(crate) fn finish(self) -> String {
+        hex::encode(crate::audit::sha256(&self.0))
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[derive(Clone)]
 pub struct VaultStore {
     db: Db,
@@ -53,6 +88,12 @@ impl VaultStore {
     }
 
     pub fn entries(&self) -> anyhow::Result<Vec<VaultEntry>> {
+        Ok(self.snapshot()?.0)
+    }
+
+    /// Every entry, and the revision those exact rows hash to. One read on one
+    /// connection, so the revision is the revision of the entries returned.
+    pub fn snapshot(&self) -> anyhow::Result<(Vec<VaultEntry>, String)> {
         self.db.with(|conn| {
             let stmt = conn.prepare(
                 "SELECT e.name, e.ciphertext, e.meta, \
@@ -62,6 +103,7 @@ impl VaultStore {
                  FROM entries e ORDER BY e.name",
             )?;
             let mut out = Vec::new();
+            let mut rev = Revision::new();
             loop {
                 match stmt.step()? {
                     Step::Done => break,
@@ -69,6 +111,7 @@ impl VaultStore {
                         let name = stmt.text(0).unwrap_or_default();
                         let ct_raw = stmt.text(1).unwrap_or_else(|| "null".into());
                         let meta_raw = stmt.text(2).unwrap_or_else(|| "{}".into());
+                        rev.row(&name, &ct_raw, &meta_raw);
                         let version = stmt
                             .text(3)
                             .and_then(|s| s.parse::<i64>().ok())
@@ -86,36 +129,47 @@ impl VaultStore {
                     }
                 }
             }
-            Ok(out)
+            Ok((out, rev.finish()))
         })
     }
 
+    /// Replace the whole vault, but only if it still hashes to `base`: the
+    /// check and the write share one `BEGIN IMMEDIATE`, so no other writer can
+    /// land between them. Returns the revision written.
     pub fn replace_entries(
         &self,
+        base: &str,
         entries: &[VaultEntry],
         audit: &AuditLog,
         session_id: Option<&str>,
         names: &[&str],
-    ) -> anyhow::Result<()> {
+    ) -> Result<String, ReplaceError> {
         let created = crate::auth::now_rfc3339();
-        let event = self.db.with(|conn| {
+        let outcome = self.db.with(|conn| {
             conn.immediate(|| {
                 {
                     // Names whose ciphertext changes (or appears) in this snapshot
                     // get a new version row; unchanged names keep their history.
                     let mut before: std::collections::HashMap<String, String> =
                         std::collections::HashMap::new();
-                    let sel = conn.prepare("SELECT name, ciphertext FROM entries")?;
+                    let sel =
+                        conn.prepare("SELECT name, ciphertext, meta FROM entries ORDER BY name")?;
+                    let mut current = Revision::new();
                     loop {
                         match sel.step()? {
                             Step::Done => break,
                             Step::Row => {
-                                before.insert(
-                                    sel.text(0).unwrap_or_default(),
-                                    sel.text(1).unwrap_or_default(),
-                                );
+                                let name = sel.text(0).unwrap_or_default();
+                                let ct = sel.text(1).unwrap_or_else(|| "null".into());
+                                let meta = sel.text(2).unwrap_or_else(|| "{}".into());
+                                current.row(&name, &ct, &meta);
+                                before.insert(name, ct);
                             }
                         }
+                    }
+                    drop(sel);
+                    if !constant_time_eq(current.finish().as_bytes(), base.as_bytes()) {
+                        return Ok(None);
                     }
                     conn.exec("DELETE FROM entries")?;
                     let stmt = conn
@@ -149,13 +203,32 @@ impl VaultStore {
                         }
                     }
                 }
-                crate::audit::append_on(conn, "vault.put", session_id, names)
+                let event = crate::audit::append_on(conn, "vault.put", session_id, names)?;
+                let mut written: Vec<(&str, String, String)> = entries
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.name.as_str(),
+                            e.ciphertext.to_string(),
+                            e.meta.to_string(),
+                        )
+                    })
+                    .collect();
+                written.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                let mut rev = Revision::new();
+                for (name, ct, meta) in &written {
+                    rev.row(name, ct, meta);
+                }
+                Ok(Some((event, rev.finish())))
             })
-        })?;
+        });
+        let Some((event, revision)) = outcome.map_err(ReplaceError::Store)? else {
+            return Err(ReplaceError::Conflict);
+        };
         self.db.tighten();
         self.sync_wraps();
         audit.journal(&event);
-        Ok(())
+        Ok(revision)
     }
 
     pub fn versions_of(&self, name: &str) -> anyhow::Result<Vec<VersionRow>> {
@@ -467,8 +540,8 @@ async fn get_vault(State(state): State<AppState>, headers: HeaderMap) -> Respons
         return fail_auth();
     }
     state.vault.sync_wraps();
-    match state.vault.entries() {
-        Ok(rows) => {
+    match state.vault.snapshot() {
+        Ok((rows, revision)) => {
             let entries: Vec<Value> = rows
                 .iter()
                 .map(|e| {
@@ -481,7 +554,10 @@ async fn get_vault(State(state): State<AppState>, headers: HeaderMap) -> Respons
                     })
                 })
                 .collect();
-            json_value(StatusCode::OK, json!({ "entries": entries }))
+            json_value(
+                StatusCode::OK,
+                json!({ "entries": entries, "revision": revision }),
+            )
         }
         Err(_) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
     }
@@ -501,7 +577,7 @@ async fn put_vault(
     let Some(obj) = body.as_object() else {
         return json_status(StatusCode::BAD_REQUEST, "body");
     };
-    if obj.keys().any(|k| k != "entries") {
+    if obj.keys().any(|k| k != "entries" && k != "base") {
         return json_status(StatusCode::BAD_REQUEST, "plaintext");
     }
     let Some(arr) = obj.get("entries").and_then(Value::as_array) else {
@@ -547,15 +623,27 @@ async fn put_vault(
             updated: None,
         });
     }
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    if state
-        .vault
-        .replace_entries(&entries, &state.audit, Some(&session.id), &name_refs)
-        .is_err()
-    {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
+    // A whole-vault replace without the revision it was built from would
+    // silently undo every write that landed since: there is no unversioned
+    // fallback.
+    let base = match obj.get("base") {
+        None => return json_status(StatusCode::PRECONDITION_REQUIRED, "base"),
+        Some(Value::String(b)) if b.len() == 64 && b.bytes().all(|c| c.is_ascii_hexdigit()) => b,
+        Some(_) => return json_status(StatusCode::BAD_REQUEST, "base"),
+    };
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    if !names.iter().all(|n| seen.insert(n.as_str())) {
+        return json_status(StatusCode::BAD_REQUEST, "name");
     }
-    json_value(StatusCode::OK, json!({ "ok": true }))
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    match state
+        .vault
+        .replace_entries(base, &entries, &state.audit, Some(&session.id), &name_refs)
+    {
+        Ok(revision) => json_value(StatusCode::OK, json!({ "ok": true, "revision": revision })),
+        Err(ReplaceError::Conflict) => json_status(StatusCode::CONFLICT, "conflict"),
+        Err(ReplaceError::Store(_)) => json_status(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+    }
 }
 
 async fn get_versions(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -680,10 +768,14 @@ mod tests {
             .expect("console");
 
         for ct in ["aa", "bb"] {
+            let base = state.vault.snapshot().expect("snapshot").1;
             let res = block_on(put_vault(
                 State(state.clone()),
                 bearer(&token),
-                Json(json!({"entries": [{"name": "kv/a", "ciphertext": ct, "meta": {}}]})),
+                Json(json!({
+                    "entries": [{"name": "kv/a", "ciphertext": ct, "meta": {}}],
+                    "base": base,
+                })),
             ));
             assert_eq!(res.status(), StatusCode::OK);
         }

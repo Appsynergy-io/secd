@@ -17,6 +17,7 @@ import { signal } from "../lib/signal.ts";
 import { stamp } from "../lib/time.ts";
 import {
   BAD_NAME_SENTENCE,
+  CONFLICT_SENTENCE,
   CLIP_MISSING_SENTENCE,
   CLIP_TTL_MS,
   COMMAND_COPIED_TOAST,
@@ -125,6 +126,8 @@ type Api = {
   versions: unknown;
   providers: unknown;
   nextVault: { status: number; data: unknown } | undefined;
+  /** The server's revision: every GET names it, every PUT must build on it. */
+  revision: string;
 };
 
 function json(status: number, data: unknown): Response {
@@ -191,6 +194,7 @@ function mockApi(vault: { entries: unknown[] }, extra: Partial<Api> = {}): Api {
     },
     providers: { providers: SCHEMAS },
     nextVault: undefined,
+    revision: "0".repeat(64),
     ...extra,
   };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -212,20 +216,24 @@ function mockApi(vault: { entries: unknown[] }, extra: Partial<Api> = {}): Api {
         api.nextVault = undefined;
         return json(queued.status, queued.data);
       }
-      return json(api.vaultStatus, api.vault);
+      return json(api.vaultStatus, { ...api.vault, revision: api.revision });
     }
     if (method === "GET" && url === "/api/v1/vault/versions") {
       return json(api.versionsStatus, api.versions);
     }
     if (method === "PUT" && url === "/api/v1/vault") {
       api.puts.push(body);
+      if (api.putStatus === 200 && (body as { base?: unknown } | undefined)?.base !== api.revision) {
+        return json(409, { error: "conflict" });
+      }
       if (api.putStatus === 200 && body !== undefined && typeof body === "object" && body !== null) {
         const entries = (body as { entries?: unknown }).entries;
         if (Array.isArray(entries)) {
           api.vault = { entries };
+          api.revision = (Number.parseInt(api.revision.slice(-8), 16) + 1).toString(16).padStart(64, "0");
         }
       }
-      return json(api.putStatus, { ok: true });
+      return json(api.putStatus, { ok: true, revision: api.revision });
     }
     if (method === "POST" && url === "/api/v1/vault/rollback") {
       api.posts.push(body);
@@ -452,7 +460,7 @@ describe("vault helpers", () => {
       ),
     ).toBe(`CLOUDFLARE_ACCOUNT_ID=${ACCOUNT}\nCLOUDFLARE_API_TOKEN=${TOKEN}`);
     expect(cliLines(CF, CF_SCHEMA)).toEqual([
-      `secd run --with CLOUDFLARE_ACCOUNT_ID=${CF} -- ./deploy.sh`,
+      `secd run --with cloudflare=${CF} -- ./deploy.sh`,
       `secd info ${CF}`,
     ]);
     expect(cliLines("n", undefined)).toEqual([
@@ -476,7 +484,8 @@ describe("vault helpers", () => {
 
   test("payloadFor is schema-ordered and refuses a missing required field", () => {
     expect(payloadFor(GH_SCHEMA, [])).toBeUndefined();
-    expect(payloadFor(GH_SCHEMA, [["token", "  "]])).toBeUndefined();
+    expect(payloadFor(GH_SCHEMA, [["token", "  "]])).toEqual({ token: "  " });
+    expect(payloadFor(GH_SCHEMA, [["token", "  exact\n"]])).toEqual({ token: "  exact\n" });
     expect(payloadFor(GH_SCHEMA, [["token", GH_TOKEN]])).toEqual({ token: GH_TOKEN });
     expect(payloadFor(GH_SCHEMA, [["user", "ci"], ["token", GH_TOKEN]])).toEqual({
       token: GH_TOKEN,
@@ -842,12 +851,12 @@ describe("vault screen", () => {
     await waitFor(() => m.root.querySelector("[data-card='cli']") !== null);
     expect(m.root.querySelector("[data-card='cli'] .card-title")?.textContent).toBe("Use it without reading it");
     expect(m.root.querySelector("[data-line='0'] .cli-text")?.textContent).toBe(
-      `secd run --with CLOUDFLARE_ACCOUNT_ID=${CF} -- ./deploy.sh`,
+      `secd run --with cloudflare=${CF} -- ./deploy.sh`,
     );
     expect(m.root.querySelector("[data-line='1'] .cli-text")?.textContent).toBe(`secd info ${CF}`);
     asButton(m.root.querySelector("[data-line='0'] [data-action='copy-cli']"))?.click();
     await waitFor(() => m.flashes.includes(COMMAND_COPIED_TOAST));
-    expect(clip.wrote).toBe(`secd run --with CLOUDFLARE_ACCOUNT_ID=${CF} -- ./deploy.sh`);
+    expect(clip.wrote).toBe(`secd run --with cloudflare=${CF} -- ./deploy.sh`);
     expect(m.flashes.every((t) => !t.includes(TOKEN))).toBe(true);
   });
 
@@ -914,7 +923,7 @@ describe("vault screen", () => {
     expect(overlay?.getAttribute("aria-modal")).toBe("true");
     expect(m.root.querySelector("#wizard-title")?.textContent).toBe(NEW_SECRET_LABEL);
     expect(m.root.querySelector(".modal-sub")?.textContent).toBe(WIZARD_SUB);
-    expect(m.root.querySelector(".modal-route")?.textContent).toBe("PUT /api/v1/vault");
+    expect(m.root.querySelector(".modal-route")?.textContent).toBe("Encrypted on your device");
     expect(asInput(m.root.querySelector("#wizard-name"))?.placeholder).toBe("prod/github");
     expect(document.activeElement).toBe(m.root.querySelector("#wizard-provider"));
     expect(m.root.querySelector(".vault")?.hasAttribute("inert")).toBe(true);
@@ -1085,6 +1094,37 @@ describe("vault screen", () => {
     expect(m.flashes).toEqual([]);
   });
 
+  test("a save built on a stale revision is refused and keeps the form", async () => {
+    const m = start();
+    setDek(mintDek());
+    const api = mockApi({ entries: [] });
+    renderVault(m.state, m.root, m.host);
+    await waitFor(() => m.root.textContent?.includes(EMPTY_SENTENCE) === true);
+    asButton(m.host.actions.querySelector("[data-action='new']"))?.click();
+    const sel = m.root.querySelector("#wizard-provider") as HTMLSelectElement;
+    sel.value = "github";
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    asInput(m.root.querySelector("#wizard-name"))!.value = GH;
+    asInput(m.root.querySelector("#wizard-name"))!.dispatchEvent(new Event("input", { bubbles: true }));
+    asInput(m.root.querySelector('[data-wizard-field="token"] input'))!.value = GH_TOKEN;
+    asInput(m.root.querySelector('[data-wizard-field="token"] input'))!.dispatchEvent(
+      new Event("input", { bubbles: true }),
+    );
+    // Another writer lands between this save's load and its PUT.
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(init?.method ?? "GET") === "PUT" && reqUrl(input) === "/api/v1/vault") {
+        api.revision = "f".repeat(64);
+      }
+      return origFetch(input, init);
+    }) as unknown as typeof fetch;
+    asButton(m.root.querySelector("[data-action='save']"))?.click();
+    await waitFor(() => m.root.textContent?.includes(CONFLICT_SENTENCE) === true);
+    expect(api.vault.entries).toEqual([]);
+    expect(asInput(m.root.querySelector('[data-wizard-field="token"] input'))?.value).toBe(GH_TOKEN);
+    expect(m.flashes).toEqual([]);
+  });
+
   test("401 on PUT signs out", async () => {
     const m = start();
     setDek(mintDek());
@@ -1173,4 +1213,56 @@ describe("vault screen", () => {
     expect(m.root.querySelector(`[data-name="${CF}"]`)).toBeNull();
     expect(m.state.counts.get().vault).toBeUndefined();
   });
+  test("individual and custom onboarding round-trip exact values without a provider", async () => {
+    for (const kind of ["single", "custom"] as const) {
+      const m = start();
+      const dek = mintDek();
+      setDek(dek);
+      const api = mockApi({ entries: [] });
+      renderVault(m.state, m.root, m.host);
+      await waitFor(() => m.root.textContent?.includes(EMPTY_SENTENCE) === true);
+      asButton(m.host.actions.querySelector("[data-action='new']"))!.click();
+      asButton(m.root.querySelector(`[data-kind="${kind}"]`))!.click();
+      const fill = (selector: string, value: string): void => {
+        const input = asInput(m.root.querySelector(selector))!;
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      fill("#wizard-name", `prod/${kind}`);
+      if (kind === "custom") fill("#wizard-key-0", "client_secret");
+      const value = "  exact secret  ";
+      fill(kind === "single" ? "#wizard-f-value" : "#wizard-f-custom-0", value);
+      asButton(m.root.querySelector("[data-action='save']"))!.click();
+      await waitFor(() => m.flashes.includes(SAVED_TOAST));
+      const entry = (api.puts[0] as { entries: Array<{name: string; ciphertext: string; meta: object}> }).entries[0]!;
+      const plaintext = new TextDecoder().decode(open(dek, entry.name, fromHex(entry.ciphertext)));
+      expect(kind === "single" ? plaintext : JSON.parse(plaintext).client_secret).toBe(value);
+      expect(JSON.stringify(api.puts)).not.toContain(value);
+      await waitFor(() => m.root.querySelector("[data-action='edit']") !== null);
+      asButton(m.root.querySelector("[data-action='edit']"))!.click();
+      expect(asInput(m.root.querySelector(kind === "single" ? "#wizard-f-value" : "#wizard-f-custom-0"))!.value).toBe(value);
+      leaveVault(m.state);
+    }
+  });
+
+  test("new secrets cannot overwrite an existing name", async () => {
+    const m = start();
+    const dek = mintDek();
+    setDek(dek);
+    const api = mockApi({ entries: [ghEntry(dek)] });
+    renderVault(m.state, m.root, m.host);
+    await waitFor(() => m.root.querySelector("[data-secret-name]") !== null);
+    asButton(m.host.actions.querySelector("[data-action='new']"))!.click();
+    asButton(m.root.querySelector('[data-kind="single"]'))!.click();
+    for (const [selector, value] of [["#wizard-name", GH], ["#wizard-f-value", "replacement"]]) {
+      const input = asInput(m.root.querySelector(selector!))!;
+      input.value = value!;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    asButton(m.root.querySelector("[data-action='save']"))!.click();
+    await waitFor(() => m.root.textContent?.includes("That name already exists") === true);
+    expect(api.puts).toHaveLength(0);
+    expect(asInput(m.root.querySelector("#wizard-f-value"))!.value).toBe("replacement");
+  });
+
 });

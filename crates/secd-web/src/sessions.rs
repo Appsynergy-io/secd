@@ -44,7 +44,7 @@ impl SessionKind {
         }
     }
 
-    fn ttl(self) -> i64 {
+    pub(crate) fn ttl(self) -> i64 {
         match self {
             Self::Console => CONSOLE_TTL,
             Self::Device => DEVICE_TTL,

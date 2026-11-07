@@ -1,10 +1,11 @@
+use std::collections::VecDeque;
 use std::io::{self, stdout, IsTerminal};
 use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -14,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Position;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use ratatui::Terminal;
 
@@ -60,9 +61,14 @@ pub fn run() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
     let _restore = Restore;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let unlocked = match resumed {
         Some(unlocked) => unlocked,
@@ -90,7 +96,14 @@ pub fn run() -> anyhow::Result<()> {
     terminal.draw(|f| {
         draw(f, &model);
     })?;
-    model.load();
+    let mut queued = VecDeque::new();
+    model = work(
+        &mut terminal,
+        model,
+        &mut queued,
+        "Loading your vault",
+        Model::load,
+    )?;
     loop {
         terminal.draw(|f| {
             let area = Rect::from(f.area());
@@ -100,15 +113,86 @@ pub fn run() -> anyhow::Result<()> {
             let painted = draw(f, &model);
             model.set_painted(&painted);
         })?;
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
+        let ev = if let Some(ev) = queued.pop_front() {
+            ev
+        } else if event::poll(Duration::from_millis(250))? {
+            map_term(event::read()?)
+        } else {
+            Event::Tick
+        };
+        if model.needs_worker(&ev) {
+            model = work(
+                &mut terminal,
+                model,
+                &mut queued,
+                "Working — keeping your changes safe",
+                move |model| model.handle(ev),
+            )?;
+        } else {
+            model.handle(ev);
         }
-        model.handle(map_term(event::read()?));
         if model.quit() {
             break;
         }
     }
     Ok(())
+}
+
+/// The model has one owner throughout an operation. While it works, keep
+/// drawing and reading terminal input in order; never clone the vault or race
+/// two saves. Resize still works, and input resumes after the result arrives.
+fn work(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut model: Model,
+    queued: &mut VecDeque<Event>,
+    label: &str,
+    operation: impl FnOnce(&mut Model) + Send + 'static,
+) -> anyhow::Result<Model> {
+    let snapshot = terminal
+        .draw(|frame| {
+            draw(frame, &model);
+        })?
+        .buffer
+        .clone();
+    let worker = std::thread::spawn(move || {
+        operation(&mut model);
+        model
+    });
+    let started = std::time::Instant::now();
+    while !worker.is_finished() {
+        if started.elapsed() >= Duration::from_millis(100) {
+            terminal.draw(|frame| {
+                let area = frame.area();
+                for y in 0..area.height.min(snapshot.area.height) {
+                    for x in 0..area.width.min(snapshot.area.width) {
+                        frame.buffer_mut()[(x, y)] = snapshot[(x, y)].clone();
+                    }
+                }
+                let dots =
+                    ["·  ", "·· ", "···"][(started.elapsed().as_millis() / 180 % 3) as usize];
+                let status = format!(" {dots} {label}");
+                frame.render_widget(
+                    Paragraph::new(status).style(Style::default().fg(color(ACCENT))),
+                    ratatui::layout::Rect::new(
+                        0,
+                        area.height.saturating_sub(1),
+                        area.width,
+                        area.height.min(1),
+                    ),
+                );
+            })?;
+        }
+        if event::poll(Duration::from_millis(16))? {
+            let ev = map_term(event::read()?);
+            if !matches!(ev, Event::Resize | Event::Tick) {
+                queued.push_back(ev);
+            }
+        }
+    }
+    match worker.join() {
+        Ok(model) => Ok(model),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 fn map_term(ev: TermEvent) -> Event {
@@ -124,6 +208,7 @@ fn map_term(ev: TermEvent) -> Event {
             MouseEventKind::ScrollDown => Event::Down,
             _ => Event::Tick,
         },
+        TermEvent::Paste(text) => Event::Paste(text),
         TermEvent::Resize(_, _) => Event::Resize,
         _ => Event::Tick,
     }
@@ -136,6 +221,8 @@ fn map_key(k: KeyEvent) -> Event {
         return match k.code {
             KeyCode::Char('c') => Event::Quit,
             KeyCode::Char('r' | 'R') => Event::Reveal,
+            KeyCode::Char('n' | 'N') => Event::AddField,
+            KeyCode::Char('s' | 'S') => Event::Enter,
             _ => Event::Tick,
         };
     }
@@ -167,7 +254,12 @@ impl Drop for Restore {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut out = stdout();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            out,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         login::clipboard_clear();
     }
 }
@@ -201,8 +293,13 @@ pub fn draw(frame: &mut Frame, model: &Model) -> Painted {
             painted.modal = start;
         }
         Mode::Modal(Modal::Pick { pick }) => {
-            let (spots, start) =
-                draw_picker(frame, area, model.schemas(), pick, model.modal_window());
+            let (spots, start) = draw_picker(
+                frame,
+                area,
+                &model.picker_schemas(),
+                pick,
+                model.modal_window(),
+            );
             painted.spots = spots;
             painted.modal = start;
         }
@@ -291,6 +388,7 @@ fn draw_list(frame: &mut Frame, area: Rect, model: &Model) -> (Vec<SpotHit>, usi
     }
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(list_title(model))
         .border_style(Style::default().fg(color(DIM)));
     frame.render_widget(block, ratatui::layout::Rect::from(area));
@@ -381,6 +479,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, model: &Model) {
     }
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title("detail")
         .border_style(Style::default().fg(color(DIM)));
     frame.render_widget(block, ratatui::layout::Rect::from(area));
@@ -460,6 +559,7 @@ fn draw_activity(frame: &mut Frame, area: Rect, model: &Model) {
     let log = Rect::new(area.x, area.y, area.width, log_h);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title("activity")
         .border_style(Style::default().fg(color(DIM)));
     let inner = block.inner(ratatui::layout::Rect::from(log));
@@ -486,6 +586,7 @@ fn modal_frame(frame: &mut Frame, area: Rect, rows: usize, title: &str) -> (Rect
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .title(title.to_string())
             .border_style(Style::default().fg(color(ACCENT))),
         ratatui::layout::Rect::from(box_r),
@@ -661,7 +762,12 @@ fn draw_picker(
     pick: &Picker,
     prev: usize,
 ) -> (Vec<SpotHit>, usize) {
-    let (box_r, list) = modal_frame(frame, area, schemas.len(), "provider");
+    let (box_r, list) = modal_frame(
+        frame,
+        area,
+        schemas.len().max(5),
+        &format!("provider / {}", pick.query),
+    );
     let mut spots = Vec::new();
     let mut window = 0;
     if list.width > 0 && list.height > 0 {
@@ -703,7 +809,12 @@ fn draw_picker(
         frame.render_widget(List::new(items), ratatui::layout::Rect::from(list));
         spots = view::rows_at(list, start, schemas.len(), Spot::Choice);
     }
-    draw_status(frame, box_r, None, "Enter choose · Esc cancel");
+    draw_status(
+        frame,
+        box_r,
+        None,
+        "Type to find · Enter choose · Esc cancel",
+    );
     spots.extend(draw_buttons(frame, box_r, "choose"));
     (spots, window)
 }

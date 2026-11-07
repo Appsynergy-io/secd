@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use secd_core::{build_payload, check_name, Secret};
 use serde_json::Value;
@@ -17,6 +17,10 @@ const IDLE_ACTIONS: &[Action] = &[
     Action {
         key: 'a',
         label: "add",
+    },
+    Action {
+        key: 'b',
+        label: "bundle",
     },
     Action {
         key: 'p',
@@ -50,6 +54,10 @@ const IDLE_ACTIONS: &[Action] = &[
 pub const KEYS: &[(&str, &str)] = &[
     ("a", "add a single value"),
     ("p", "add a provider bundle"),
+    ("b", "add a custom bundle"),
+    ("Ctrl-N", "add a field to a custom bundle"),
+    ("Tab Shift-Tab", "next or previous form field"),
+    ("Ctrl-S", "save the open form"),
     ("e", "edit what is selected"),
     ("r", "reveal the selected value"),
     ("c", "copy: a value, or a bundle as an env block"),
@@ -77,6 +85,7 @@ const CLIP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Picker {
     pub selected: usize,
+    pub query: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +110,7 @@ pub enum Mode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     Key(char),
+    Paste(String),
     Esc,
     Enter,
     Up,
@@ -117,6 +127,7 @@ pub enum Event {
     PageDown,
     /// Ctrl-R, and the `[r] reveal` button.
     Reveal,
+    AddField,
     Click {
         column: u16,
         row: u16,
@@ -172,8 +183,8 @@ pub struct Model {
     shapes: Vec<policy::BundleShape>,
     token: Option<String>,
     dek: Option<Secret>,
-    /// The vault as this register last saw it, name -> ciphertext.
-    before: BTreeMap<String, String>,
+    /// The vault as this register last saw it: what the next save builds on.
+    before: policy::Base,
     /// Why a save would lose data. Set means every save is refused.
     save_blocked: Option<String>,
 }
@@ -212,7 +223,7 @@ impl Model {
             shapes: Vec::new(),
             token: None,
             dek: None,
-            before: BTreeMap::new(),
+            before: policy::Base::default(),
             save_blocked: None,
         }
     }
@@ -374,8 +385,37 @@ impl Model {
         self.spots = spots;
     }
 
-    pub fn handle(&mut self, ev: Event) {
+    /// Keep network and clipboard processes off the terminal's drawing loop.
+    pub fn needs_worker(&self, ev: &Event) -> bool {
+        if self.copied_at.is_some_and(|at| at.elapsed() >= CLIP_TTL) {
+            return true;
+        }
+        let submitting = matches!(
+            self.mode,
+            Mode::Modal(Modal::Add { .. } | Modal::Provider { .. } | Modal::Delete { .. })
+        );
         match ev {
+            Event::Enter => submitting,
+            Event::Click { column, row } => {
+                submitting && spot_at(&self.spots, *column, *row) == Some(Spot::Save)
+            }
+            Event::Key('c' | 'C') => self.is_idle() && !self.filtering,
+            Event::Tick => self.copied_at.is_some_and(|at| at.elapsed() >= CLIP_TTL),
+            _ => false,
+        }
+    }
+
+    pub fn handle(&mut self, ev: Event) {
+        self.expire_clipboard();
+        match ev {
+            Event::Paste(mut text) => {
+                if let Some(form) = self.form_mut() {
+                    for c in text.chars() {
+                        form.insert(c);
+                    }
+                }
+                text.zeroize();
+            }
             Event::Click { column, row } => self.on_click(column, row),
             Event::Quit => self.quit = true,
             Event::Esc => self.on_esc(),
@@ -393,6 +433,7 @@ impl Model {
             Event::PageUp => self.on_page(false),
             Event::PageDown => self.on_page(true),
             Event::Reveal => self.on_reveal(),
+            Event::AddField => self.on_form(Form::add_custom_field),
             Event::Key(c) => self.on_char(c),
             Event::Tick | Event::Resize => self.expire_clipboard(),
         }
@@ -425,6 +466,11 @@ impl Model {
     }
 
     fn on_backspace(&mut self) {
+        if let Mode::Modal(Modal::Pick { pick }) = &mut self.mode {
+            pick.query.pop();
+            pick.selected = 0;
+            return;
+        }
         if self.is_idle() && self.filtering {
             self.filter.pop();
             let keep = self.selected_name().map(ToString::to_string);
@@ -558,7 +604,7 @@ impl Model {
             self.select_next();
             return;
         }
-        let last = self.schemas.len().saturating_sub(1);
+        let last = self.picker_schemas().len().saturating_sub(1);
         match &mut self.mode {
             Mode::Modal(Modal::Pick { pick }) => {
                 pick.selected = pick.selected.saturating_add(1).min(last);
@@ -587,7 +633,7 @@ impl Model {
             self.sync_detail();
             return;
         }
-        let last = self.schemas.len().saturating_sub(1);
+        let last = self.picker_schemas().len().saturating_sub(1);
         match &mut self.mode {
             Mode::Modal(Modal::Pick { pick }) => pick.selected = last,
             Mode::Modal(Modal::Add { form } | Modal::Provider { form }) => form.caret_end(),
@@ -606,7 +652,7 @@ impl Model {
             self.sync_detail();
             return;
         }
-        let last = self.schemas.len().saturating_sub(1);
+        let last = self.picker_schemas().len().saturating_sub(1);
         match &mut self.mode {
             Mode::Modal(Modal::Pick { pick }) => {
                 pick.selected = if down {
@@ -648,6 +694,13 @@ impl Model {
             Mode::Idle => match c {
                 'a' | 'A' => self.begin_add(),
                 'p' | 'P' => self.begin_pick(),
+                'b' | 'B' => {
+                    if !self.refuse_if_blocked() {
+                        self.mode = Mode::Modal(Modal::Add {
+                            form: Form::custom("", &[]),
+                        });
+                    }
+                }
                 'e' | 'E' => self.begin_edit(),
                 'r' | 'R' => self.reveal_all = !self.reveal_all,
                 'c' | 'C' => self.copy_selected(),
@@ -666,19 +719,26 @@ impl Model {
     }
 
     fn pick_type_ahead(&mut self, c: char) {
-        let want = c.to_ascii_lowercase();
-        let found = self.schemas.iter().position(|s| {
-            s.name
-                .chars()
-                .next()
-                .is_some_and(|f| f.to_ascii_lowercase() == want)
-        });
-        let Some(i) = found else {
-            return;
-        };
         if let Mode::Modal(Modal::Pick { pick }) = &mut self.mode {
-            pick.selected = i;
+            pick.query.push(c);
+            pick.selected = 0;
         }
+    }
+
+    pub fn picker_schemas(&self) -> Vec<Schema> {
+        let query = self
+            .picker()
+            .map(|p| p.query.to_lowercase())
+            .unwrap_or_default();
+        self.schemas
+            .iter()
+            .filter(|s| {
+                query.is_empty()
+                    || s.name.to_lowercase().contains(&query)
+                    || s.title.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
     }
 
     fn on_enter(&mut self) {
@@ -695,7 +755,10 @@ impl Model {
             Mode::Idle => self.open_selected(),
             Mode::Modal(Modal::Add { form }) => self.commit_single(form),
             Mode::Modal(Modal::Provider { form }) => self.commit_provider(form),
-            Mode::Modal(Modal::Pick { pick }) => self.open_schema_form(pick.selected),
+            Mode::Modal(Modal::Pick { pick }) => {
+                self.mode = Mode::Modal(Modal::Pick { pick: pick.clone() });
+                self.open_schema_form(pick.selected);
+            }
             Mode::Modal(Modal::Delete { names, .. }) => self.commit_delete(&names),
         }
     }
@@ -742,7 +805,19 @@ impl Model {
         };
         let mut form = match self.bundle_of(&name, &text) {
             Some((schema, pairs)) => Form::schema(&schema, &name, &pairs),
-            None => Form::single(&name, &text),
+            None => {
+                if self
+                    .meta
+                    .get(&name)
+                    .and_then(|m| m.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("bundle")
+                {
+                    Form::custom(&name, &bundle_pairs(&text).unwrap_or_default())
+                } else {
+                    Form::single(&name, &text)
+                }
+            }
         };
         form.title = "edit".to_string();
         form.editing = Some(name);
@@ -795,7 +870,7 @@ impl Model {
     }
 
     fn open_schema_form(&mut self, i: usize) {
-        let Some(schema) = self.schemas.get(i).cloned() else {
+        let Some(schema) = self.picker_schemas().get(i).cloned() else {
             return;
         };
         self.mode = Mode::Modal(Modal::Provider {
@@ -811,6 +886,25 @@ impl Model {
         if let Some(why) = self.rename_collision(&form, &name) {
             return self.form_refuse(Modal::Add { form }, why);
         }
+        if form.custom {
+            let pairs = match form.custom_pairs() {
+                Ok(pairs) => pairs,
+                Err(why) => return self.form_refuse(Modal::Add { form }, why),
+            };
+            let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+            let meta = serde_json::json!({ "kind": "bundle", "fields": keys });
+            let value = Secret::new(policy::payload_json(&pairs).into_bytes());
+            let gone = form
+                .editing
+                .clone()
+                .filter(|old| old != &name)
+                .into_iter()
+                .collect();
+            if let Err(why) = self.commit(vec![(name, value, meta)], gone) {
+                self.form_refuse(Modal::Add { form }, why);
+            }
+            return;
+        }
         let text = form
             .value_pairs()
             .into_iter()
@@ -820,7 +914,11 @@ impl Model {
         let drop_old = form.editing.clone().filter(|o| *o != name);
         let value = Secret::new(text.into_bytes());
         if let Err(why) = self.commit(
-            vec![(name, value, Value::Object(Default::default()))],
+            vec![(
+                name,
+                value,
+                serde_json::json!({"kind": "single", "fields": ["value"]}),
+            )],
             drop_old.into_iter().collect(),
         ) {
             // Keep the modal, keep the text. `Input` zeroes itself on drop, so
@@ -905,7 +1003,13 @@ impl Model {
     /// An edit may rename, but not onto a name that is already taken: that
     /// would silently replace a second entry.
     fn rename_collision(&self, form: &Form, name: &str) -> Option<String> {
-        let old = form.editing.as_deref()?;
+        let Some(old) = form.editing.as_deref() else {
+            return self
+                .names
+                .iter()
+                .any(|n| n == name)
+                .then(|| format!("{name} already exists"));
+        };
         if old == name {
             return None;
         }
@@ -1125,6 +1229,9 @@ impl Model {
     /// the ladder `policy::resolve_provider` walks, widened to the custom
     /// schemas the register fetched, which that ladder cannot name.
     fn bundle_of(&self, name: &str, text: &str) -> Option<(Schema, Vec<(String, String)>)> {
+        if self.meta.get(name).and_then(|m| m.get("kind")).is_some() {
+            return None;
+        }
         let pairs = bundle_pairs(text)?;
         let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
         let want = self
@@ -1169,6 +1276,26 @@ impl Model {
         if let Some((schema, pairs)) = self.bundle_of(name, &text) {
             self.push_bundle(&schema, &pairs);
             return;
+        }
+        if self
+            .meta
+            .get(name)
+            .and_then(|m| m.get("kind"))
+            .and_then(Value::as_str)
+            == Some("bundle")
+        {
+            if let Some(pairs) = bundle_pairs(&text) {
+                self.detail_title = format!("custom bundle · {} fields", pairs.len());
+                for (key, value) in pairs {
+                    self.detail.push(DetailRow {
+                        env: key.to_ascii_uppercase(),
+                        key,
+                        secret: true,
+                        value,
+                    });
+                }
+                return;
+            }
         }
         self.detail.push(DetailRow {
             key: String::new(),
@@ -1270,10 +1397,7 @@ impl Model {
     }
 
     /// Prospective rows, not the register: a miss must not leave a ghost name.
-    fn save_rows(
-        &self,
-        rows: &[policy::Row<'_>],
-    ) -> Option<anyhow::Result<BTreeMap<String, String>>> {
+    fn save_rows(&self, rows: &[policy::Row<'_>]) -> Option<anyhow::Result<policy::Base>> {
         let (Some(token), Some(dek)) = (self.token.as_deref(), self.dek.as_ref()) else {
             return None;
         };
@@ -1527,11 +1651,13 @@ mod tests {
         m.names.push("kv/ghost".into());
         m.values
             .insert("kv/ghost".into(), Secret::new(b"x".to_vec()));
-        m.before.insert("stale".into(), "ct-stale".into());
+        m.before
+            .ciphertexts
+            .insert("stale".into(), "ct-stale".into());
         m.selected = 3;
         m.reveal_all = true;
 
-        let mut before = BTreeMap::new();
+        let mut before = std::collections::BTreeMap::new();
         before.insert("kv/alpha".into(), "ct-alpha".into());
         before.insert("kv/dropped".into(), "ct-dropped".into());
         m.apply_loaded(policy::VaultLoad {
@@ -1542,17 +1668,20 @@ mod tests {
             }],
             raw: 2,
             body: String::new(),
-            before,
+            before: policy::Base {
+                revision: "ab".repeat(32),
+                ciphertexts: before,
+            },
         });
         assert_eq!(m.names(), ["kv/alpha"]);
         assert_eq!(m.selected, 0);
         assert!(!m.revealed(), "a reload must not leave a value on screen");
         assert_eq!(
-            m.before.get("kv/alpha").map(String::as_str),
+            m.before.ciphertexts.get("kv/alpha").map(String::as_str),
             Some("ct-alpha")
         );
         assert_eq!(
-            m.before.get("kv/dropped").map(String::as_str),
+            m.before.ciphertexts.get("kv/dropped").map(String::as_str),
             Some("ct-dropped")
         );
         assert!(m.save_blocked.is_some());

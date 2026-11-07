@@ -152,6 +152,7 @@ function installFetch(
   const calls: Call[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = pathOf(reqUrl(input));
+    if (url === "/api/auth/oidc") return new Response(JSON.stringify({ enabled: false }), { status: 200 });
     const method = String(init?.method ?? "GET").toUpperCase();
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
     calls.push({ method, url, body });
@@ -308,6 +309,7 @@ describe("gate screen", () => {
   const origNav = globalThis.navigator;
 
   beforeEach(async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ enabled: false }), { status: 200 })) as unknown as typeof fetch;
 
     await keyholder.start();
     document.body.replaceChildren();
@@ -321,6 +323,32 @@ describe("gate screen", () => {
     localStorage.clear();
     clearDek();
     document.body.replaceChildren();
+  });
+
+  test("required provider preserves device approval and blocks local sign-in until verified", async () => {
+    globalThis.fetch = (async () => Response.json({ enabled: true, name: "Company", required: true })) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState({ userCode: "ABCD-EFGH", eph: "a".repeat(64) });
+    renderGate(state, root, makeHost(state, root));
+    await settled();
+    const link = root.querySelector('[data-action="provider-signin"]') as HTMLAnchorElement;
+    expect(link.textContent).toBe("Continue with Company");
+    const url = new URL(link.getAttribute("href")!, "https://secd.test");
+    expect(url.searchParams.get("return_to")).toBe(`/device?code=ABCD-EFGH&eph=${"a".repeat(64)}`);
+    expect((root.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
+    leaveGate(state);
+  });
+
+  test("verified provider fills the account and enables vault unlock", async () => {
+    globalThis.fetch = (async () => Response.json({ enabled: true, name: "Company", required: true, verified_email: EMAIL })) as unknown as typeof fetch;
+    const root = document.createElement("div");
+    const state = makeState();
+    renderGate(state, root, makeHost(state, root));
+    await settled();
+    expect(state.email.get()).toBe(EMAIL);
+    expect(root.querySelector("[data-provider-status]")?.textContent).toContain("Identity verified");
+    expect((root.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(false);
+    leaveGate(state);
   });
 
   test("cold start paints the design card into the bare shell", () => {

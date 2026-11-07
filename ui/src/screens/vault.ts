@@ -31,10 +31,11 @@ export const CLIP_MISSING_SENTENCE =
 export const PREIMAGE_SENTENCE = "The vault did not load cleanly. Nothing was saved.";
 export const SAVE_FAIL_SENTENCE = "The secret was not saved.";
 export const READBACK_SENTENCE = "The saved secret did not read back. Reload before trying again.";
+export const CONFLICT_SENTENCE = "Someone else saved while you were editing. Nothing was overwritten — save again to apply yours on top.";
 export const RESTORE_FAIL_SENTENCE = "That version was not restored.";
 export const NEW_SECRET_LABEL = "New secret";
 export const WIZARD_SUB =
-  "Sealed in this browser before it is sent. The request carries ciphertext and metadata only.";
+  "Keep related credentials together. Values are encrypted here before saving.";
 export const SEALED_PLACEHOLDER = "sealed before it leaves this browser";
 export const SAVED_TOAST = "Sealed and saved · read back and verified";
 export const COMMAND_COPIED_TOAST = "Command copied";
@@ -84,6 +85,10 @@ type Store = {
   versions: VersionInfo[];
   versionsStatus: "idle" | "loading" | "ready" | "error";
   wizard: boolean;
+  wizardEditing?: string;
+  wizardKind: "provider" | "single" | "custom";
+  wizardKeys: string[];
+  wizardOptional: boolean;
   wizardProvider: string;
   wizardName: string;
   wizardValues: Map<string, string>;
@@ -165,10 +170,11 @@ export function envDump(
   return lines.join("\n");
 }
 
-export function cliLines(name: string, schema: ProviderSchema | undefined): string[] {
-  const first = schema?.fields[0]?.env;
-  const env = first !== undefined && first !== "" ? first : DEFAULT_ENV;
-  return [`secd run --with ${env}=${name} -- ./deploy.sh`, `secd info ${name}`];
+export function cliLines(name: string, schema: ProviderSchema | undefined, keys: readonly string[] = []): string[] {
+  const args = schema?.builtin ? `--with ${schema.name}=${name}`
+    : keys.length > 0 ? keys.map(key => `--with ${envName(key, schema)}=${name}#${key}`).join(" ")
+    : `--with ${DEFAULT_ENV}=${name}`;
+  return [`secd run ${args} -- ./deploy.sh`, `secd info ${name}`];
 }
 
 /** Newest first; the newest is "current", the rest carry their provider. */
@@ -187,10 +193,10 @@ export function payloadFor(
   schema: ProviderSchema,
   values: ReadonlyArray<readonly [string, string]>,
 ): Record<string, string> | undefined {
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const f of schema.fields) {
     const raw = values.find(([k]) => k === f.key)?.[1] ?? "";
-    const v = raw.trim();
+    const v = f.secret ? raw : raw.trim();
     if (v === "") {
       if (f.optional) {
         continue;
@@ -340,6 +346,12 @@ export function putEntries(rows: readonly unknown[]): PutRow[] {
   return out;
 }
 
+/** The revision a vault response names: what a PUT must build on. */
+export function revisionOf(data: unknown): string | undefined {
+  const rev = record(data)?.["revision"];
+  return typeof rev === "string" && /^[0-9a-f]{64}$/.test(rev) ? rev : undefined;
+}
+
 /** The loaded vault as a PUT body; undefined when the load failed or dropped a row. */
 export function preimage(data: unknown): PutRow[] | undefined {
   const raw = entriesOf(data);
@@ -357,6 +369,7 @@ export function openEntry(plaintext: string | null, entry: VaultEntry): Opened {
     return { fields: {}, error: OPEN_FAIL_SENTENCE };
   }
   const text = plaintext;
+  if (entry.meta["kind"] === "single") return { fields: { [entry.fieldKeys[0] ?? "value"]: text } };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -365,7 +378,7 @@ export function openEntry(plaintext: string | null, entry: VaultEntry): Opened {
   }
   const rec = parsed === undefined ? undefined : record(parsed);
   if (rec) {
-    const fields: Record<string, string> = {};
+    const fields: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const key of entry.fieldKeys) {
       const v = rec[key];
       if (typeof v === "string") {
@@ -396,6 +409,9 @@ function freshStore(): Store {
     versions: [],
     versionsStatus: "idle",
     wizard: false,
+    wizardKind: "provider",
+    wizardKeys: [""],
+    wizardOptional: false,
     wizardProvider: "",
     wizardName: "",
     wizardValues: new Map(),
@@ -600,7 +616,10 @@ function paint(state: object): void {
     return;
   }
   const { root, host } = ctx;
-  const prevSel = focusSelector(root, document.activeElement);
+  const active = document.activeElement;
+  const prevSel = focusSelector(root, active);
+  const selection = active instanceof HTMLInputElement && active.type !== "number"
+    ? [active.selectionStart, active.selectionEnd] as const : undefined;
   releaseInert(store);
   if (!keyholder.isUnlocked()) {
     dropPlaintext(store);
@@ -630,6 +649,9 @@ function paint(state: object): void {
     target = query(root, prevSel);
   }
   target?.focus();
+  if (hint === undefined && target instanceof HTMLInputElement && selection?.[0] !== null && selection?.[0] !== undefined) {
+    target.setSelectionRange(selection[0], selection[1]);
+  }
 }
 
 function newSecretButton(state: object): HTMLButtonElement {
@@ -776,6 +798,24 @@ function detailPane(state: object, store: Store): HTMLElement {
     revealAll.disabled = true;
     copyEnv.disabled = true;
   }
+  const edit = el("button", { type: "button", class: "btn", "data-action": "edit", disabled: noDek || opened === undefined || opened.error !== undefined ? true : undefined }, ["Edit"]);
+  edit.addEventListener("click", () => {
+    if (!opened || opened.error) return;
+    store.wizard = true;
+    store.wizardEditing = entry.name;
+    store.wizardOptional = true;
+    store.wizardName = entry.name;
+    store.wizardProvider = entry.provider;
+    store.wizardKind = schema ? "provider" : entry.meta["kind"] === "bundle" ? "custom" : "single";
+    store.wizardKeys = [...entry.fieldKeys];
+    store.wizardValues = new Map(store.wizardKind === "custom"
+      ? entry.fieldKeys.map((key, i) => [`custom-${i}`, opened.fields[key] ?? ""] as [string, string])
+      : store.wizardKind === "single" ? [["value", opened.fields[entry.fieldKeys[0] ?? "value"] ?? ""]]
+      : Object.entries(opened.fields));
+    delete store.wizardError;
+    store.focusHint = store.wizardKind === "custom" ? "#wizard-key-0" : `#wizard-f-${store.wizardKind === "single" ? "value" : schema?.fields[0]?.key}`;
+    paint(state);
+  });
   const when = stamp(entry.updated);
   pane.append(
     el("div", { class: "detail-head" }, [
@@ -792,7 +832,7 @@ function detailPane(state: object, store: Store): HTMLElement {
           ]),
         ]),
       ]),
-      el("div", { class: "detail-actions" }, [revealAll, copyEnv]),
+      el("div", { class: "detail-actions" }, [edit, revealAll, copyEnv]),
     ]),
   );
 
@@ -877,7 +917,7 @@ function fieldsCard(
 }
 
 function cliCard(state: object, entry: VaultEntry, schema: ProviderSchema | undefined): HTMLElement {
-  const lines = cliLines(entry.name, schema).map((text, i) => {
+  const lines = cliLines(entry.name, schema, schema !== undefined || entry.meta["kind"] === "bundle" ? entry.fieldKeys : []).map((text, i) => {
     const copy = el("button", { type: "button", class: "btn btn-xs", "data-action": "copy-cli" }, [
       "Copy",
     ]);
@@ -953,7 +993,13 @@ function versionsCard(state: object, store: Store, entry: VaultEntry): HTMLEleme
 
 function wizardOverlay(state: object, store: Store): HTMLElement {
   const schema = schemaFor(store, store.wizardProvider);
-  const sel = el("select", { id: "wizard-provider", class: "select field" });
+  const kinds = el("div", { class: "secret-kinds", "aria-label": "Secret type" });
+  for (const [kind, title, hint] of [["provider", "Provider account", "Related credentials, ready to use"], ["single", "Individual secret", "One password, key or value"], ["custom", "Custom bundle", "Your own named fields"]] as const) {
+    const button = el("button", { type: "button", class: "secret-kind", "data-kind": kind, "aria-pressed": String(store.wizardKind === kind), disabled: store.saving || store.wizardEditing !== undefined ? true : undefined }, [el("strong", {}, [title]), el("span", {}, [hint])]);
+    button.addEventListener("click", () => { store.wizardKind = kind; delete store.wizardError; store.focusHint = "#wizard-name"; paint(state); });
+    kinds.append(button);
+  }
+  const sel = el("select", { id: "wizard-provider", class: "select field", disabled: store.wizardEditing !== undefined ? true : undefined });
   for (const p of store.schemas) {
     const opt = el("option", { value: p.name }, [p.title]);
     if (p.name === store.wizardProvider) {
@@ -976,12 +1022,23 @@ function wizardOverlay(state: object, store: Store): HTMLElement {
     autocomplete: "off",
     spellcheck: "false",
     value: store.wizardName,
+    disabled: store.wizardEditing !== undefined ? true : undefined,
   });
   name.addEventListener("input", () => {
     store.wizardName = name.value;
   });
   const fields = el("div", { class: "stack-sm" });
-  for (const f of schema?.fields ?? []) {
+  const optional = el("details", { class: "optional-fields" });
+  optional.open = store.wizardOptional;
+  optional.addEventListener("toggle", () => { store.wizardOptional = optional.open; });
+  const countOptional = schema?.fields.filter(f => f.optional).length ?? 0;
+  optional.append(el("summary", {}, [`Optional fields (${countOptional})`]));
+  const wizardFields = store.wizardKind === "single"
+    ? [{ key: "value", secret: true, optional: false, env: "" }]
+    : store.wizardKind === "custom"
+      ? store.wizardKeys.map((_, i) => ({ key: `custom-${i}`, secret: true, optional: false, env: "" }))
+      : schema?.fields ?? [];
+  for (const [index, f] of wizardFields.entries()) {
     const id = `wizard-f-${f.key}`;
     const input = el("input", {
       id,
@@ -995,22 +1052,42 @@ function wizardOverlay(state: object, store: Store): HTMLElement {
     input.addEventListener("input", () => {
       store.wizardValues.set(f.key, input.value);
     });
-    fields.append(
+    const label = store.wizardKind === "custom"
+      ? el("input", { class: "input input-sm", id: `wizard-key-${index}`, "aria-label": `Field ${index + 1} name`, placeholder: "Field name, e.g. client_id", value: store.wizardKeys[index] ?? "" })
+      : el("label", { class: "label", for: id }, [f.key.replaceAll("_", " ")]);
+    if (label instanceof HTMLInputElement) {
+      label.addEventListener("input", () => { store.wizardKeys[index] = label.value; });
+    }
+    const reveal = el("button", { type: "button", class: "btn btn-sm", "aria-label": `Reveal ${f.key}`, "aria-pressed": "false" }, ["Show"]);
+    reveal.addEventListener("click", () => {
+      const shown = input.type === "password";
+      input.type = shown ? "text" : "password";
+      reveal.textContent = shown ? "Hide" : "Show";
+      reveal.setAttribute("aria-pressed", String(shown));
+    });
+    (f.optional ? optional : fields).append(
       el("div", { "data-wizard-field": f.key }, [
         el("div", { class: "field-head" }, [
-          el("label", { class: "label", for: id }, [f.key]),
+          label,
           el("span", { class: "field-tag", "data-optional": f.optional ? true : undefined }, [
             f.optional ? "optional" : "required",
           ]),
           el("span", { class: "field-env" }, [f.env]),
         ]),
-        input,
+        el("div", { class: "hrow" }, f.secret ? [input, reveal] : [input]),
       ]),
     );
   }
+  if (store.wizardKind === "provider" && countOptional > 0) fields.append(optional);
+  if (store.wizardKind === "custom") {
+    const add = el("button", { type: "button", class: "btn", "data-action": "add-field" }, ["+ Add field"]);
+    add.addEventListener("click", () => { store.wizardKeys.push(""); store.focusHint = `#wizard-key-${store.wizardKeys.length - 1}`; paint(state); });
+    fields.append(add);
+  }
   const body = el("div", { class: "modal-body" }, [
-    el("div", { class: "form-grid" }, [
-      el("div", {}, [el("label", { class: "label", for: "wizard-provider" }, ["Provider"]), sel]),
+    kinds,
+    el("div", { class: store.wizardKind === "provider" ? "form-grid" : "form-grid single" }, [
+      ...(store.wizardKind === "provider" ? [el("div", {}, [el("label", { class: "label", for: "wizard-provider" }, ["Provider"]), sel])] : []),
       el("div", {}, [el("label", { class: "label", for: "wizard-name" }, ["Name"]), name]),
     ]),
     fields,
@@ -1056,20 +1133,31 @@ function wizardOverlay(state: object, store: Store): HTMLElement {
       el("div", { class: "modal" }, [
         el("div", { class: "modal-head" }, [
           el("div", {}, [
-            el("div", { class: "modal-title", id: "wizard-title" }, [NEW_SECRET_LABEL]),
+            el("div", { class: "modal-title", id: "wizard-title" }, [store.wizardEditing ? "Edit secret" : NEW_SECRET_LABEL]),
             el("div", { class: "modal-sub" }, [WIZARD_SUB]),
           ]),
           close,
         ]),
         body,
         el("div", { class: "modal-foot" }, [
-          el("div", { class: "modal-route" }, ["PUT /api/v1/vault"]),
+          el("div", { class: "modal-route" }, ["Encrypted on your device"]),
           el("div", { class: "hrow spacer" }, [cancel, save]),
         ]),
       ]),
     ],
   );
+  if (store.saving) {
+    for (const control of overlay.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input,select,button")) control.disabled = true;
+  }
   overlay.addEventListener("keydown", (ev) => {
+    if (ev.key === "Tab") {
+      const controls = [...overlay.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary")].filter(control => !control.closest("details:not([open])") || control.tagName === "SUMMARY");
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first?.focus(); }
+      return;
+    }
     if (ev.key !== "Escape") {
       return;
     }
@@ -1100,6 +1188,10 @@ function openWizard(state: object): void {
     return;
   }
   store.wizard = true;
+  delete store.wizardEditing;
+  store.wizardKind = "provider";
+  store.wizardKeys = [""];
+  store.wizardOptional = false;
   store.wizardProvider = store.schemas[0]?.name ?? "";
   store.wizardName = "";
   store.wizardValues = new Map();
@@ -1110,7 +1202,7 @@ function openWizard(state: object): void {
 
 function closeWizard(state: object): void {
   const store = stores.get(state);
-  if (!store) {
+  if (!store || store.saving) {
     return;
   }
   store.wizard = false;
@@ -1343,7 +1435,27 @@ async function saveWizard(state: object): Promise<void> {
     return;
   }
   const schema = schemaFor(store, store.wizardProvider);
-  const payload = schema === undefined ? undefined : payloadFor(schema, [...store.wizardValues]);
+  let payload: Record<string, string> | undefined;
+  if (store.wizardKind === "single") {
+    const value = store.wizardValues.get("value") ?? "";
+    payload = value === "" ? undefined : { value };
+  } else if (store.wizardKind === "custom") {
+    payload = Object.create(null) as Record<string, string>;
+    for (const [i, raw] of store.wizardKeys.entries()) {
+      const key = raw.trim();
+      const value = store.wizardValues.get(`custom-${i}`) ?? "";
+      if (key === "" && value === "") continue;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || Object.hasOwn(payload, key)) {
+        refuse("Give each field a unique name using letters, numbers and underscores.");
+        return;
+      }
+      if (value === "") { refuse(REQUIRED_SENTENCE); return; }
+      payload[key] = value;
+    }
+    if (Object.keys(payload).length === 0) payload = undefined;
+  } else {
+    payload = schema === undefined ? undefined : payloadFor(schema, [...store.wizardValues]);
+  }
   if (payload === undefined) {
     refuse(REQUIRED_SENTENCE);
     return;
@@ -1358,7 +1470,7 @@ async function saveWizard(state: object): Promise<void> {
   const gen = store.gen;
   const lg = currentLogoutGen();
   try {
-    const sealed = await keyholder.sealEntry(n, JSON.stringify(payload));
+    const sealed = await keyholder.sealEntry(n, store.wizardKind === "single" ? payload["value"]! : JSON.stringify(payload));
     if (sealed === undefined) {
       store.wizardError = SAVE_FAIL_SENTENCE;
       return;
@@ -1376,18 +1488,37 @@ async function saveWizard(state: object): Promise<void> {
       store.wizardError = PREIMAGE_SENTENCE;
       return;
     }
-    const rows = pre.filter((r) => r.name !== n);
+    const base = revisionOf(current.data);
+    if (base === undefined) {
+      store.wizardError = PREIMAGE_SENTENCE;
+      return;
+    }
+    if (pre.some((r) => r.name === n) && store.wizardEditing !== n) {
+      store.wizardError = "That name already exists. Choose a different name.";
+      return;
+    }
+    if (store.wizardEditing !== undefined && pre.find(r => r.name === n)?.ciphertext !== store.entries.find(e => e.name === n)?.ciphertext) {
+      store.wizardError = "This secret changed since you opened it. Reload before editing.";
+      return;
+    }
+    const rows = pre.filter(r => r.name !== store.wizardEditing);
     rows.push({
       name: n,
       ciphertext: sealed,
-      meta: { provider: store.wizardProvider, fields: Object.keys(payload) },
+      meta: store.wizardKind === "provider"
+        ? { provider: store.wizardProvider, fields: Object.keys(payload) }
+        : { kind: store.wizardKind === "custom" ? "bundle" : "single", fields: Object.keys(payload) },
     });
-    const put = await req("PUT", vaultUrl(), { entries: rows });
+    const put = await req("PUT", vaultUrl(), { entries: rows, base });
     if (!live(state, store, gen, lg)) {
       return;
     }
     if (denied(put)) {
       void ctx.host.signOut();
+      return;
+    }
+    if (put.status === 409) {
+      store.wizardError = CONFLICT_SENTENCE;
       return;
     }
     if (put.status !== 200) {

@@ -51,7 +51,7 @@ impl From<Rect> for ratatui::layout::Rect {
     }
 }
 
-/// Header 1, activity 8, list|detail 42/58 of the leftover width.
+/// Header 1, activity 3, list|detail 42/58 of the leftover width.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Regions {
     pub header: Rect,
@@ -63,7 +63,7 @@ pub struct Regions {
 pub fn regions(area: Rect) -> Regions {
     let header_h = area.height.min(1);
     let rest = area.height.saturating_sub(header_h);
-    let activity_h = rest.min(8);
+    let activity_h = rest.min(3);
     let mid_h = rest.saturating_sub(activity_h);
     let list_w = area.width.saturating_mul(42) / 100;
     let detail_w = area.width.saturating_sub(list_w);

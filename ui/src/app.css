@@ -1803,3 +1803,21 @@ select {
   color: var(--color-text-5);
   white-space: nowrap;
 }
+
+/* Equal entry points for accounts, individual values and custom bundles. */
+.secret-kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 24px; }
+.secret-kind { font: inherit; text-align: left; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; cursor: pointer; }
+.secret-kind strong, .secret-kind span { display: block; }
+.secret-kind span { font-size: 11px; margin-top: 6px; opacity: .7; }
+.secret-kind[aria-pressed="true"] { border-color: var(--color-accent); box-shadow: inset 0 0 0 1px var(--color-accent); }
+@media (max-width: 600px) { .secret-kinds { grid-template-columns: 1fr; } }
+
+.form-grid.single { grid-template-columns: 1fr; }
+.optional-fields summary { cursor: pointer; color: var(--color-text-muted); padding: 8px 0; }
+.optional-fields[open] > div { margin-top: 12px; }
+@media (max-width: 600px) {
+  .secret-kinds { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 8px; }
+  .secret-kind { padding: 10px 8px; font-size: 12px; }
+  .secret-kind span { display: none; }
+  .overlay { padding: 24px 12px; }
+}

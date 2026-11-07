@@ -160,7 +160,7 @@ async fn approve_device(h: &H, cookie: &str) -> (String, String) {
     let (s, _, start) = post_json(
         &h.app,
         "/api/v1/device/start",
-        &json!({"eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
+        &json!({"client_id": "secd-cli", "scope": "openid email", "eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
         None,
         None,
     )
@@ -179,12 +179,12 @@ async fn approve_device(h: &H, cookie: &str) -> (String, String) {
     let (_, _, poll) = post_json(
         &h.app,
         "/api/v1/device/poll",
-        &json!({"user_code": code}),
+        &json!({"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "client_id": "secd-cli", "device_code": start["device_code"]}),
         None,
         None,
     )
     .await;
-    let token = poll["token"].as_str().expect("token").to_string();
+    let token = poll["access_token"].as_str().expect("token").to_string();
     (code, token)
 }
 
@@ -497,7 +497,7 @@ fn T_SESS_AUDIT() {
         assert!(!audit.contains(&token), "audit leaked token");
         for line in audit.lines() {
             let v: Value = serde_json::from_str(line).expect("audit line");
-            assert!(v.get("token").is_none());
+            assert!(v.get("access_token").is_none());
         }
     });
 }

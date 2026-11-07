@@ -42,6 +42,12 @@ routes = [
   "PUT /api/v1/providers",
   "DELETE /api/v1/providers/:name",
   "GET /api/v1/audit",
+  "GET /api/oidc/authorize",
+  "GET /.well-known/openid-configuration",
+  "GET /.well-known/jwks.json",
+  "GET /api/auth/oidc",
+  "GET /api/auth/oidc/start",
+  "GET /api/auth/oidc/callback",
 ]
 
 providers = [
@@ -122,7 +128,7 @@ files = [
 "scripts/stamp-version.sh" = "fe3549088b6a33cce9f7388cb7810e0043942f69d28b630e06c93a93b01ffa72"
 "scripts/tools.sh" = "04b53a00a0c1050cc656dbc8e5ff8155adc3fc1f7a3a7055f764c7fd2225dc1e"
 "ui/bunfig.toml" = "d7223d78e8a6ea0fce0b51bd8d0f39d9f74a473a356bc6e18bc9dce075e67ef0"
-"ui/package.json" = "23b3fd672cfdb0747548aecd5f0cd816ec20a0da633f21a18c49c17f6cc756d1"
+"ui/package.json" = "1fbb1aa43833d432231685ee24317dfbfe3863710f226f2dc744bfaa3e2f2849"
 [tests.T_CONTRACT_COMMANDS]
 pending = false
 
@@ -499,6 +505,24 @@ pending = false
 pending = false
 
 [tests.T_VAULT_PUT_UNCHANGED]
+pending = false
+
+[tests.T_DEV_POLL_GRANT_TYPE]
+pending = false
+
+[tests.T_DEV_POLL_ONCE]
+pending = false
+
+[tests.T_DEV_POLL_SLOW_DOWN]
+pending = false
+
+[tests.T_DEV_POLL_PRIVATE_CODE]
+pending = false
+
+[tests.T_VAULT_PUT_CAS]
+pending = false
+
+[tests.T_VAULT_PUT_CAS_META]
 pending = false
 
 [tests.T_VAULT_ROLLBACK]
@@ -916,4 +940,22 @@ pending = false
 pending = false
 
 [tests.T_DEVICE_DENY]
+pending = false
+
+[tests.T_JWT_ROUNDTRIP]
+pending = false
+
+[tests.T_JWT_REJECTS]
+pending = false
+
+[tests.T_JWT_NONCE]
+pending = false
+
+[tests.T_JWT_FORGERY]
+pending = false
+
+[tests.T_JWT_RS256]
+pending = false
+
+[tests.T_PKCE_S256]
 pending = false

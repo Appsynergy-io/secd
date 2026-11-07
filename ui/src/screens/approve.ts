@@ -378,6 +378,19 @@ function onPick(state: AppState, row: PendingRequest): void {
   paint(state);
 }
 
+function followNativeRedirect(data: unknown): void {
+    const redirect = (data as { redirect_uri?: unknown } | undefined)?.redirect_uri;
+    if (typeof redirect === "string") {
+      const target = new URL(redirect);
+      if (target.protocol !== "http:" || target.hostname !== "127.0.0.1" ||
+          target.port === "" || target.pathname !== "/oidc/callback" ||
+          target.username !== "" || target.password !== "" || target.hash !== "") {
+        throw new Error("Invalid native client redirect");
+      }
+      window.location.assign(target.href);
+    }
+}
+
 async function onApprove(state: AppState): Promise<void> {
   const m = memOf(state);
   if (m.busy || m.result !== undefined) {
@@ -441,6 +454,7 @@ async function onApprove(state: AppState): Promise<void> {
       m.error = failSentence(res.status, res.data);
       return;
     }
+    followNativeRedirect(res.data);
     m.result = "approved";
     stopTick(m);
   } catch {
@@ -483,6 +497,7 @@ async function onDeny(state: AppState): Promise<void> {
       m.error = failSentence(res.status, res.data);
       return;
     }
+    followNativeRedirect(res.data);
     m.result = "denied";
     stopTick(m);
   } catch {
