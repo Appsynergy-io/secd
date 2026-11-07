@@ -64,6 +64,12 @@ struct FinishBody {
     email: Option<String>,
 }
 
+/// 403 `idp`: the central provider must vouch for this account first. Sent
+/// only after the factor itself verified, so it says nothing to a guesser.
+fn idp_required() -> Response {
+    json_status(StatusCode::FORBIDDEN, "idp")
+}
+
 async fn start(State(state): State<AppState>, Json(body): Json<EmailBody>) -> Response {
     let Some(raw) = body.email.as_deref() else {
         return json_status(StatusCode::BAD_REQUEST, "email");
@@ -197,6 +203,9 @@ async fn pk_reg_finish(
     if !state.users.is_empty() {
         return fail_auth();
     }
+    if !crate::upstream::admits(&state, &headers, &email) {
+        return idp_required();
+    }
     let user = User {
         id: user_id,
         email: email.clone(),
@@ -317,6 +326,9 @@ async fn pk_login_finish(
     let Some(user) = state.users.get(&email) else {
         return fail_auth();
     };
+    if !crate::upstream::admits(&state, &headers, &email) {
+        return idp_required();
+    }
     let wraps = wrap_json_list(&user.wraps());
     let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
@@ -365,6 +377,10 @@ async fn pw_register(
     };
     let session = state.sessions.console_from_headers(&headers);
     if state.users.is_empty() {
+        if !crate::upstream::admits(&state, &headers, &email) {
+            body.password.zeroize();
+            return idp_required();
+        }
         let Some(wrap) = parse_wrap(&mut body) else {
             return json_status(StatusCode::BAD_REQUEST, "wrap");
         };
@@ -447,6 +463,9 @@ async fn pw_login(
         return fail_auth();
     }
     let user = user.expect("invariant: verified user exists");
+    if !crate::upstream::admits(&state, &headers, &email) {
+        return idp_required();
+    }
     let wraps = wrap_json_list(&user.wraps());
     let Ok((_id, token)) = state.sessions.ensure_console(&email, &headers) else {
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, "store");
@@ -466,6 +485,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let mut res = json_value(StatusCode::OK, json!({ "ok": true }));
     res.headers_mut()
         .insert(axum::http::header::SET_COOKIE, clear_cookie());
+    crate::upstream::clear_identity(&state, &headers, &mut res);
     res
 }
 

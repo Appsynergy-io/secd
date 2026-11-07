@@ -1,5 +1,6 @@
 pub mod aead;
 pub mod group;
+pub mod jwt;
 pub mod name;
 pub mod parity;
 pub mod provider;

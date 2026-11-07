@@ -1,7 +1,7 @@
 //! Black-box import from the old CLI (`sdxd`) into a live secd session.
 //! Never writes a secret value to this process's stdout, stderr, or logs.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
@@ -422,7 +422,7 @@ fn load_vault(unlocked: &Unlocked) -> Result<VaultLoad, ImportError> {
 fn save_vault(
     unlocked: &Unlocked,
     entries: &[Entry],
-    before: &BTreeMap<String, String>,
+    before: &secd::policy::Base,
 ) -> Result<(), ImportError> {
     let rows: Vec<Row<'_>> = entries.iter().map(Entry::row).collect();
     match secd::policy::save_entries_read_back(&unlocked.token, &unlocked.dek, &rows, before) {

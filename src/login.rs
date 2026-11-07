@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -17,6 +16,7 @@ use serde_json::{json, Value};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
+const CLIENT_ID: &str = "secd-cli";
 const HOST: &str = "secd.imabee.com";
 const IP: &str = "192.168.101.122";
 const PORT: u16 = 443;
@@ -34,6 +34,8 @@ pub struct DeviceFile {
 
 pub struct DeviceFlow {
     secret: StaticSecret,
+    device_code: String,
+    nonce: String,
     pub user_code: String,
     pub interval: u64,
     pub verification_uri: String,
@@ -51,6 +53,8 @@ impl DeviceFlow {
     ) -> Self {
         Self {
             secret,
+            device_code: String::new(),
+            nonce: String::new(),
             user_code,
             interval,
             verification_uri,
@@ -59,10 +63,21 @@ impl DeviceFlow {
     }
 }
 
+/// One RFC 8628 device access token response.
 pub enum Poll {
+    /// `authorization_pending`: nobody has approved or denied it yet.
     Pending,
+    /// `slow_down`: keep polling, no faster than this many seconds.
+    SlowDown(u64),
+    /// `access_denied`: someone denied it in the console.
+    Denied,
+    /// `expired_token`: the request is gone; start again.
     Expired,
-    Ready { token: String, sealed: Value },
+    Ready {
+        token: String,
+        sealed: Value,
+        email: String,
+    },
 }
 
 pub struct Unlocked {
@@ -87,16 +102,17 @@ pub fn resume() -> Option<Unlocked> {
 }
 
 pub fn unlock() -> anyhow::Result<Unlocked> {
-    let flow = start()?;
+    let mut flow = start()?;
     open_browser(&flow.open_url);
     loop {
         match poll_once(&flow)? {
-            Poll::Pending => {
-                std::thread::sleep(Duration::from_secs(flow.interval.max(1)));
-            }
-            Poll::Expired => anyhow::bail!("device pending expired"),
-            Poll::Ready { token, sealed } => return finish(flow, token, sealed),
+            Poll::Pending => {}
+            Poll::SlowDown(interval) => flow.interval = interval,
+            Poll::Denied => anyhow::bail!("sign-in denied in the console"),
+            Poll::Expired => anyhow::bail!("sign-in request expired; run secd again"),
+            Poll::Ready { token, sealed, .. } => return finish(flow, token, sealed),
         }
+        std::thread::sleep(Duration::from_secs(flow.interval.max(1)));
     }
 }
 
@@ -128,7 +144,13 @@ pub fn start() -> anyhow::Result<DeviceFlow> {
     let public = PublicKey::from(&secret);
     let eph_pub = hex::encode(public.as_bytes());
     let device = load_or_create_device()?;
+    let mut nonce = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+    let nonce = secd_core::jwt::b64url(&nonce);
     let body = json!({
+        "nonce": nonce,
+        "client_id": CLIENT_ID,
+        "scope": "openid email",
         "eph_pub": eph_pub,
         "device_id": device.id,
         "hostname": device.name,
@@ -142,6 +164,12 @@ pub fn start() -> anyhow::Result<DeviceFlow> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("device start: no user_code"))?
         .to_string();
+    let device_code = v
+        .get("device_code")
+        .and_then(Value::as_str)
+        .filter(|code| code.len() == 64)
+        .ok_or_else(|| anyhow!("device start: server needs an update (no private device code)"))?
+        .to_string();
     let interval = v.get("interval").and_then(Value::as_u64).unwrap_or(5);
     let verification_uri = v
         .get("verification_uri")
@@ -151,6 +179,8 @@ pub fn start() -> anyhow::Result<DeviceFlow> {
     let open_url = complete_uri(&verification_uri, &user_code, &eph_pub);
     Ok(DeviceFlow {
         secret,
+        device_code,
+        nonce,
         user_code,
         interval,
         verification_uri,
@@ -159,31 +189,86 @@ pub fn start() -> anyhow::Result<DeviceFlow> {
 }
 
 pub fn poll_once(flow: &DeviceFlow) -> anyhow::Result<Poll> {
-    let body = json!({ "user_code": flow.user_code });
+    let body = json!({
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "client_id": CLIENT_ID,
+        "device_code": flow.device_code,
+    });
     let (status, v) = request("POST", "/api/v1/device/poll", Some(&body), None)?;
-    if status == 404 {
-        return Ok(Poll::Expired);
-    }
-    if status != 200 {
-        anyhow::bail!("device poll {status}: {}", err_of(&v));
-    }
-    match v.get("status").and_then(Value::as_str) {
-        Some("pending") => Ok(Poll::Pending),
-        Some("expired") | Some("denied") => Ok(Poll::Expired),
-        Some("ok") => {
-            let token = v
-                .get("token")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("device poll: no token"))?
-                .to_string();
-            let sealed = v
-                .get("sealed_dek")
-                .cloned()
-                .ok_or_else(|| anyhow!("device poll: no sealed_dek"))?;
-            Ok(Poll::Ready { token, sealed })
+    if status == 200 {
+        if v.get("token_type").and_then(Value::as_str) != Some("Bearer") {
+            anyhow::bail!("device poll: not a bearer token");
         }
-        _ => Ok(Poll::Pending),
+        let token = v
+            .get("access_token")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| anyhow!("device poll: no access_token"))?
+            .to_string();
+        let sealed = v
+            .get("sealed_dek")
+            .cloned()
+            .ok_or_else(|| anyhow!("device poll: no sealed_dek"))?;
+        let id_token = v
+            .get("id_token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("device poll: no id_token"))?;
+        let email = verify_id_token(id_token, &flow.nonce, &token)?;
+        return Ok(Poll::Ready {
+            token,
+            sealed,
+            email,
+        });
     }
+    match (status, v.get("error").and_then(Value::as_str)) {
+        (400, Some("authorization_pending")) => Ok(Poll::Pending),
+        (400, Some("slow_down")) => {
+            let next = v
+                .get("interval")
+                .and_then(Value::as_u64)
+                .unwrap_or(flow.interval + 5);
+            Ok(Poll::SlowDown(next.max(flow.interval.saturating_add(5))))
+        }
+        (400, Some("access_denied")) => Ok(Poll::Denied),
+        (400, Some("expired_token")) => Ok(Poll::Expired),
+        _ => anyhow::bail!("device poll {status}: {}", err_of(&v)),
+    }
+}
+
+/// Check the ID token against the keys secd publishes, over the same pinned
+/// TLS as every other call: issuer, audience, lifetime and signature. Returns
+/// the account it names. A session whose token does not verify is refused.
+fn verify_id_token(id_token: &str, nonce: &str, access_token: &str) -> anyhow::Result<String> {
+    let (status, jwks) = request("GET", "/.well-known/jwks.json", None, None)?;
+    if status != 200 {
+        anyhow::bail!("jwks {status}");
+    }
+    let issuer = format!("https://{HOST}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let claims = secd_core::jwt::verify(
+        id_token,
+        &jwks,
+        &secd_core::jwt::Expect {
+            issuer: &issuer,
+            audience: CLIENT_ID,
+            nonce: Some(nonce),
+            now,
+        },
+    )
+    .map_err(|e| anyhow!("sign-in refused: id_token {e}"))?;
+    if claims.get("at_hash").and_then(Value::as_str)
+        != Some(secd_core::jwt::token_hash(access_token).as_str())
+    {
+        anyhow::bail!("sign-in refused: access token binding mismatch");
+    }
+    claims
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("sign-in refused: id_token names no account"))
 }
 
 /// `sealed_dek` is `{eph_pub: hex, blob: hex}` — X25519 then XChaCha AAD `dek`.
@@ -195,16 +280,16 @@ pub fn finish(flow: DeviceFlow, token: String, sealed: Value) -> anyhow::Result<
     Ok(Unlocked { token, dek })
 }
 
-/// The register as the vault takes it: a whole-vault replace, checked against
-/// `before` and read back. Returns the vault as written, the caller's `before`
-/// for its next save.
+/// The register as the vault takes it: a whole-vault replace on top of
+/// `base`, read back. Returns the vault as written, the caller's base for its
+/// next save.
 pub fn save_snapshot(
     token: &str,
     dek: &Secret,
     rows: &[crate::policy::Row<'_>],
-    before: &BTreeMap<String, String>,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    crate::policy::save_entries_read_back(token, dek, rows, before)
+    base: &crate::policy::Base,
+) -> anyhow::Result<crate::policy::Base> {
+    crate::policy::save_entries_read_back(token, dek, rows, base)
 }
 
 pub fn save_session(token: &str) -> anyhow::Result<()> {
@@ -274,8 +359,12 @@ fn spawn_write(bin: &str, args: &[&str], bytes: &[u8]) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(bytes);
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(bytes).is_err() {
+            drop(stdin);
+            let _ = child.wait();
+            return false;
+        }
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
@@ -417,7 +506,15 @@ fn request(
     body: Option<&Value>,
     bearer: Option<&str>,
 ) -> anyhow::Result<(u16, Value)> {
+    let oauth = matches!(path, "/api/v1/device/start" | "/api/v1/device/poll");
     let payload = match body {
+        Some(Value::Object(map)) if oauth => url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(
+                map.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or(""))),
+            )
+            .finish()
+            .into_bytes(),
         Some(v) => serde_json::to_vec(v)?,
         None => Vec::new(),
     };
@@ -428,7 +525,11 @@ fn request(
         head.push_str("\r\n");
     }
     if method == "POST" || method == "PUT" {
-        head.push_str("Content-Type: application/json\r\n");
+        head.push_str(if oauth {
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+        } else {
+            "Content-Type: application/json\r\n"
+        });
         head.push_str(&format!("Content-Length: {}\r\n", payload.len()));
     }
     head.push_str("\r\n");

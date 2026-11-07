@@ -1878,9 +1878,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -1917,6 +1917,7 @@ dependencies = [
  "crossterm 0.28.1",
  "hex",
  "openssl",
+ "rand 0.8.6",
  "ratatui",
  "rustls",
  "rustls-pemfile",
@@ -1926,6 +1927,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "url",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1935,8 +1937,11 @@ name = "secd-core"
 version = "0.1.18"
 dependencies = [
  "argon2",
+ "aws-lc-rs",
+ "base64 0.22.1",
  "chacha20poly1305",
  "libc",
+ "serde_json",
  "x25519-dalek",
  "zeroize",
 ]

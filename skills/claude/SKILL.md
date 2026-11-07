@@ -1,7 +1,10 @@
 ---
 name: secd
 description: >
-  Use a secret without ever seeing its value. Read this file first. Use whenever a task needs a token, password, API key, DSN, certificate or credential ("the command needs an API key", "set up the env for this script", "store this secret", "/secd"); when `git` or `gh` auth fails (401/403, "could not read Username"); and before writing any script, service file or CI config that references a credential.
+  Use credentials stored in secd without exposing their values. Apply when the user
+  selects secd, invokes /secd, or the current task already uses secd references.
+  Generic credential work, Git authentication failures, and writing CI or service
+  configuration do not select secd by themselves.
 ---
 
 # secd
@@ -47,6 +50,8 @@ origin the vault serves; `gh` already serves github.com, so it is not wired here
 ## Anything else
 
 `secd providers` / `secd info <NAME>` then `secd run --with P=B -- CMD`.
+Individual values: `--with ENV=name`. Custom bundle fields: `--with ENV=name#field`.
+For existing credentials, give the human the bundle name and fields to fill in secd; never ask for values in chat.
 
 ## Commands
 

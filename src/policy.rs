@@ -57,10 +57,22 @@ pub struct VaultLoad {
     /// Every entry the server sent, as a `PUT /api/v1/vault` body: the response
     /// carries a `version` per entry and the route rejects any key but `name`,
     /// `ciphertext` and `meta`, so this is the projection, not the response.
-    /// Ciphertext, never plaintext.
+    /// Ciphertext, never plaintext. It carries no `base`: restoring it is a
+    /// deliberate overwrite of whatever the vault holds by then, so whoever
+    /// restores names the revision they are overwriting.
     pub body: String,
-    /// name -> ciphertext as loaded: what a save checks the vault against.
-    pub before: BTreeMap<String, String>,
+    /// The vault as loaded: what the next save is built on.
+    pub before: Base,
+}
+
+/// The vault a save is built on: the server's revision of it, and its
+/// ciphertexts by name. The server refuses a whole-vault replace whose base
+/// is not the vault's current revision, inside the same transaction as the
+/// write, so no save can undo one it never saw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Base {
+    pub revision: String,
+    pub ciphertexts: BTreeMap<String, String>,
 }
 
 impl VaultLoad {
@@ -173,16 +185,18 @@ pub fn parse_with(raw: &str) -> anyhow::Result<WithSpec> {
 pub fn check_with_collision(specs: &[WithSpec]) -> anyhow::Result<()> {
     let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
     for spec in specs {
-        let schema = providers()
-            .iter()
-            .find(|p| p.name == spec.provider)
-            .ok_or_else(|| anyhow!("unknown provider {}", spec.provider))?;
-        for field in &schema.fields {
-            if claimed
-                .insert(field.env.as_str(), spec.provider.as_str())
-                .is_some()
-            {
-                anyhow::bail!("secd: env collision: {}", field.env);
+        let names: Vec<&str> = if explicit_env(&spec.provider) {
+            vec![&spec.provider]
+        } else {
+            let schema = providers()
+                .iter()
+                .find(|p| p.name == spec.provider)
+                .ok_or_else(|| anyhow!("unknown provider {}", spec.provider))?;
+            schema.fields.iter().map(|f| f.env.as_str()).collect()
+        };
+        for name in names {
+            if claimed.insert(name, &spec.provider).is_some() {
+                anyhow::bail!("secd: env collision: {name}");
             }
         }
     }
@@ -210,6 +224,56 @@ pub fn apply_with(
             };
             env.insert(field.env.clone(), val.to_string());
         }
+    }
+    Ok(env)
+}
+
+/// Uppercase environment names select an individual value or a bundle field.
+fn explicit_env(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'_'))
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A field reference uses `name#field`; # cannot occur in a vault name.
+pub fn apply_entries(
+    specs: &[WithSpec],
+    entries: &[Entry],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    check_with_collision(specs)?;
+    let bundles = discover_bundles(entries);
+    let mut env = BTreeMap::new();
+    for spec in specs {
+        if !explicit_env(&spec.provider) {
+            env.extend(apply_with(std::slice::from_ref(spec), &bundles)?);
+            continue;
+        }
+        let (name, field) = match spec.bundle.split_once('#') {
+            Some((name, field)) => (name, Some(field)),
+            None => (spec.bundle.as_str(), None),
+        };
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| anyhow!("unknown secret {name}"))?;
+        let text = std::str::from_utf8(entry.value.as_bytes())
+            .map_err(|_| anyhow!("secret {name} is not text"))?;
+        let value = match field {
+            None => text.to_string(),
+            Some(field) => {
+                let mut fields: BTreeMap<String, String> = serde_json::from_str(text)
+                    .map_err(|_| anyhow!("secret {name} is not a bundle of text fields"))?;
+                let value = fields.remove(field);
+                for v in fields.values_mut() {
+                    v.zeroize();
+                }
+                value.ok_or_else(|| anyhow!("unknown field {field} in {name}"))?
+            }
+        };
+        if value.contains('\0') {
+            anyhow::bail!("secret {name} contains a null byte");
+        }
+        env.insert(spec.provider.clone(), value);
     }
     Ok(env)
 }
@@ -553,39 +617,54 @@ pub fn load_vault(token: &str, dek: &Secret) -> anyhow::Result<VaultLoad> {
             meta,
         });
     }
+    let revision = revision_of(&v)?;
     Ok(VaultLoad {
         entries: out,
         raw,
         body: json!({ "entries": put_entries }).to_string(),
-        before,
+        before: Base {
+            revision,
+            ciphertexts: before,
+        },
     })
 }
 
-/// Check the vault still holds `before`, save, then read it back and compare
-/// what the server returns against what was sent. Returns the vault as written,
-/// which is `before` for this caller's next save.
+/// The `revision` a vault response carries: 64 hex, or the server predates
+/// the compare-and-swap and must not be written to.
+fn revision_of(v: &Value) -> anyhow::Result<String> {
+    v.get("revision")
+        .and_then(Value::as_str)
+        .filter(|r| r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("vault: the server sent no revision; it needs an update"))
+}
+
+/// Save on top of `base`, then read the vault back and compare it with what
+/// was sent. Returns the vault as written: the caller's base for its next save.
 ///
-/// `PUT /api/v1/vault` replaces the whole vault and carries no version, so a
-/// save landing between the check and the write, or between the write and the
-/// read, wins and cannot be stopped here. The check narrows that window to one
-/// round trip, and the read-back turns a clobber from silent into an error.
+/// The server refuses the write unless the vault is still exactly `base`, in
+/// the transaction that writes it, so a concurrent save is refused rather than
+/// undone. The read-back proves the bytes that landed are the bytes sealed here.
 pub fn save_entries_read_back(
     token: &str,
     dek: &Secret,
     rows: &[Row<'_>],
-    before: &BTreeMap<String, String>,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let now = load_ciphertexts(token)?;
-    if &now != before {
-        return Err(changed_under_write("loaded", before, &now));
-    }
-    let sent = put_vault(token, dek, rows)?;
+    base: &Base,
+) -> anyhow::Result<Base> {
+    let written = put_vault(token, dek, rows, base)?;
     let back = load_ciphertexts(token)
         .context("vault written; read-back failed, the vault now holds what was sent")?;
-    if back != sent {
-        return Err(changed_under_write("sent", &sent, &back));
+    if back.ciphertexts != written.ciphertexts {
+        return Err(changed_under_write(
+            "sent",
+            &written.ciphertexts,
+            &back.ciphertexts,
+        ));
     }
-    Ok(sent)
+    if back.revision != written.revision {
+        anyhow::bail!("vault written; read-back revision differs from the one the server wrote");
+    }
+    Ok(written)
 }
 
 /// One sentence for a vault that is not what this write assumed it was.
@@ -616,12 +695,8 @@ fn changed_under_write(
     )
 }
 
-/// PUT the whole vault. Returns name -> ciphertext, exactly as sent.
-fn put_vault(
-    token: &str,
-    dek: &Secret,
-    rows: &[Row<'_>],
-) -> anyhow::Result<BTreeMap<String, String>> {
+/// PUT the whole vault on top of `base`. Returns the vault as written.
+fn put_vault(token: &str, dek: &Secret, rows: &[Row<'_>], base: &Base) -> anyhow::Result<Base> {
     let mut sent: BTreeMap<String, String> = BTreeMap::new();
     let mut body_entries = Vec::with_capacity(rows.len());
     for (name, value, meta) in rows {
@@ -637,19 +712,23 @@ fn put_vault(
             anyhow::bail!("duplicate name {name}");
         }
     }
-    let body = json!({ "entries": body_entries });
+    let body = json!({ "entries": body_entries, "base": base.revision });
     let (status, v) = request("PUT", "/api/v1/vault", Some(&body), Some(token))?;
-    if status == 401 {
-        return Err(locked_err());
+    match status {
+        200 => Ok(Base {
+            revision: revision_of(&v)?,
+            ciphertexts: sent,
+        }),
+        401 => Err(locked_err()),
+        409 => Err(anyhow!(
+            "vault changed since it was loaded; nothing was saved — reload and try again"
+        )),
+        _ => Err(anyhow!("vault put {status}: {}", err_of(&v))),
     }
-    if status != 200 {
-        anyhow::bail!("vault put {status}: {}", err_of(&v));
-    }
-    Ok(sent)
 }
 
 /// The vault as name -> ciphertext, without opening anything.
-fn load_ciphertexts(token: &str) -> anyhow::Result<BTreeMap<String, String>> {
+fn load_ciphertexts(token: &str) -> anyhow::Result<Base> {
     let (status, v) = request("GET", "/api/v1/vault", None, Some(token))?;
     if status != 200 {
         anyhow::bail!("vault {status}");
@@ -674,7 +753,10 @@ fn load_ciphertexts(token: &str) -> anyhow::Result<BTreeMap<String, String>> {
             out.len()
         );
     }
-    Ok(out)
+    Ok(Base {
+        revision: revision_of(&v)?,
+        ciphertexts: out,
+    })
 }
 
 /// A provider schema as the register offers it: built-in and custom, one type.

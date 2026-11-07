@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use webauthn_rs::prelude::Webauthn;
 
@@ -6,7 +7,9 @@ use crate::audit::AuditLog;
 use crate::auth::{self, Pending, UserStore};
 use crate::db::Db;
 use crate::device::DevicePending;
+use crate::oidc::Issuer;
 use crate::sessions::SessionStore;
+use crate::upstream::Upstream;
 use crate::vault::VaultStore;
 
 pub const RP_ID: &str = "secd.imabee.com";
@@ -23,6 +26,10 @@ pub struct AppState {
     pub audit: AuditLog,
     pub webauthn: Webauthn,
     pub origin: String,
+    /// secd as the OpenID Provider its CLI signs in through.
+    pub oidc: Issuer,
+    /// The central provider you control, when one is configured.
+    pub upstream: Option<Arc<Upstream>>,
 }
 
 impl AppState {
@@ -49,6 +56,7 @@ impl AppState {
             None => (RP_ID.to_string(), ORIGIN.to_string()),
         };
         let webauthn = auth::webauthn(&rp_id, &origin)?;
+        let oidc = Issuer::open(&db, &origin)?;
         Ok(Self {
             pending: Pending::new(),
             devices: DevicePending::new(),
@@ -59,6 +67,14 @@ impl AppState {
             db,
             webauthn,
             origin,
+            oidc,
+            upstream: None,
         })
+    }
+
+    /// Put a central OpenID Provider in front of sign-in.
+    pub fn with_upstream(mut self, upstream: Upstream) -> Self {
+        self.upstream = Some(Arc::new(upstream));
+        self
     }
 }

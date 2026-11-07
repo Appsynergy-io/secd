@@ -55,7 +55,7 @@ pub fn infer(keys: &[&str]) -> Option<&'static str> {
     }
 }
 
-/// Schema-ordered pairs of trimmed, non-empty values. `None` when a required
+/// Schema-ordered pairs of non-empty values; secret bytes are preserved. `None` when a required
 /// field is empty. The rule the web console spells as `buildPayload`.
 ///
 /// Order is load-bearing: the console seals its payload in schema order and
@@ -71,7 +71,7 @@ pub fn build_payload(
             .find(|(k, _)| *k == f.key)
             .map(|(_, v)| v.as_str())
             .unwrap_or_default();
-        let v = raw.trim();
+        let v = if f.secret { raw } else { raw.trim() };
         if v.is_empty() {
             if f.optional {
                 continue;

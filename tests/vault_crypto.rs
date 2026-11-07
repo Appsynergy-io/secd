@@ -121,7 +121,31 @@ async fn post_json(
     (s, h, serde_json::from_slice(&b).unwrap_or(Value::Null))
 }
 
+/// A whole-vault PUT builds on the revision it loaded, as every real client
+/// does: a body without `base` gets the vault's current one. The
+/// compare-and-swap itself is tested with `put_raw`, which sends the body as is.
 async fn put_json(
+    app: &Router,
+    path: &str,
+    body: &Value,
+    cookie: Option<&str>,
+    bearer: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut body = body.clone();
+    if path == "/api/v1/vault" && (cookie.is_some() || bearer.is_some()) {
+        if let Some(obj) = body.as_object_mut() {
+            if !obj.contains_key("base") {
+                let (_, v) = get_json(app, path, cookie, bearer).await;
+                if let Some(rev) = v.get("revision") {
+                    obj.insert("base".into(), rev.clone());
+                }
+            }
+        }
+    }
+    put_raw(app, path, &body, cookie, bearer).await
+}
+
+async fn put_raw(
     app: &Router,
     path: &str,
     body: &Value,
@@ -186,7 +210,7 @@ async fn approve_device(h: &H, cookie: &str) -> String {
     let (s, _, start) = post_json(
         &h.app,
         "/api/v1/device/start",
-        &json!({"eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
+        &json!({"client_id": "secd-cli", "scope": "openid email", "eph_pub": EPH, "device_id": "dev-1", "hostname": "testhost"}),
         None,
         None,
     )
@@ -205,12 +229,12 @@ async fn approve_device(h: &H, cookie: &str) -> String {
     let (_, _, poll) = post_json(
         &h.app,
         "/api/v1/device/poll",
-        &json!({"user_code": code}),
+        &json!({"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "client_id": "secd-cli", "device_code": start["device_code"]}),
         None,
         None,
     )
     .await;
-    poll["token"].as_str().expect("token").to_string()
+    poll["access_token"].as_str().expect("token").to_string()
 }
 
 fn json_has_key(v: &Value, key: &str) -> bool {
@@ -280,7 +304,7 @@ fn T_VAULT_GET_EMPTY() {
         let cookie = login(&h).await;
         let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(v, json!({"entries": []}));
+        assert_eq!(v["entries"], json!([]));
     });
 }
 
@@ -330,7 +354,7 @@ fn T_VAULT_PUT_UNAUTH() {
         let cookie = login(&h).await;
         let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(v, json!({"entries": []}));
+        assert_eq!(v["entries"], json!([]));
     });
 }
 
@@ -464,7 +488,7 @@ fn T_VAULT_PUT_PLAINTEXT_FIELD() {
         assert_eq!(s, StatusCode::BAD_REQUEST);
         let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(v, json!({"entries": []}));
+        assert_eq!(v["entries"], json!([]));
     });
 }
 
@@ -484,7 +508,7 @@ fn T_VAULT_PUT_BAD_NAME() {
         assert_eq!(s, StatusCode::BAD_REQUEST);
         let (s, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(v, json!({"entries": []}));
+        assert_eq!(v["entries"], json!([]));
     });
 }
 
@@ -1028,5 +1052,118 @@ fn T_VAULT_ROLLBACK_BAD() {
         assert_eq!(v, json!({"versions": []}));
         let (s, _) = get_versions(&h.app, "", Some(&cookie)).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
+    });
+}
+
+/// A whole-vault PUT lands only on the revision it was built from. No base is
+/// 428, a malformed one 400, a stale one 409 and changes nothing; the revision
+/// a PUT returns is the one the next GET names.
+#[test]
+fn T_VAULT_PUT_CAS() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let one = json!([{"name": "kv/a", "ciphertext": "aa", "meta": {}}]);
+        let two = json!([{"name": "kv/b", "ciphertext": "bb", "meta": {}}]);
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        let empty = v["revision"].as_str().expect("revision").to_string();
+        assert_eq!(empty.len(), 64);
+
+        let (s, v) = put_raw(
+            &h.app,
+            "/api/v1/vault",
+            &json!({"entries": one}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::PRECONDITION_REQUIRED, "{v}");
+        for bad in [
+            json!(""),
+            json!("zz"),
+            json!(1),
+            json!(null),
+            json!("a".repeat(65)),
+        ] {
+            let body = json!({"entries": one, "base": bad});
+            let (s, _) = put_raw(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "base {bad}");
+        }
+
+        // Two writers load the same empty vault; the first lands.
+        let body = json!({"entries": one, "base": empty});
+        let (s, v) = put_raw(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let landed = v["revision"].as_str().expect("revision").to_string();
+        assert_ne!(landed, empty);
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(
+            v["revision"],
+            json!(landed),
+            "PUT names the revision GET serves"
+        );
+
+        // The second, built on the vault the first replaced, is refused whole.
+        let body = json!({"entries": two, "base": empty});
+        let (s, v) = put_raw(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{v}");
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        assert_eq!(
+            v["entries"][0]["name"],
+            json!("kv/a"),
+            "a refused PUT changes nothing"
+        );
+        assert_eq!(v["entries"].as_array().map(Vec::len), Some(1));
+        assert_eq!(v["revision"], json!(landed));
+
+        // Rebuilt on what is there now, it lands.
+        let body = json!({"entries": two, "base": landed});
+        let (s, _) = put_raw(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+
+        // A rollback is a write too: a PUT built before it is stale.
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        let before_rollback = v["revision"].as_str().expect("revision").to_string();
+        let (s, _, _) = post_json(
+            &h.app,
+            "/api/v1/vault/rollback",
+            &json!({"name": "kv/a", "version": 1}),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let body = json!({"entries": one, "base": before_rollback});
+        let (s, _) = put_raw(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::CONFLICT);
+
+        // Two entries of one name are refused before anything is written.
+        let (_, v) = get_json(&h.app, "/api/v1/vault", Some(&cookie), None).await;
+        let dup = json!({"entries": [
+            {"name": "kv/a", "ciphertext": "aa", "meta": {}},
+            {"name": "kv/a", "ciphertext": "bb", "meta": {}},
+        ], "base": v["revision"]});
+        let (s, _) = put_raw(&h.app, "/api/v1/vault", &dup, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    });
+}
+
+/// The revision covers meta, not only ciphertext: a writer that kept every
+/// blob but relabelled one still moves the vault on.
+#[test]
+fn T_VAULT_PUT_CAS_META() {
+    block_on(async {
+        let h = fresh();
+        let cookie = login(&h).await;
+        let body = json!({"entries": [{"name": "kv/a", "ciphertext": "aa", "meta": {"provider": "github"}}]});
+        let (s, v) = put_json(&h.app, "/api/v1/vault", &body, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let first = v["revision"].clone();
+        let relabel = json!({"entries": [{"name": "kv/a", "ciphertext": "aa", "meta": {"provider": "gitlab"}}], "base": first});
+        let (s, v) = put_raw(&h.app, "/api/v1/vault", &relabel, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_ne!(v["revision"], first);
+        let (s, _) = put_raw(&h.app, "/api/v1/vault", &relabel, Some(&cookie), None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "the relabel moved the revision");
     });
 }

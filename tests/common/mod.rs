@@ -184,8 +184,13 @@ impl Harness {
                 "meta": meta,
             }));
         }
+        let base = state.vault.snapshot().expect("snapshot").1;
         let app = secd_web::app(state.clone());
-        let (status, _) = block_on(put_vault(&app, &json!({ "entries": body_entries }), &token));
+        let (status, _) = block_on(put_vault(
+            &app,
+            &json!({ "entries": body_entries, "base": base }),
+            &token,
+        ));
         assert_eq!(status, StatusCode::OK, "seed vault");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

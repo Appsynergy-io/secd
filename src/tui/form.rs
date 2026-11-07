@@ -11,10 +11,16 @@
 use crate::policy::Schema;
 
 /// One line of typed text with a caret.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct Input {
     chars: Vec<char>,
     caret: usize,
+}
+
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Input([REDACTED])")
+    }
 }
 
 impl Drop for Input {
@@ -137,6 +143,7 @@ pub struct FormField {
 pub struct Form {
     /// Schema name for a provider form; `None` for the ad-hoc form.
     pub provider: Option<String>,
+    pub custom: bool,
     /// The modal's title.
     pub title: String,
     /// Index 0 is always the name row; 1.. are the schema fields, in order.
@@ -153,6 +160,7 @@ impl Form {
     pub fn single(name: &str, value: &str) -> Self {
         Self {
             provider: None,
+            custom: false,
             title: "add".to_string(),
             fields: vec![
                 name_field(name, "path/name"),
@@ -199,12 +207,86 @@ impl Form {
         }
         Self {
             provider: Some(schema.name.clone()),
+            custom: false,
             title: schema.title.clone(),
             fields,
             focus: 0,
             error: None,
             editing: None,
         }
+    }
+
+    pub fn custom(name: &str, pairs: &[(String, String)]) -> Self {
+        let mut form = Self::single(name, "");
+        form.custom = true;
+        form.title = "custom bundle · Ctrl-N adds a field".into();
+        form.fields.truncate(1);
+        for (key, value) in pairs {
+            form.add_custom_field();
+            let n = form.fields.len();
+            form.fields[n - 2].input = Input::from_text(key);
+            form.fields[n - 1].input = Input::from_text(value);
+        }
+        if pairs.is_empty() {
+            form.add_custom_field();
+        }
+        form.focus = 0;
+        form
+    }
+
+    pub fn add_custom_field(&mut self) {
+        if !self.custom {
+            return;
+        }
+        let number = self.fields.len() / 2 + 1;
+        self.fields.push(FormField {
+            key: format!("field {number}"),
+            hint: "e.g. client_id".into(),
+            tag: FieldTag::Required,
+            env: String::new(),
+            secret: false,
+            input: Input::default(),
+            shown: false,
+        });
+        self.fields.push(FormField {
+            key: "value".into(),
+            hint: String::new(),
+            tag: FieldTag::Required,
+            env: String::new(),
+            secret: true,
+            input: Input::default(),
+            shown: false,
+        });
+        self.focus = self.fields.len() - 2;
+    }
+
+    pub fn custom_pairs(&self) -> Result<Vec<(String, String)>, String> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for fields in self.fields[1..].chunks_exact(2) {
+            let key = fields[0].input.text().trim().to_string();
+            let value = fields[1].input.text();
+            if key.is_empty() && value.is_empty() {
+                continue;
+            }
+            if key.is_empty()
+                || !key.bytes().enumerate().all(|(i, b)| {
+                    b.is_ascii_alphabetic() || b == b'_' || (i > 0 && b.is_ascii_digit())
+                })
+            {
+                return Err("field names need letters, numbers and underscores".into());
+            }
+            if pairs.iter().any(|(k, _)| k == &key) {
+                return Err("field names must be unique".into());
+            }
+            if value.is_empty() {
+                return Err("a field value is empty".into());
+            }
+            pairs.push((key, value));
+        }
+        if pairs.is_empty() {
+            return Err("add at least one field".into());
+        }
+        Ok(pairs)
     }
 
     pub fn name_text(&self) -> String {

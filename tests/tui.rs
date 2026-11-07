@@ -2,7 +2,6 @@
 
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use std::collections::BTreeMap;
 
 use secd::policy;
 use secd::tui::{
@@ -54,12 +53,12 @@ fn T_TUI_REGIONS() {
         let area = Rect::new(2, 3, w, h);
         let r = regions(area);
         let list_w = w.saturating_mul(42) / 100;
-        let mid_h = h.saturating_sub(1).saturating_sub(8);
+        let mid_h = h.saturating_sub(1).saturating_sub(3);
         assert_eq!(r.header, Rect::new(area.x, area.y, w, 1), "header 1 w={w}");
         assert_eq!(
             r.activity,
-            Rect::new(area.x, area.y + 1 + mid_h, w, 8),
-            "activity 8 w={w}"
+            Rect::new(area.x, area.y + 1 + mid_h, w, 3),
+            "activity 3 w={w}"
         );
         assert_eq!(
             r.list,
@@ -307,7 +306,7 @@ fn bundle_register() -> Model {
         ],
         raw: 2,
         body: String::new(),
-        before: BTreeMap::new(),
+        before: policy::Base::default(),
     });
     m
 }
@@ -329,9 +328,9 @@ fn T_TUI_PAYLOAD() {
         got,
         vec![
             ("account_id".to_string(), "acct".to_string()),
-            ("api_token".to_string(), "tok".to_string()),
+            ("api_token".to_string(), "  tok  ".to_string()),
         ],
-        "schema order, trimmed, and only what the schema names"
+        "schema order, exact secret bytes, and only what the schema names"
     );
     assert!(
         got.iter().all(|(k, _)| k != "zone_id"),
@@ -696,7 +695,7 @@ fn fused_register() -> Model {
         ],
         raw: 6,
         body: String::new(),
-        before: BTreeMap::new(),
+        before: policy::Base::default(),
     });
     m
 }
@@ -1004,4 +1003,57 @@ fn T_TUI_EMPTY_TEACHES() {
     let (_, text) = render(&m, 100, 24);
     assert!(text.contains("nothing matches"));
     assert!(text.contains("Esc"), "and which key undoes it");
+}
+
+#[test]
+fn pasted_text_never_executes_register_commands() {
+    let mut model = Model::new();
+    model.handle(Event::Paste("aqd\n".into()));
+    assert!(!model.quit());
+    assert!(model.is_idle());
+    model.handle(Event::Key('a'));
+    model.handle(Event::Tab);
+    model.handle(Event::Paste("  exact\n\tvalue  ".into()));
+    assert_eq!(
+        model.form().unwrap().value_pairs()[0].1,
+        "  exact\n\tvalue  "
+    );
+    assert!(!model.quit());
+}
+
+#[test]
+fn custom_bundle_form_keeps_fields_and_rejects_duplicate_names() {
+    let mut model = Model::new();
+    model.handle(Event::Key('b'));
+    assert!(model.form().unwrap().custom);
+    model.handle(Event::Paste("prod/custom".into()));
+    model.handle(Event::Tab);
+    model.handle(Event::Paste("client_id".into()));
+    model.handle(Event::Tab);
+    model.handle(Event::Paste("  id  ".into()));
+    model.handle(Event::AddField);
+    model.handle(Event::Paste("client_id".into()));
+    model.handle(Event::Tab);
+    model.handle(Event::Paste("another".into()));
+    model.handle(Event::Enter);
+    let form = model.form().expect("invalid submission keeps the form");
+    assert_eq!(form.error.as_deref(), Some("field names must be unique"));
+    assert_eq!(form.fields[2].input.text(), "  id  ");
+}
+
+#[test]
+fn provider_picker_searches_whole_names_and_backspace_recovers() {
+    let mut model = Model::new();
+    model.handle(Event::Key('p'));
+    for c in "github".chars() {
+        model.handle(Event::Key(c));
+    }
+    assert_eq!(model.picker_schemas().len(), 1);
+    model.handle(Event::Key('z'));
+    assert!(model.picker_schemas().is_empty());
+    model.handle(Event::Enter);
+    assert!(model.picker().is_some());
+    model.handle(Event::Backspace);
+    model.handle(Event::Enter);
+    assert_eq!(model.form().unwrap().provider.as_deref(), Some("github"));
 }

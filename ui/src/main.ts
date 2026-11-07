@@ -549,6 +549,12 @@ function boot(root: HTMLElement): void {
     globalThis.history.replaceState(null, "", bootPath);
   }
   const state = freshState(bootPath, code, eph);
+  const signin = new URLSearchParams(globalThis.location.search).get("signin");
+  if (signin === "failed" || signin === "unavailable") {
+    state.error.set(signin === "failed"
+      ? "Identity verification did not complete. Try signing in again."
+      : "Your identity provider is unavailable. Try again shortly.");
+  }
   mounted = root;
   state.path.subscribe(() => {
     render(state);
@@ -573,7 +579,7 @@ function boot(root: HTMLElement): void {
       return;
     }
     const href = a.getAttribute("href");
-    if (!href || href.startsWith("http") || href.startsWith("mailto:") || href.startsWith("#")) {
+    if (!href || href.startsWith("/api/") || href.startsWith("http") || href.startsWith("mailto:") || href.startsWith("#")) {
       return;
     }
     ev.preventDefault();

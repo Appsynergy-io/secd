@@ -12,11 +12,13 @@ pub mod auth_routes;
 pub(crate) mod db;
 pub mod device;
 pub mod headers;
+pub mod oidc;
 pub mod providers_api;
 pub mod sessions;
 pub mod state;
 pub mod static_ui;
 pub mod tls;
+pub mod upstream;
 pub mod vault;
 
 pub use state::AppState;
@@ -29,6 +31,8 @@ pub fn app(state: AppState) -> Router {
         .merge(vault::router())
         .merge(providers_api::router())
         .merge(audit::router())
+        .merge(oidc::router())
+        .merge(upstream::router())
         .merge(static_ui::router())
         .fallback(fallback)
         .with_state(state.clone())

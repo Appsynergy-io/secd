@@ -52,7 +52,21 @@ pub async fn gate(State(state): State<AppState>, req: Request<Body>, next: Next)
     }
 
     let req = if method == Method::POST || method == Method::PUT {
-        if !is_json_content_type(req.headers()) {
+        let oauth_form = matches!(
+            path.as_str(),
+            "/api/v1/device/start" | "/api/v1/device/poll"
+        ) && req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            });
+        if !oauth_form && !is_json_content_type(req.headers()) {
             return finish(&path, json_status(StatusCode::BAD_REQUEST, "content-type"));
         }
         let limit = body_limit(&path);
@@ -114,7 +128,7 @@ fn apply_security_headers(path: &str, res: &mut Response) {
 }
 
 pub(crate) fn content_type_for(path: &str) -> &'static str {
-    if path.starts_with("/api/") {
+    if path.starts_with("/api/") || path.starts_with("/.well-known/") {
         return "application/json; charset=UTF-8";
     }
     match extension(path) {
@@ -217,6 +231,8 @@ fn rate_limited_path(path: &str) -> bool {
             | "/api/auth/passkey/register/finish"
             | "/api/auth/passkey/login/start"
             | "/api/auth/passkey/login/finish"
+            | "/api/auth/oidc/start"
+            | "/api/auth/oidc/callback"
     )
 }
 

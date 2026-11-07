@@ -25,8 +25,7 @@ pub fn run() -> anyhow::Result<()> {
     crate::policy::check_with_collision(&specs)?;
     let unlocked = crate::policy::require_unlocked()?;
     let entries = crate::policy::load_entries(&unlocked.token, &unlocked.dek)?;
-    let bundles = crate::policy::discover_bundles(&entries);
-    let extra = crate::policy::apply_with(&specs, &bundles)?;
+    let extra = crate::policy::apply_entries(&specs, &entries)?;
     let mut redact = crate::policy::redact_values(&entries);
     redact.extend(crate::policy::env_values(&extra));
     exec(&cmd, extra, redact)

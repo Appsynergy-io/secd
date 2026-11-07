@@ -995,7 +995,7 @@ esac
 "#;
 
 const VAULT_PY: &str = r#"
-import json, os, ssl, sys, traceback
+import hashlib, json, os, ssl, sys, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 CERT, KEY, PUT_LOG, STATE, CLOBBER = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
@@ -1006,6 +1006,11 @@ def load():
             return json.load(f)
     except Exception:
         return {"entries": []}
+
+def revision(doc):
+    # Any stable digest of the stored rows: the client only echoes it back.
+    rows = sorted(doc.get("entries", []), key=lambda e: e.get("name", ""))
+    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
 
 def store(doc):
     tmp = STATE + ".tmp"
@@ -1042,13 +1047,15 @@ class H(BaseHTTPRequestHandler):
             H.fail_get = None
             self._send(code, b'{"error":"unauthorized"}')
             return
-        # The real route returns a version per entry, which PUT then rejects.
+        # The real route returns a version per entry, which PUT then rejects,
+        # and the revision every PUT must build on.
+        doc = load()
         rows = []
-        for e in load().get("entries", []):
+        for e in doc.get("entries", []):
             row = dict(e)
             row["version"] = 1
             rows.append(row)
-        self._send(200, json.dumps({"entries": rows}).encode())
+        self._send(200, json.dumps({"entries": rows, "revision": revision(doc)}).encode())
 
     def do_PUT(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -1057,23 +1064,33 @@ class H(BaseHTTPRequestHandler):
             doc = json.loads(raw.decode())
         except Exception:
             doc = {}
+        if any(k not in ("entries", "base") for k in doc):
+            self._send(400, b'{"error":"plaintext"}')
+            return
         entries = doc.get("entries", [])
         allowed = ("name", "ciphertext", "meta")
         for e in entries:
             if not isinstance(e, dict) or any(k not in allowed for k in e):
                 self._send(400, b'{"error":"plaintext"}')
                 return
+        if "base" not in doc:
+            self._send(428, b'{"error":"base"}')
+            return
+        if doc["base"] != revision(load()):
+            self._send(409, b'{"error":"conflict"}')
+            return
         store({"entries": entries})
         with open(PUT_LOG, "ab") as f:
             f.write(b"PUT\n")
-        # A whole-vault save landing right after this one. PUT takes no version,
-        # so the last writer wins and only a read-back notices.
+        written = revision({"entries": entries})
+        # A whole-vault save landing right after this one, built on the
+        # revision this one wrote: only a read-back notices.
         if os.path.exists(CLOBBER):
             with open(CLOBBER) as f:
                 store(json.load(f))
         if os.path.exists(STATE + ".getfail"):
             H.fail_get = 401
-        self._send(200, b'{"ok":true}')
+        self._send(200, json.dumps({"ok": True, "revision": written}).encode())
 
 class S(HTTPServer):
     def get_request(self):
@@ -1098,31 +1115,41 @@ httpd.serve_forever()
 "#;
 
 const RESTORE_PY: &str = r#"
-import socket, ssl, sys
+import json, socket, ssl, sys
 
 ca, port = sys.argv[1], int(sys.argv[2])
 body = sys.stdin.buffer.read()
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ctx.minimum_version = ssl.TLSVersion.TLSv1_3
 ctx.load_verify_locations(ca)
-raw = socket.create_connection(("127.0.0.1", port), timeout=10)
-sock = ctx.wrap_socket(raw, server_hostname="secd.imabee.com")
-head = (
-    "PUT /api/v1/vault HTTP/1.1\r\n"
-    "Host: secd.imabee.com\r\n"
-    "Authorization: Bearer t9-token\r\n"
-    "Content-Type: application/json\r\n"
-    f"Content-Length: {len(body)}\r\n"
-    "Connection: close\r\n\r\n"
-).encode()
-sock.sendall(head + body)
-buf = b""
-while True:
-    chunk = sock.recv(65536)
-    if not chunk:
-        break
-    buf += chunk
-print(buf.split(b"\r\n", 1)[0].decode().split(" ")[1])
+
+def call(method, payload=b""):
+    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock = ctx.wrap_socket(raw, server_hostname="secd.imabee.com")
+    head = (
+        f"{method} /api/v1/vault HTTP/1.1\r\n"
+        "Host: secd.imabee.com\r\n"
+        "Authorization: Bearer t9-token\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    sock.sendall(head + payload)
+    buf = b""
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    status = buf.split(b"\r\n", 1)[0].decode().split(" ")[1]
+    return status, buf.split(b"\r\n\r\n", 1)[-1]
+
+# A restore is a deliberate overwrite: name the revision being overwritten.
+_, current = call("GET")
+doc = json.loads(body)
+doc["base"] = json.loads(current)["revision"]
+status, _ = call("PUT", json.dumps(doc).encode())
+print(status)
 "#;
 
 const PTY_PY: &str = r#"

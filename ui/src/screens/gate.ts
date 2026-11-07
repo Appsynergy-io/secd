@@ -83,7 +83,12 @@ export type GateCopy = {
   secondary: string | undefined;
 };
 
+type IdentityProvider = { name: string; required: boolean; verifiedEmail?: string };
+
 type Store = {
+  identity?: IdentityProvider;
+  identityLoaded: boolean;
+  identityError: boolean;
   root: HTMLElement;
   host: Host;
   password: Signal<string>;
@@ -276,13 +281,49 @@ export function renderGate(state: AppState, root: HTMLElement, host: Host): void
       confirm: "",
       shown: false,
       focus: undefined,
+      identityLoaded: false,
+      identityError: false,
     };
     stores.set(state, store);
+    void loadIdentity(state, store);
   } else {
     store.root = root;
     store.host = host;
   }
   paint(state, store);
+}
+
+async function loadIdentity(state: AppState, store: Store): Promise<void> {
+  try {
+    const response = await req("GET", "/api/auth/oidc");
+    if (stores.get(state) !== store) return;
+    const data = response.data as { enabled?: unknown; name?: unknown; required?: unknown; verified_email?: unknown } | null;
+    if (response.status === 404 || (response.status === 200 && data?.enabled === false)) {
+      delete store.identity;
+    } else if (response.status === 200 && data?.enabled === true && typeof data.name === "string" && typeof data.required === "boolean") {
+      store.identity = { name: data.name, required: data.required };
+      if (typeof data.verified_email === "string" && emailOk(data.verified_email)) {
+        store.identity.verifiedEmail = data.verified_email;
+        state.email.set(data.verified_email);
+        state.different.set(true);
+        state.method.set(undefined);
+      }
+    } else { store.identityError = true; }
+  } catch {
+    if (stores.get(state) !== store) return;
+    store.identityError = true;
+  }
+  store.identityLoaded = true;
+  paint(state, store);
+}
+
+export function providerSignInUrl(code: string, eph: string): string {
+  const target = code === "" ? "/" : `/device?${new URLSearchParams({ code, eph }).toString()}`;
+  return `/api/auth/oidc/start?${new URLSearchParams({ return_to: target }).toString()}`;
+}
+
+function providerNeeded(state: AppState, store: Store | undefined): boolean {
+  return store?.identity?.required === true && store.identity.verifiedEmail !== state.email.get();
 }
 
 function passwordField(
@@ -349,7 +390,7 @@ function paint(state: AppState, store: Store): void {
   });
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    if (state.pending.get()) {
+    if (state.pending.get() || providerNeeded(state, store)) {
       return;
     }
     if (view.mode === "passkey") {
@@ -363,6 +404,15 @@ function paint(state: AppState, store: Store): void {
     el("div", { class: "gate-sub" }, [copy.sub]),
   );
 
+  if (store.identity) {
+    const identity = store.identity;
+    const verified = identity.verifiedEmail !== undefined && identity.verifiedEmail === state.email.get();
+    const link = el("a", { class: "btn btn-lg btn-block", href: providerSignInUrl(state.userCode.get(), state.eph.get()), "data-action": "provider-signin" }, [verified ? `Change ${identity.name} account` : `Continue with ${identity.name}`]);
+    form.append(el("div", { class: "gate-field" }, [link, el("div", { class: "gate-sub", "data-provider-status": "" }, [verified ? "Identity verified. Unlock your vault with your passkey or password." : identity.required ? "Verify your identity first, then unlock your vault." : "Use your identity provider, then unlock your vault."])]));
+  }
+  if (store.identityError) {
+    form.append(el("div", { class: "alert gate-alert", role: "alert" }, ["Identity-provider settings could not be loaded. Reload to try again."]));
+  }
   if (view.showEmail) {
     const email = el("input", {
       id: "email",
@@ -449,7 +499,7 @@ function paint(state: AppState, store: Store): void {
     },
     [copy.primary],
   );
-  primary.disabled = pending;
+  primary.disabled = pending || providerNeeded(state, store);
   form.append(primary);
 
   if (view.alternate !== undefined && copy.secondary !== undefined) {
@@ -464,7 +514,7 @@ function paint(state: AppState, store: Store): void {
       },
       [copy.secondary],
     );
-    secondary.disabled = pending;
+    secondary.disabled = pending || providerNeeded(state, store);
     secondary.addEventListener("click", () => {
       if (state.pending.get()) {
         return;
@@ -617,6 +667,7 @@ async function passwordLogin(state: AppState, email: string, password: string): 
 
 /** The primary button in password or register mode; resolves the method first when unknown. */
 export async function onContinue(state: AppState, host: Host): Promise<void> {
+  if (providerNeeded(state, stores.get(state))) return;
   if (state.pending.get()) {
     return;
   }
@@ -776,6 +827,7 @@ async function passkeyLogin(state: AppState, email: string): Promise<boolean> {
 
 /** The passkey button: registers the first passkey when the vault is new, else signs in. */
 export async function onPasskey(state: AppState, host: Host): Promise<void> {
+  if (providerNeeded(state, stores.get(state))) return;
   if (state.pending.get()) {
     return;
   }
